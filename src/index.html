@@ -54,6 +54,15 @@
     <span>Click a tile to split it vertically · Hold <kbd>Shift</kbd> to split horizontally · Drag dividers to resize</span>
   </div>
 
+  <!-- Persistent legend while editing: always tells the user how splits work -->
+  <div id="edit-legend" aria-hidden="true">
+    <span class="leg"><span class="chip vert">▮</span><kbd>Click</kbd> split left | right</span>
+    <span class="leg"><span class="chip horiz">▬</span><kbd>Shift</kbd>+Click split top / bottom</span>
+    <span class="leg"><span class="chip">↔</span>Drag a divider to resize</span>
+    <span class="leg"><span class="chip danger">✕</span>Close / merge a tile</span>
+    <span class="leg"><kbd>Esc</kbd> done editing</span>
+  </div>
+
   <!-- Transient toast (e.g. when spanning all displays) -->
   <div id="toast" class="hintbox" aria-hidden="true"></div>
 

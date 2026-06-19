@@ -163,18 +163,41 @@ body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.5)
   text-align: center;
   padding: 18px;
 }
-.tile-empty .big { font-size: 26px; opacity: 0.6; }
+.tile-empty .big { font-size: 30px; opacity: 0.55; }
+.tile-empty .empty-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.tile-empty .empty-sub { font-size: 12px; color: var(--muted); }
+.tile-empty .empty-formats { font-size: 11px; opacity: 0.6; }
 .tile-empty .assign {
   -webkit-app-region: no-drag;
   background: var(--accent);
   color: #fff;
   border: none;
   border-radius: 8px;
-  padding: 8px 14px;
+  padding: 9px 16px;
   cursor: pointer;
   font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(91,140,255,0.35);
 }
-.tile-empty .assign:hover { filter: brightness(1.08); }
+.tile-empty .assign:hover { filter: brightness(1.1); }
+
+/* Drag-and-drop affordance: a tile lights up when a folder hovers over it. */
+.node-leaf.drop-target { box-shadow: inset 0 0 0 3px var(--accent-2); }
+.node-leaf.drop-target::after {
+  content: "⬇  Drop folder to play here";
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent-2);
+  background: rgba(56,224,196,0.12);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
 
 /* Per-tile control strip (auto-hides with the rest of the chrome). */
 .tile-toolbar {
@@ -344,6 +367,55 @@ body.grid-on #grid-overlay { display: block; }
 #toast { top: 110px; }
 #toast strong { color: var(--accent-2); }
 body.span-all #toast { top: calc(var(--ui-top, 0px) + 110px); }
+
+/* ----------------------------------------------------- Edit-mode legend bar */
+/* Always visible while editing so the user knows exactly how splits work. */
+#edit-legend {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translate(-50%, 16px);
+  z-index: 71;
+  display: none;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: 92vw;
+  padding: 9px 16px;
+  background: rgba(16,17,22,0.95);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 12px 34px rgba(0,0,0,0.55);
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+#edit-legend.show { display: flex; opacity: 1; transform: translate(-50%, 0); }
+body.span-all #edit-legend {
+  left: calc(var(--ui-left, 0px) + var(--ui-width, 100vw) / 2);
+}
+#edit-legend .leg {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+#edit-legend .chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--accent);
+  font-size: 13px;
+}
+#edit-legend .chip.horiz { color: var(--accent-2); }
+#edit-legend .chip.danger { color: var(--danger); border-color: rgba(255,91,110,0.4); }
 kbd {
   background: var(--panel-2);
   border: 1px solid var(--line);

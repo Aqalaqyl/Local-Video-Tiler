@@ -10,6 +10,11 @@ const VIDEO_EXTENSIONS = new Set([
   '.wmv', '.flv', '.mpg', '.mpeg', '.3gp', '.ts', '.m2ts'
 ]);
 
+// Tiles auto-play continuously without any user gesture, so opt out of the
+// default Chromium autoplay gating — otherwise restored layouts would sit
+// paused on a black frame until clicked.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
 
@@ -149,6 +154,18 @@ ipcMain.handle('media:readFolder', async (_event, folderPath) => {
     return { folder: folderPath, files };
   } catch (err) {
     return { folder: folderPath, files: [], error: String(err && err.message ? err.message : err) };
+  }
+});
+
+// Resolve a dropped path to the folder that should feed a tile: a directory is
+// used as-is, a dropped file falls back to its containing directory.
+ipcMain.handle('media:resolveDir', async (_event, p) => {
+  if (!p) return null;
+  try {
+    const stat = await fs.promises.stat(p);
+    return stat.isDirectory() ? p : path.dirname(p);
+  } catch (_) {
+    return null;
   }
 });
 
