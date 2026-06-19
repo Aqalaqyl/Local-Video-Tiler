@@ -5,3 +5,6 @@ out/
 npm-debug.log*
 .DS_Store
 .cache/
+
+# Local verification/screenshot artifacts
+smoke-shot.png
