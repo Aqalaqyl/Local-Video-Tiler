@@ -1,0 +1,28 @@
+{
+  "name": "local-video-tiler",
+  "version": "1.0.0",
+  "description": "Local desktop app for tiled video playback from folders.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aqalaqyl/Local-Video-Tiler.git"
+  },
+  "keywords": [
+    "electron",
+    "video",
+    "tiling-window",
+    "media"
+  ],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Aqalaqyl/Local-Video-Tiler/issues"
+  },
+  "homepage": "https://github.com/Aqalaqyl/Local-Video-Tiler#readme",
+  "devDependencies": {
+    "electron": "^42.4.1"
+  }
+}
