@@ -43,11 +43,11 @@ const settings = {
   cellSize: 80
 };
 
-let root = makeLeaf();
-let focusedLeaf = null;
-
 let uidCounter = 1;
 function uid() { return 'n' + (uidCounter++); }
+
+let root = makeLeaf();
+let focusedLeaf = null;
 
 // --------------------------------------------------------------- Node helpers
 function makeLeaf() {
@@ -192,6 +192,7 @@ function ensureLeafEl(leaf) {
 }
 
 function updateLeaf(leaf) {
+  if (!leaf.refs) return;
   const { refs, video } = leaf;
   const hasFiles = leaf.files.length > 0;
   refs.empty.style.display = leaf.folder ? 'none' : 'flex';
