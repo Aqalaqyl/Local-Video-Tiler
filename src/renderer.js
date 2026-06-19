@@ -22,6 +22,7 @@ const stage = document.getElementById('stage');
 const preview = document.getElementById('split-preview');
 const gridOverlay = document.getElementById('grid-overlay');
 const editHint = document.getElementById('edit-hint');
+const toast = document.getElementById('toast');
 const displayPill = document.getElementById('display-pill');
 
 const btnEdit = document.getElementById('btn-edit');
@@ -445,19 +446,53 @@ function updatePreview(x, y, shift) {
   preview.classList.add('visible');
 
   const line = preview.querySelector('.split-line');
+  const badge = preview.querySelector('.split-badge');
+  const regionA = preview.querySelector('.region-a');
+  const regionB = preview.querySelector('.region-b');
+  const labelA = regionA.querySelector('.region-label');
+  const labelB = regionB.querySelector('.region-label');
+
   if (shift) {
     preview.classList.add('horizontal');
     preview.classList.remove('vertical');
     const localY = snapAxis(y, rect.top, rect.height);
+    const pct = clamp(localY / rect.height, 0.05, 0.95);
+    const aPct = Math.round(pct * 100);
+
     line.style.top = localY + 'px';
     line.style.left = '';
+
+    setRegion(regionA, { left: '0', right: '0', top: '0', bottom: 'auto', width: 'auto', height: localY + 'px' });
+    setRegion(regionB, { left: '0', right: '0', top: localY + 'px', bottom: '0', width: 'auto', height: 'auto' });
+    labelA.textContent = aPct + '%';
+    labelB.textContent = 'new tile · ' + (100 - aPct) + '%';
+
+    badge.textContent = '▬ Horizontal split (top / bottom)';
+    badge.style.left = (rect.width / 2) + 'px';
+    badge.style.top = localY + 'px';
   } else {
     preview.classList.add('vertical');
     preview.classList.remove('horizontal');
     const localX = snapAxis(x, rect.left, rect.width);
+    const pct = clamp(localX / rect.width, 0.05, 0.95);
+    const aPct = Math.round(pct * 100);
+
     line.style.left = localX + 'px';
     line.style.top = '';
+
+    setRegion(regionA, { left: '0', top: '0', bottom: '0', right: 'auto', width: localX + 'px', height: 'auto' });
+    setRegion(regionB, { left: localX + 'px', top: '0', bottom: '0', right: '0', width: 'auto', height: 'auto' });
+    labelA.textContent = aPct + '%';
+    labelB.textContent = 'new tile · ' + (100 - aPct) + '%';
+
+    badge.textContent = '▮ Vertical split (left | right) · ⇧Shift = horizontal';
+    badge.style.left = localX + 'px';
+    badge.style.top = '24px';
   }
+}
+
+function setRegion(el, props) {
+  for (const k in props) el.style[k] = props[k];
 }
 
 function hidePreview() {
@@ -654,10 +689,44 @@ btnMin.addEventListener('click', () => window.api.minimize());
 btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
 
-window.api.onWindowState((state) => {
+function applyWindowState(state) {
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
-});
+  document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
+
+  const rootStyle = document.documentElement.style;
+  const wasSpanning = document.body.dataset.spanning === '1';
+  if (state.spanningAllDisplays && state.windowBounds && state.primaryBounds) {
+    // Offset of the primary display inside the (multi-monitor) window so the
+    // chrome is always drawn on a real, fully-visible screen.
+    const left = state.primaryBounds.x - state.windowBounds.x;
+    const top = state.primaryBounds.y - state.windowBounds.y;
+    rootStyle.setProperty('--ui-left', left + 'px');
+    rootStyle.setProperty('--ui-top', Math.max(0, top) + 'px');
+    rootStyle.setProperty('--ui-width', state.primaryBounds.width + 'px');
+    document.body.dataset.spanning = '1';
+    // Surface the chrome immediately so the user can see where controls went.
+    wake();
+    if (!wasSpanning) spanToast(state.displayCount);
+  } else {
+    rootStyle.removeProperty('--ui-left');
+    rootStyle.removeProperty('--ui-top');
+    rootStyle.removeProperty('--ui-width');
+    document.body.dataset.spanning = '0';
+  }
+}
+
+let spanToastTimer = null;
+function spanToast(count) {
+  toast.innerHTML =
+    '<strong>Spanning ' + (count || 'all') + ' displays</strong>' +
+    '<span>Controls &amp; edit tools are on your primary display · <kbd>A</kbd> to exit · <kbd>E</kbd> to edit tiles</span>';
+  toast.classList.add('show');
+  clearTimeout(spanToastTimer);
+  spanToastTimer = setTimeout(() => toast.classList.remove('show'), 5000);
+}
+
+window.api.onWindowState(applyWindowState);
 window.api.onDisplayChanged(() => refreshDisplays());
 
 window.addEventListener('resize', () => { if (settings.editMode) hidePreview(); });

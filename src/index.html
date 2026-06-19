@@ -39,16 +39,23 @@
   <!-- Root tiling surface -->
   <main id="stage"></main>
 
-  <!-- Split preview shown while hovering in edit mode -->
+  <!-- Split preview shown while hovering in edit mode.
+       The two shaded regions show exactly how the tile will be divided. -->
   <div id="split-preview" aria-hidden="true">
+    <div class="region region-a"><span class="region-label"></span></div>
+    <div class="region region-b"><span class="region-label new">new tile</span></div>
     <div class="split-line"></div>
+    <div class="split-badge"></div>
   </div>
 
   <!-- Transient hint shown when entering edit mode -->
-  <div id="edit-hint" aria-hidden="true">
+  <div id="edit-hint" class="hintbox" aria-hidden="true">
     <strong>Edit mode</strong>
     <span>Click a tile to split it vertically · Hold <kbd>Shift</kbd> to split horizontally · Drag dividers to resize</span>
   </div>
+
+  <!-- Transient toast (e.g. when spanning all displays) -->
+  <div id="toast" class="hintbox" aria-hidden="true"></div>
 
   <script src="renderer.js"></script>
 </body>

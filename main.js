@@ -59,10 +59,16 @@ function createWindow() {
 
 function sendWindowState() {
   if (!mainWindow) return;
+  const primary = screen.getPrimaryDisplay();
   mainWindow.webContents.send('window:state', {
     fullScreen: mainWindow.isFullScreen(),
     spanningAllDisplays,
-    maximized: mainWindow.isMaximized()
+    maximized: mainWindow.isMaximized(),
+    // Geometry the renderer uses to keep controls on a real, visible monitor
+    // (the primary display) when the window spans every display at once.
+    windowBounds: mainWindow.getBounds(),
+    primaryBounds: primary.bounds,
+    displayCount: screen.getAllDisplays().length
   });
 }
 
@@ -95,6 +101,8 @@ function spanAllDisplays() {
   const target = getAllDisplaysBounds();
   mainWindow.setBounds(target);
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  mainWindow.setVisibleOnAllWorkspaces(true);
+  mainWindow.focus();
   spanningAllDisplays = true;
   sendWindowState();
 }
@@ -102,6 +110,7 @@ function spanAllDisplays() {
 function restoreFromSpan() {
   if (!mainWindow) return;
   mainWindow.setAlwaysOnTop(false);
+  mainWindow.setVisibleOnAllWorkspaces(false);
   if (savedBounds) mainWindow.setBounds(savedBounds);
   spanningAllDisplays = false;
   sendWindowState();
@@ -181,7 +190,14 @@ app.whenReady().then(() => {
 
   // Re-broadcast display changes so the renderer can update its info pill.
   const broadcastDisplays = () => {
-    if (mainWindow) mainWindow.webContents.send('display:changed');
+    if (!mainWindow) return;
+    // If we're spanning every display, re-fit to the new arrangement so the
+    // window keeps covering all monitors after a hot-plug / resolution change.
+    if (spanningAllDisplays) {
+      mainWindow.setBounds(getAllDisplaysBounds());
+    }
+    mainWindow.webContents.send('display:changed');
+    sendWindowState();
   };
   screen.on('display-added', broadcastDisplays);
   screen.on('display-removed', broadcastDisplays);
