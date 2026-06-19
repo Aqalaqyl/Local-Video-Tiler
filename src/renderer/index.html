@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; media-src 'self' file:; style-src 'self' 'unsafe-inline'; script-src 'self';">
+    <title>Local Video Tiler</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main id="app" class="app shell-visible">
+      <section id="toolbar" class="toolbar" aria-label="Layout controls">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <span>Local Video Tiler</span>
+        </div>
+        <button id="editModeToggle" class="control primary" type="button" aria-pressed="false">Edit layout</button>
+        <button id="gridToggle" class="control" type="button" aria-pressed="false">Grid</button>
+        <button id="snapToggle" class="control" type="button" aria-pressed="false">Snap</button>
+        <label class="range-control">
+          Grid
+          <input id="gridSize" type="range" min="2" max="12" value="4">
+          <span id="gridSizeValue">4</span>
+        </label>
+        <button id="spanDisplaysToggle" class="control" type="button" aria-pressed="false">Span all displays</button>
+        <button id="resetLayout" class="control danger" type="button">Reset</button>
+      </section>
+
+      <section id="layoutRoot" class="layout-root" aria-label="Media tile layout"></section>
+      <section id="gridOverlay" class="grid-overlay" aria-hidden="true"></section>
+
+      <aside id="hint" class="hint" aria-live="polite">
+        Edit mode: click a tile to split vertically. Hold Shift and click to split horizontally.
+      </aside>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
