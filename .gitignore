@@ -8,3 +8,4 @@ npm-debug.log*
 
 # Local verification/screenshot artifacts
 smoke-shot.png
+shot-*.png

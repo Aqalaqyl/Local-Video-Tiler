@@ -14,8 +14,11 @@ nothing is uploaded anywhere.
   tiles, just like a tiling window manager.
 - **Edit mode (locked behind a toggle)** — splitting is only possible while edit
   mode is active, so normal viewing never gets disturbed.
-  - **Live split preview** — while editing, a glowing line follows your cursor
-    showing exactly where and how the tile will split.
+  - **Live split preview** — while editing, the hovered tile shows exactly how
+    it will be divided: the part that keeps the current content is tinted blue,
+    the brand-new tile is shown as a hatched teal region, a glowing line marks
+    the split, each side is labelled with its resulting percentage, and a badge
+    names the direction (vertical / horizontal). The split follows your cursor.
   - **Left click → vertical split** (left | right).
   - **Shift + left click → horizontal split** (top / bottom).
   - The split happens **at the cursor position**, so you choose the proportions
@@ -26,6 +29,11 @@ nothing is uploaded anywhere.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
   - **Span / fullscreen across ALL displays at once** (`A`).
+  - When spanning every display, the control bar and edit tools are **pinned to
+    your primary monitor** so they're always fully visible (never stranded in a
+    dead zone between screens), and you can keep splitting/editing tiles right
+    across the whole multi-monitor canvas. Hot-plugging or rearranging monitors
+    re-fits the span automatically.
 - **Minimal, auto-hiding interface** — the top bar, tile controls and even the
   mouse cursor fade away when you stop interacting, leaving a clean viewing
   surface. They reappear the moment you move the mouse.
