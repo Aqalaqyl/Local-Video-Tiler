@@ -22,6 +22,7 @@ const stage = document.getElementById('stage');
 const preview = document.getElementById('split-preview');
 const gridOverlay = document.getElementById('grid-overlay');
 const editHint = document.getElementById('edit-hint');
+const editLegend = document.getElementById('edit-legend');
 const toast = document.getElementById('toast');
 const displayPill = document.getElementById('display-pill');
 
@@ -145,9 +146,10 @@ function ensureLeafEl(leaf) {
   empty.className = 'tile-empty';
   empty.innerHTML = `
     <div class="big">＋</div>
-    <div>No folder assigned</div>
-    <div style="font-size:11px;opacity:0.7">Supported: ${VIDEO_EXTS_HINT}</div>
-    <button class="assign" type="button">Choose media folder…</button>`;
+    <div class="empty-title">No folder assigned</div>
+    <div class="empty-sub">Drag a folder here · double-click · or use the button</div>
+    <button class="assign" type="button">📁 Choose media folder…</button>
+    <div class="empty-formats">Plays random videos on loop · Supports ${VIDEO_EXTS_HINT}</div>`;
 
   const toolbar = document.createElement('div');
   toolbar.className = 'tile-toolbar';
@@ -245,13 +247,16 @@ function wireLeafEvents(leaf) {
 
   video.addEventListener('play', () => { refs.play.textContent = '⏸'; });
   video.addEventListener('pause', () => { refs.play.textContent = '▶'; });
+  video.addEventListener('playing', () => { leaf.errCount = 0; });
   video.addEventListener('timeupdate', () => {
     if (video.duration) {
       refs.seek.value = String(Math.round((video.currentTime / video.duration) * 1000));
       refs.time.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
     }
   });
-  video.addEventListener('ended', () => step(leaf, 1, true));
+  // Loop the folder forever in random order; skip past unplayable files.
+  video.addEventListener('ended', () => playRandom(leaf));
+  video.addEventListener('error', () => recoverLeaf(leaf));
 
   // Click on the tile body: split (edit mode) or focus (view mode).
   el.addEventListener('click', (e) => {
@@ -263,6 +268,41 @@ function wireLeafEvents(leaf) {
       setFocus(leaf);
     }
   });
+
+  // Double-click anywhere on the tile is a fast way to (re)assign a folder.
+  el.addEventListener('dblclick', (e) => {
+    if (e.target.closest('.tile-toolbar')) return;
+    if (settings.editMode) return; // editing uses clicks to split
+    assignFolder(leaf);
+  });
+
+  // Drag a folder of videos from the OS straight onto a tile to assign it.
+  el.addEventListener('dragenter', (e) => { e.preventDefault(); el.classList.add('drop-target'); });
+  el.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    el.classList.add('drop-target');
+  });
+  el.addEventListener('dragleave', (e) => {
+    if (e.target === el) el.classList.remove('drop-target');
+  });
+  el.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    el.classList.remove('drop-target');
+    const folder = await resolveDroppedFolder(e);
+    if (folder) await loadFolder(leaf, folder, -1, true);
+    else showToast('<strong>Drop a folder of videos</strong><span>Drag a folder onto a tile to play it</span>');
+  });
+}
+
+/** Turn a drop event into the folder path that should feed the tile. */
+async function resolveDroppedFolder(e) {
+  const dt = e.dataTransfer;
+  if (!dt || !dt.files || !dt.files.length) return null;
+  const p = window.api.pathForFile(dt.files[0]);
+  if (!p) return null;
+  return window.api.resolveDir(p);
 }
 
 // ============================================================================
@@ -271,17 +311,56 @@ function wireLeafEvents(leaf) {
 async function assignFolder(leaf) {
   const folder = await window.api.pickFolder();
   if (!folder) return;
-  await loadFolder(leaf, folder, 0, true);
+  // -1 → start on a random video in the folder.
+  await loadFolder(leaf, folder, -1, true);
 }
 
-async function loadFolder(leaf, folder, index = 0, autoplay = false) {
+async function loadFolder(leaf, folder, index = -1, autoplay = true) {
   const res = await window.api.readFolder(folder);
   leaf.folder = res.folder;
   leaf.files = res.files || [];
-  leaf.index = clamp(index, 0, Math.max(0, leaf.files.length - 1));
+  leaf.errCount = 0;
+  leaf.userPaused = false;
+  if (leaf.files.length === 0) {
+    leaf.index = 0;
+    loadCurrent(leaf, false);
+    updateLeaf(leaf);
+    saveState();
+    return;
+  }
+  leaf.index = (index == null || index < 0)
+    ? pickRandomIndex(leaf)
+    : clamp(index, 0, leaf.files.length - 1);
   loadCurrent(leaf, autoplay);
   updateLeaf(leaf);
   saveState();
+}
+
+/** Pick a random file index, avoiding an immediate repeat when possible. */
+function pickRandomIndex(leaf) {
+  const n = leaf.files.length;
+  if (n <= 1) return 0;
+  let i;
+  do { i = Math.floor(Math.random() * n); } while (i === leaf.index);
+  return i;
+}
+
+/** Jump to a random video in this tile's folder and keep it playing. */
+function playRandom(leaf) {
+  if (!leaf.files.length) return;
+  leaf.index = pickRandomIndex(leaf);
+  leaf.userPaused = false;
+  loadCurrent(leaf, true);
+  saveState();
+}
+
+/** A media error: try another random clip a bounded number of times. */
+function recoverLeaf(leaf) {
+  if (!leaf.files.length) return;
+  leaf.errCount = (leaf.errCount || 0) + 1;
+  // Stop retrying if essentially everything in the folder is unplayable.
+  if (leaf.errCount > leaf.files.length + 2) return;
+  playRandom(leaf);
 }
 
 function loadCurrent(leaf, autoplay) {
@@ -290,14 +369,14 @@ function loadCurrent(leaf, autoplay) {
   if (!current) { video.removeAttribute('src'); video.load(); return; }
   video.src = current.url;
   video.load();
-  if (autoplay) video.play().catch(() => {});
+  if (autoplay) { leaf.userPaused = false; video.play().catch(() => {}); }
   updateLeaf(leaf);
 }
 
 function togglePlay(leaf) {
   if (!leaf.files.length) { assignFolder(leaf); return; }
-  if (leaf.video.paused) leaf.video.play().catch(() => {});
-  else leaf.video.pause();
+  if (leaf.video.paused) { leaf.userPaused = false; leaf.video.play().catch(() => {}); }
+  else { leaf.userPaused = true; leaf.video.pause(); }
 }
 
 function step(leaf, dir, autoplay = false) {
@@ -306,6 +385,19 @@ function step(leaf, dir, autoplay = false) {
   loadCurrent(leaf, autoplay || !leaf.video.paused);
   saveState();
 }
+
+// Keep every assigned tile playing forever: recover from unexpected pauses,
+// errors, or a missed "ended" event so a video is always on screen.
+function playbackWatchdog() {
+  forEachLeaf(root, (leaf) => {
+    const v = leaf.video;
+    if (!v || !leaf.files.length || leaf.userPaused) return;
+    if (v.error) { recoverLeaf(leaf); return; }
+    if (v.ended) { playRandom(leaf); return; }
+    if (v.paused && v.readyState >= 2) { v.play().catch(() => {}); }
+  });
+}
+setInterval(playbackWatchdog, 1500);
 
 function fmtTime(s) {
   if (!isFinite(s)) return '0:00';
@@ -464,10 +556,10 @@ function updatePreview(x, y, shift) {
 
     setRegion(regionA, { left: '0', right: '0', top: '0', bottom: 'auto', width: 'auto', height: localY + 'px' });
     setRegion(regionB, { left: '0', right: '0', top: localY + 'px', bottom: '0', width: 'auto', height: 'auto' });
-    labelA.textContent = aPct + '%';
-    labelB.textContent = 'new tile · ' + (100 - aPct) + '%';
+    labelA.textContent = 'Keeps this tile · ' + aPct + '%';
+    labelB.textContent = 'New empty tile · ' + (100 - aPct) + '%';
 
-    badge.textContent = '▬ Horizontal split (top / bottom)';
+    badge.textContent = '▬ Horizontal split → top / bottom';
     badge.style.left = (rect.width / 2) + 'px';
     badge.style.top = localY + 'px';
   } else {
@@ -482,10 +574,10 @@ function updatePreview(x, y, shift) {
 
     setRegion(regionA, { left: '0', top: '0', bottom: '0', right: 'auto', width: localX + 'px', height: 'auto' });
     setRegion(regionB, { left: localX + 'px', top: '0', bottom: '0', right: '0', width: 'auto', height: 'auto' });
-    labelA.textContent = aPct + '%';
-    labelB.textContent = 'new tile · ' + (100 - aPct) + '%';
+    labelA.textContent = 'Keeps this tile · ' + aPct + '%';
+    labelB.textContent = 'New empty tile · ' + (100 - aPct) + '%';
 
-    badge.textContent = '▮ Vertical split (left | right) · ⇧Shift = horizontal';
+    badge.textContent = '▮ Vertical split → left | right · hold ⇧Shift for horizontal';
     badge.style.left = localX + 'px';
     badge.style.top = '24px';
   }
@@ -527,6 +619,7 @@ function setEditMode(on) {
   btnEdit.classList.toggle('active', on);
   if (!on) hidePreview();
   forEachLeaf(root, updateLeaf);
+  if (editLegend) editLegend.classList.toggle('show', on);
   if (on) {
     editHint.classList.add('show');
     clearTimeout(setEditMode._t);
@@ -610,9 +703,10 @@ function loadState() {
 
   render();
 
-  // Repopulate media for any leaf that had a folder assigned.
+  // Repopulate media for any leaf that had a folder assigned, resuming on a
+  // random clip so playback is always running after a restart.
   forEachLeaf(root, (leaf) => {
-    if (leaf.folder) loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, false);
+    if (leaf.folder) loadFolder(leaf, leaf.folder, -1, true);
   });
 }
 
@@ -650,6 +744,10 @@ function isTypingTarget(t) {
 
 document.addEventListener('mousemove', onGlobalMouseMove);
 document.addEventListener('mousedown', wake);
+
+// Prevent the window from navigating to a file when a drop misses a tile.
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => e.preventDefault());
 document.addEventListener('keydown', (e) => {
   wake();
   if (e.key === 'Shift' && settings.editMode) updatePreview(lastMouse.x, lastMouse.y, true);
@@ -717,13 +815,18 @@ function applyWindowState(state) {
 }
 
 let spanToastTimer = null;
-function spanToast(count) {
-  toast.innerHTML =
-    '<strong>Spanning ' + (count || 'all') + ' displays</strong>' +
-    '<span>Controls &amp; edit tools are on your primary display · <kbd>A</kbd> to exit · <kbd>E</kbd> to edit tiles</span>';
+function showToast(html, ms = 3000) {
+  toast.innerHTML = html;
   toast.classList.add('show');
   clearTimeout(spanToastTimer);
-  spanToastTimer = setTimeout(() => toast.classList.remove('show'), 5000);
+  spanToastTimer = setTimeout(() => toast.classList.remove('show'), ms);
+}
+function spanToast(count) {
+  showToast(
+    '<strong>Spanning ' + (count || 'all') + ' displays</strong>' +
+    '<span>Controls &amp; edit tools are on your primary display · <kbd>A</kbd> to exit · <kbd>E</kbd> to edit tiles</span>',
+    5000
+  );
 }
 
 window.api.onWindowState(applyWindowState);

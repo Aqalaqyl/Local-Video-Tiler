@@ -1,11 +1,18 @@
 'use strict';
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   // Media / folders
   pickFolder: () => ipcRenderer.invoke('dialog:pickFolder'),
   readFolder: (folderPath) => ipcRenderer.invoke('media:readFolder', folderPath),
+  resolveDir: (p) => ipcRenderer.invoke('media:resolveDir', p),
+  // Resolve the absolute path of a dropped File (webUtils is the modern API;
+  // fall back to the legacy File.path for older Electron).
+  pathForFile: (file) => {
+    try { return webUtils.getPathForFile(file); }
+    catch (_) { return file && file.path ? file.path : null; }
+  },
 
   // Displays
   getDisplayInfo: () => ipcRenderer.invoke('display:getInfo'),

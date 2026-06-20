@@ -14,18 +14,29 @@ nothing is uploaded anywhere.
   tiles, just like a tiling window manager.
 - **Edit mode (locked behind a toggle)** — splitting is only possible while edit
   mode is active, so normal viewing never gets disturbed.
+  - **Always-on legend** — while editing, a legend pinned to the bottom of the
+    screen spells out every gesture (click to split, Shift to flip the
+    direction, drag to resize, ✕ to close), so you never have to guess.
   - **Live split preview** — while editing, the hovered tile shows exactly how
-    it will be divided: the part that keeps the current content is tinted blue,
-    the brand-new tile is shown as a hatched teal region, a glowing line marks
-    the split, each side is labelled with its resulting percentage, and a badge
-    names the direction (vertical / horizontal). The split follows your cursor.
+    it will be divided: the part that keeps the current content is tinted blue
+    and labelled **“Keeps this tile · N%”**, the brand-new tile is shown as a
+    hatched teal **“New empty tile · N%”** region, a glowing line marks the
+    split, and a badge names the direction (vertical / horizontal). The split
+    follows your cursor.
   - **Left click → vertical split** (left | right).
   - **Shift + left click → horizontal split** (top / bottom).
   - The split happens **at the cursor position**, so you choose the proportions
     as you click.
-- **Per-tile media folders** — assign any folder to a tile and it becomes a
-  playlist of the video files inside it, with play/pause, next/previous, seek,
-  volume and mute controls.
+- **Effortless folder assignment** — give a tile a folder in whatever way is
+  quickest: **drag a folder straight onto the tile** (it highlights with a
+  “Drop folder to play here” cue), **double-click** the tile, or use the
+  **📁 / Choose media folder…** button.
+- **Random, never-ending playback** — each tile shuffles through the videos in
+  its folder, picking a new random clip every time one ends and looping forever.
+  A built-in watchdog keeps a video on screen at all times, recovering from
+  unexpected stops or unplayable files, so a tile is **always playing**. Per-tile
+  controls (play/pause, next/previous, seek, volume, mute) are still there when
+  you want them.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
   - **Span / fullscreen across ALL displays at once** (`A`).
@@ -65,7 +76,7 @@ npm start
 | Horizontal split | `Shift` + left-click a tile (in edit mode) |
 | Resize tiles | Drag the divider between them |
 | Close / merge a tile | The **✕** button on the tile (visible in edit mode) |
-| Assign a folder | The **📁** button on a tile, or the *Choose media folder…* button |
+| Assign a folder | Drag a folder onto a tile, **double-click** the tile, the **📁** button, or the *Choose media folder…* button |
 | Play / pause focused tile | `Space` |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |
