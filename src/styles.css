@@ -369,13 +369,8 @@ body.grid-on #grid-overlay { display: block; }
 body.span-all #toast { top: calc(var(--ui-top, 0px) + 110px); }
 
 /* ----------------------------------------------------- Edit-mode legend bar */
-/* Always visible while editing so the user knows exactly how splits work. */
-#edit-legend {
-  position: fixed;
-  left: 50%;
-  bottom: 16px;
-  transform: translate(-50%, 16px);
-  z-index: 71;
+/* Shared look for the legend, reused by the global bar and per-display copies. */
+.legend-bar {
   display: none;
   align-items: center;
   gap: 16px;
@@ -387,14 +382,8 @@ body.span-all #toast { top: calc(var(--ui-top, 0px) + 110px); }
   border: 1px solid var(--line);
   border-radius: 12px;
   box-shadow: 0 12px 34px rgba(0,0,0,0.55);
-  opacity: 0;
-  transition: opacity 0.2s ease, transform 0.2s ease;
 }
-#edit-legend.show { display: flex; opacity: 1; transform: translate(-50%, 0); }
-body.span-all #edit-legend {
-  left: calc(var(--ui-left, 0px) + var(--ui-width, 100vw) / 2);
-}
-#edit-legend .leg {
+.legend-bar .leg {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -402,7 +391,7 @@ body.span-all #edit-legend {
   font-size: 12px;
   white-space: nowrap;
 }
-#edit-legend .chip {
+.legend-bar .chip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -414,8 +403,137 @@ body.span-all #edit-legend {
   color: var(--accent);
   font-size: 13px;
 }
-#edit-legend .chip.horiz { color: var(--accent-2); }
-#edit-legend .chip.danger { color: var(--danger); border-color: rgba(255,91,110,0.4); }
+.legend-bar .chip.horiz { color: var(--accent-2); }
+.legend-bar .chip.danger { color: var(--danger); border-color: rgba(255,91,110,0.4); }
+
+/* Global legend (single-window & fullscreen modes). */
+#edit-legend {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translate(-50%, 16px);
+  z-index: 71;
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+#edit-legend.show { display: flex; opacity: 1; transform: translate(-50%, 0); }
+/* In span-all mode each display draws its own legend instead. */
+body.span-all #edit-legend.show { display: none; }
+
+/* ------------------------------------------------- Always-on edit indicator */
+/* A pulsing frame + badge so "edit mode" is unmistakable in every window mode
+   (windowed, fullscreen, or spanning all displays). */
+@keyframes editpulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+#edit-frame {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: none;
+  pointer-events: none;
+  border: 3px solid var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.45), inset 0 0 26px rgba(91,140,255,0.35);
+  animation: editpulse 2s ease-in-out infinite;
+}
+#edit-badge {
+  position: fixed;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 72;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 7px 16px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 10px;
+  text-align: center;
+  box-shadow: 0 8px 24px rgba(91,140,255,0.45);
+  pointer-events: none;
+}
+#edit-badge strong { font-size: 13px; letter-spacing: 0.4px; }
+#edit-badge span { font-size: 11px; opacity: 0.92; }
+/* Show the global indicator only when editing and not spanning displays. */
+body.editing:not(.span-all) #edit-frame { display: block; }
+body.editing:not(.span-all) #edit-badge { display: flex; }
+
+/* --------------------------------------------------- Per-display UI overlays */
+/* When spanning every monitor, each display gets its own control bar and edit
+   indicator positioned over that display's region of the window. */
+#display-overlays {
+  position: fixed;
+  inset: 0;
+  z-index: 62;
+  display: none;
+  pointer-events: none;
+}
+body.span-all #display-overlays { display: block; }
+body.span-all #topbar { display: none; }
+
+.display-ui { position: absolute; pointer-events: none; overflow: hidden; }
+
+.display-ui .mini-bar {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  background: linear-gradient(180deg, rgba(16,17,22,0.98), rgba(16,17,22,0.88));
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+.display-ui .mini-brand { color: var(--muted); font-weight: 600; white-space: nowrap; }
+.display-ui .mini-tools { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
+
+/* Per-display edit indicator (mirrors the global frame/badge/legend). */
+.display-ui .edit-frame {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: none;
+  pointer-events: none;
+  border: 3px solid var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.45), inset 0 0 26px rgba(91,140,255,0.35);
+  animation: editpulse 2s ease-in-out infinite;
+}
+.display-ui .edit-badge {
+  position: absolute;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 7px 16px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 10px;
+  text-align: center;
+  box-shadow: 0 8px 24px rgba(91,140,255,0.45);
+  pointer-events: none;
+}
+.display-ui .edit-badge strong { font-size: 13px; letter-spacing: 0.4px; }
+.display-ui .edit-badge span { font-size: 11px; opacity: 0.92; }
+.display-ui .legend-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  max-width: 90%;
+  z-index: 2;
+  pointer-events: none;
+}
+body.editing .display-ui .edit-frame { display: block; }
+body.editing .display-ui .edit-badge { display: flex; }
+body.editing .display-ui .legend-bar { display: flex; }
 kbd {
   background: var(--panel-2);
   border: 1px solid var(--line);

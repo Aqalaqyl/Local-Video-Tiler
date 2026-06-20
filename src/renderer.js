@@ -620,6 +620,7 @@ function setEditMode(on) {
   if (!on) hidePreview();
   forEachLeaf(root, updateLeaf);
   if (editLegend) editLegend.classList.toggle('show', on);
+  syncControls();
   if (on) {
     editHint.classList.add('show');
     clearTimeout(setEditMode._t);
@@ -634,12 +635,14 @@ function setGrid(on) {
   settings.gridOn = on;
   document.body.classList.toggle('grid-on', on);
   btnGrid.classList.toggle('active', on);
+  syncControls();
   saveState();
 }
 
 function setSnap(on) {
   settings.snapOn = on;
   btnSnap.classList.toggle('active', on);
+  syncControls();
   saveState();
 }
 
@@ -775,22 +778,117 @@ document.addEventListener('keyup', (e) => {
 btnEdit.addEventListener('click', () => setEditMode(!settings.editMode));
 btnGrid.addEventListener('click', () => setGrid(!settings.gridOn));
 btnSnap.addEventListener('click', () => setSnap(!settings.snapOn));
-btnReset.addEventListener('click', () => {
+function resetLayout() {
   forEachLeaf(root, disposeLeaf);
   root = makeLeaf();
   focusedLeaf = null;
   render();
-});
+}
+btnReset.addEventListener('click', resetLayout);
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnMin.addEventListener('click', () => window.api.minimize());
 btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
 
+// ============================================================================
+// Per-display UI (one control bar + edit indicator per monitor when spanning)
+// ============================================================================
+const displayOverlays = document.getElementById('display-overlays');
+
+const LEGEND_ITEMS = `
+  <span class="leg"><span class="chip vert">▮</span><kbd>Click</kbd> split left | right</span>
+  <span class="leg"><span class="chip horiz">▬</span><kbd>Shift</kbd>+Click split top / bottom</span>
+  <span class="leg"><span class="chip">↔</span>Drag a divider to resize</span>
+  <span class="leg"><span class="chip danger">✕</span>Close / merge a tile</span>
+  <span class="leg"><kbd>Esc</kbd> done editing</span>`;
+
+// Latest window/display state, so control syncing has the flags it needs.
+let winState = { fullScreen: false, spanningAllDisplays: false };
+
+/** Run a control action by name (shared by the main bar and per-display bars). */
+function runAction(action) {
+  switch (action) {
+    case 'edit': setEditMode(!settings.editMode); break;
+    case 'grid': setGrid(!settings.gridOn); break;
+    case 'snap': setSnap(!settings.snapOn); break;
+    case 'reset': resetLayout(); break;
+    case 'fs': window.api.toggleFullscreen(); break;
+    case 'fsall': window.api.toggleSpanAll(); break;
+    default: break;
+  }
+}
+
+function controlBarHTML(index, d) {
+  const tag = 'Display ' + (index + 1) + (d.isPrimary ? ' ★' : '');
+  return `
+    <div class="mini-bar">
+      <span class="mini-brand">▦ ${tag}</span>
+      <span class="mini-tools">
+        <button class="tool" data-action="edit" title="Toggle edit mode (E)">Edit</button>
+        <button class="tool" data-action="grid" title="Toggle alignment grid (G)">Grid</button>
+        <button class="tool" data-action="snap" title="Toggle snap to grid (S)">Snap</button>
+        <button class="tool" data-action="reset" title="Reset layout">Reset</button>
+        <button class="tool" data-action="fs" title="Fullscreen (F)">Fullscreen</button>
+        <button class="tool active" data-action="fsall" title="Exit all-displays (A)">Exit Span</button>
+      </span>
+    </div>`;
+}
+
+function panelExtrasHTML() {
+  return `
+    <div class="edit-frame"></div>
+    <div class="edit-badge"><strong>✏ EDIT MODE</strong><span>click a tile to split · hold ⇧Shift for horizontal</span></div>
+    <div class="legend-bar mini">${LEGEND_ITEMS}</div>`;
+}
+
+/** Rebuild one UI panel per display, positioned over that display's region. */
+function buildDisplayOverlays(state) {
+  displayOverlays.textContent = '';
+  if (!state.spanningAllDisplays || !state.displays || !state.windowBounds) return;
+  state.displays.forEach((d, i) => {
+    const panel = document.createElement('div');
+    panel.className = 'display-ui';
+    panel.style.left = (d.bounds.x - state.windowBounds.x) + 'px';
+    panel.style.top = (d.bounds.y - state.windowBounds.y) + 'px';
+    panel.style.width = d.bounds.width + 'px';
+    panel.style.height = d.bounds.height + 'px';
+    panel.innerHTML = controlBarHTML(i, d) + panelExtrasHTML();
+    displayOverlays.appendChild(panel);
+  });
+  syncControls();
+}
+
+/** Reflect toggle/window state onto every per-display control button. */
+function syncControls() {
+  const states = {
+    edit: settings.editMode,
+    grid: settings.gridOn,
+    snap: settings.snapOn,
+    fs: winState.fullScreen,
+    fsall: winState.spanningAllDisplays
+  };
+  displayOverlays.querySelectorAll('[data-action]').forEach((b) => {
+    const a = b.dataset.action;
+    if (a in states) b.classList.toggle('active', !!states[a]);
+  });
+}
+
+// Delegated handling for every per-display control button.
+displayOverlays.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  e.stopPropagation();
+  runAction(btn.dataset.action);
+});
+
 function applyWindowState(state) {
+  winState = state;
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
+  buildDisplayOverlays(state);
+  syncControls();
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -824,7 +922,7 @@ function showToast(html, ms = 3000) {
 function spanToast(count) {
   showToast(
     '<strong>Spanning ' + (count || 'all') + ' displays</strong>' +
-    '<span>Controls &amp; edit tools are on your primary display · <kbd>A</kbd> to exit · <kbd>E</kbd> to edit tiles</span>',
+    '<span>Each display has its own controls &amp; edit indicator · <kbd>A</kbd> to exit · <kbd>E</kbd> to edit tiles</span>',
     5000
   );
 }

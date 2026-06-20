@@ -69,11 +69,16 @@ function sendWindowState() {
     fullScreen: mainWindow.isFullScreen(),
     spanningAllDisplays,
     maximized: mainWindow.isMaximized(),
-    // Geometry the renderer uses to keep controls on a real, visible monitor
-    // (the primary display) when the window spans every display at once.
+    // Geometry the renderer uses to give every monitor its own control bar and
+    // edit indicator when the window spans all displays at once.
     windowBounds: mainWindow.getBounds(),
     primaryBounds: primary.bounds,
-    displayCount: screen.getAllDisplays().length
+    displayCount: screen.getAllDisplays().length,
+    displays: screen.getAllDisplays().map((d) => ({
+      id: d.id,
+      bounds: d.bounds,
+      isPrimary: d.id === primary.id
+    }))
   });
 }
 

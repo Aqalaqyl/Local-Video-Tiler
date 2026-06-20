@@ -55,13 +55,26 @@
   </div>
 
   <!-- Persistent legend while editing: always tells the user how splits work -->
-  <div id="edit-legend" aria-hidden="true">
+  <div id="edit-legend" class="legend-bar" aria-hidden="true">
     <span class="leg"><span class="chip vert">▮</span><kbd>Click</kbd> split left | right</span>
     <span class="leg"><span class="chip horiz">▬</span><kbd>Shift</kbd>+Click split top / bottom</span>
     <span class="leg"><span class="chip">↔</span>Drag a divider to resize</span>
     <span class="leg"><span class="chip danger">✕</span>Close / merge a tile</span>
     <span class="leg"><kbd>Esc</kbd> done editing</span>
   </div>
+
+  <!-- Always-on edit indicator for single-window & fullscreen modes: a glowing
+       frame plus a badge so it's obvious you're editing even when the chrome
+       has auto-hidden. (Per-display copies are injected for span-all mode.) -->
+  <div id="edit-frame" aria-hidden="true"></div>
+  <div id="edit-badge" aria-hidden="true">
+    <strong>✏ EDIT MODE</strong>
+    <span>click a tile to split · hold ⇧Shift for horizontal</span>
+  </div>
+
+  <!-- When spanning every monitor, one control bar + edit indicator is injected
+       per display here so the UI is reachable from any screen. -->
+  <div id="display-overlays" aria-hidden="true"></div>
 
   <!-- Transient toast (e.g. when spanning all displays) -->
   <div id="toast" class="hintbox" aria-hidden="true"></div>
