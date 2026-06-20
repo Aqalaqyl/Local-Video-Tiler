@@ -40,11 +40,16 @@ nothing is uploaded anywhere.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
   - **Span / fullscreen across ALL displays at once** (`A`).
-  - When spanning every display, the control bar and edit tools are **pinned to
-    your primary monitor** so they're always fully visible (never stranded in a
-    dead zone between screens), and you can keep splitting/editing tiles right
-    across the whole multi-monitor canvas. Hot-plugging or rearranging monitors
-    re-fits the span automatically.
+  - When spanning every display, **each monitor gets its own control bar and
+    edit indicator** anchored to that screen, so the UI is always within reach no
+    matter which display you're looking at — no hunting across screens for the
+    controls. You can keep splitting/editing tiles right across the whole
+    multi-monitor canvas, and hot-plugging or rearranging monitors re-fits the
+    span automatically.
+- **Unmistakable edit indicator** — while editing, a pulsing accent frame, an
+  **✏ EDIT MODE** badge and the controls legend stay on screen in **every** window
+  mode (windowed, fullscreen, and across all displays), so you always know when a
+  click will split a tile.
 - **Minimal, auto-hiding interface** — the top bar, tile controls and even the
   mouse cursor fade away when you stop interacting, leaving a clean viewing
   surface. They reappear the moment you move the mouse.
