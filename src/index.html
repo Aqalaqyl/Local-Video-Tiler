@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data: file:; media-src 'self' file: blob:; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  <title>Local Video Tiler</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="active">
+  <!-- Minimal auto-hiding top control bar -->
+  <header id="topbar">
+    <div class="bar-drag">
+      <span class="brand">▦ Local Video Tiler</span>
+    </div>
+    <div class="bar-tools">
+      <button id="btn-edit" class="tool" title="Toggle edit mode (E)">Edit</button>
+      <button id="btn-grid" class="tool" title="Toggle alignment grid (G)">Grid</button>
+      <button id="btn-snap" class="tool" title="Toggle snap to grid (S)">Snap</button>
+      <label class="tool gridsize" title="Grid cell size">
+        <span>Cell</span>
+        <input id="grid-size" type="range" min="20" max="320" step="10" value="80" />
+        <span id="grid-size-val">80</span>
+      </label>
+      <span class="sep"></span>
+      <button id="btn-reset" class="tool" title="Reset layout to a single tile">Reset</button>
+      <button id="btn-fs" class="tool" title="Fullscreen on current display (F)">Fullscreen</button>
+      <button id="btn-fs-all" class="tool" title="Span / fullscreen across ALL displays (A)">All Displays</button>
+      <span id="display-pill" class="pill" title="Connected displays">1 display</span>
+      <span class="sep"></span>
+      <button id="btn-min" class="tool win" title="Minimize">—</button>
+      <button id="btn-x" class="tool win danger" title="Close">✕</button>
+    </div>
+  </header>
+
+  <!-- Alignment grid overlay -->
+  <div id="grid-overlay" aria-hidden="true"></div>
+
+  <!-- Root tiling surface -->
+  <main id="stage"></main>
+
+  <!-- Split preview shown while hovering in edit mode.
+       The two shaded regions show exactly how the tile will be divided. -->
+  <div id="split-preview" aria-hidden="true">
+    <div class="region region-a"><span class="region-label"></span></div>
+    <div class="region region-b"><span class="region-label new">new tile</span></div>
+    <div class="split-line"></div>
+    <div class="split-badge"></div>
+  </div>
+
+  <!-- Transient hint shown when entering edit mode -->
+  <div id="edit-hint" class="hintbox" aria-hidden="true">
+    <strong>Edit mode</strong>
+    <span>Click a tile to split it vertically · Hold <kbd>Shift</kbd> to split horizontally · Drag dividers to resize</span>
+  </div>
+
+  <!-- Transient toast (e.g. when spanning all displays) -->
+  <div id="toast" class="hintbox" aria-hidden="true"></div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

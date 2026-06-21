@@ -1,0 +1,354 @@
+:root {
+  --bg: #0b0b0e;
+  --panel: #16171d;
+  --panel-2: #1d1f27;
+  --line: #2a2d39;
+  --text: #e8e9ee;
+  --muted: #9aa0ad;
+  --accent: #5b8cff;
+  --accent-2: #38e0c4;
+  --danger: #ff5b6e;
+  --divider: 6px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  user-select: none;
+}
+
+/* When idle (and not editing) the cursor disappears for a clean viewing surface. */
+body.idle:not(.editing) { cursor: none; }
+
+/* ------------------------------------------------------------------ Topbar */
+#topbar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 44px;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  background: linear-gradient(180deg, rgba(16,17,22,0.96), rgba(16,17,22,0.82));
+  border-bottom: 1px solid var(--line);
+  z-index: 60;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  backdrop-filter: blur(8px);
+}
+
+/* Auto-hide the chrome when the user is idle, unless editing. */
+body.idle:not(.editing) #topbar {
+  opacity: 0;
+  transform: translateY(-100%);
+  pointer-events: none;
+}
+
+/* When spanning every display, pin the chrome onto the primary monitor so it
+   never lands in a dead zone between physical screens. The renderer fills in
+   --ui-left/--ui-top/--ui-width from the live window + primary-display bounds. */
+body.span-all #topbar {
+  left: var(--ui-left, 0px);
+  top: var(--ui-top, 0px);
+  width: var(--ui-width, 100%);
+  right: auto;
+  border-radius: 0 0 12px 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.55);
+}
+body.span-all .hintbox {
+  left: calc(var(--ui-left, 0px) + var(--ui-width, 100vw) / 2);
+  top: calc(var(--ui-top, 0px) + 56px);
+}
+
+.bar-drag {
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  -webkit-app-region: drag;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.brand { color: var(--muted); font-weight: 600; letter-spacing: 0.3px; white-space: nowrap; }
+
+.bar-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  -webkit-app-region: no-drag;
+  flex-wrap: nowrap;
+}
+
+.tool {
+  -webkit-app-region: no-drag;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.tool:hover { background: #262a36; border-color: #3a3f4e; }
+.tool.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tool.win { padding: 6px 10px; min-width: 34px; }
+.tool.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+
+.gridsize { display: flex; align-items: center; gap: 6px; color: var(--muted); padding: 4px 8px; }
+.gridsize input[type="range"] { width: 90px; -webkit-app-region: no-drag; }
+#grid-size-val { width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+
+.sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+.pill {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+/* ----------------------------------------------------------------- Stage */
+#stage {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  background: var(--bg);
+}
+
+/* A split container lays out its two children either as a row or a column. */
+.node-split { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.node-split.row { flex-direction: row; }
+.node-split.col { flex-direction: column; }
+
+.node-leaf {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #050507;
+  border: 1px solid rgba(255,255,255,0.04);
+}
+.node-leaf.focused { box-shadow: inset 0 0 0 2px var(--accent); }
+
+/* Editing affordance: hovering a tile glows so the target is obvious. */
+body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.5); }
+
+.tile-video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #000;
+  object-fit: contain;
+}
+
+.tile-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--muted);
+  text-align: center;
+  padding: 18px;
+}
+.tile-empty .big { font-size: 26px; opacity: 0.6; }
+.tile-empty .assign {
+  -webkit-app-region: no-drag;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.tile-empty .assign:hover { filter: brightness(1.08); }
+
+/* Per-tile control strip (auto-hides with the rest of the chrome). */
+.tile-toolbar {
+  position: absolute;
+  left: 8px; right: 8px; bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  background: rgba(12,13,18,0.82);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  z-index: 5;
+  transition: opacity 0.2s ease;
+}
+.node-leaf:not(:hover) .tile-toolbar { opacity: 0; }
+.node-leaf:hover .tile-toolbar { opacity: 1; }
+body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: none; }
+
+.tile-toolbar button {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 5px 8px;
+  font-size: 12px;
+  line-height: 1;
+}
+.tile-toolbar button:hover { background: #2a2f3d; }
+.tile-toolbar .title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+.tile-toolbar .seek { flex: 2 1 120px; -webkit-app-region: no-drag; }
+.tile-toolbar .vol { width: 70px; }
+.tile-toolbar .time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.tile-toolbar .close { color: var(--danger); border-color: rgba(255,91,110,0.4); }
+
+/* Dividers between siblings; draggable to resize. */
+.divider {
+  flex: 0 0 var(--divider);
+  background: transparent;
+  position: relative;
+  z-index: 4;
+}
+.node-split.row > .divider { cursor: col-resize; }
+.node-split.col > .divider { cursor: row-resize; }
+.divider::after {
+  content: "";
+  position: absolute;
+  background: var(--line);
+  transition: background 0.15s ease;
+}
+.node-split.row > .divider::after { top: 0; bottom: 0; left: 50%; width: 2px; transform: translateX(-50%); }
+.node-split.col > .divider::after { left: 0; right: 0; top: 50%; height: 2px; transform: translateY(-50%); }
+.divider:hover::after, .divider.dragging::after { background: var(--accent); }
+
+/* ----------------------------------------------------------- Grid overlay */
+#grid-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  display: none;
+  background-image:
+    linear-gradient(to right, rgba(91,140,255,0.18) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(91,140,255,0.18) 1px, transparent 1px);
+  background-size: var(--cell, 80px) var(--cell, 80px);
+}
+body.grid-on #grid-overlay { display: block; }
+
+/* --------------------------------------------------------- Split preview */
+#split-preview {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  display: none;
+  border: 2px solid rgba(91,140,255,0.85);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.4) inset;
+  overflow: hidden;
+}
+#split-preview.visible { display: block; }
+
+/* The two resulting panes, tinted differently so the layout is unmistakable. */
+#split-preview .region {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* region-a keeps the current content; region-b becomes the brand new tile. */
+#split-preview .region-a { background: rgba(91,140,255,0.16); }
+#split-preview .region-b {
+  background: rgba(56,224,196,0.20);
+  background-image: repeating-linear-gradient(
+    45deg, rgba(56,224,196,0.10) 0, rgba(56,224,196,0.10) 10px,
+    transparent 10px, transparent 20px);
+}
+#split-preview .region-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(10,12,18,0.7);
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 6px;
+  padding: 3px 8px;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+}
+#split-preview .region-label.new { color: var(--accent-2); }
+
+#split-preview .split-line {
+  position: absolute;
+  background: var(--accent-2);
+  box-shadow: 0 0 12px rgba(56,224,196,0.95);
+  z-index: 2;
+}
+#split-preview.vertical .split-line { top: 0; bottom: 0; width: 3px; transform: translateX(-50%); }
+#split-preview.horizontal .split-line { left: 0; right: 0; height: 3px; transform: translateY(-50%); }
+
+/* A small badge that follows the split telling the user which way it goes. */
+#split-preview .split-badge {
+  position: absolute;
+  z-index: 3;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: #04130f;
+  background: var(--accent-2);
+  border-radius: 6px;
+  padding: 3px 8px;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  transform: translate(-50%, -50%);
+}
+
+/* --------------------------------------------------------------- Edit hint */
+.hintbox {
+  position: fixed;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 70;
+  background: rgba(16,17,22,0.95);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 16px;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+  max-width: 70vw;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+.hintbox.show { display: flex; animation: fade 0.3s ease; }
+.hintbox strong { color: var(--accent); }
+.hintbox span { color: var(--muted); }
+#toast { top: 110px; }
+#toast strong { color: var(--accent-2); }
+body.span-all #toast { top: calc(var(--ui-top, 0px) + 110px); }
+kbd {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+@keyframes fade { from { opacity: 0; transform: translate(-50%, -6px); } to { opacity: 1; transform: translate(-50%, 0); } }

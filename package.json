@@ -1,0 +1,15 @@
+{
+  "name": "local-video-tiler",
+  "version": "1.0.0",
+  "description": "A local desktop app to view and listen to downloaded video files in a fully customizable, tiling-window-manager style layout.",
+  "main": "main.js",
+  "author": "Local-Video-Tiler",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "lint": "node --check main.js && node --check preload.js && node --check src/renderer.js"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0"
+  }
+}
