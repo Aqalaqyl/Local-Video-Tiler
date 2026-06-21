@@ -144,6 +144,7 @@ function reconcileProjectionPlayback() {
       const cur = leaf.files[leaf.index];
       if (cur && leaf.video.getAttribute('src') !== cur.url) { leaf.video.src = cur.url; leaf.video.load(); }
       leaf.video.muted = true;
+      leaf.video.loop = !!leaf.loop;
       leaf.video.play().catch(() => {});
     } else {
       try {
@@ -169,7 +170,7 @@ function applySettingsFromPayload(s) {
 // Push the current layout + settings to peer windows (deduped to avoid echoes).
 function broadcastLayout() {
   if (!projection.active) return;
-  const payload = { tree: serialize(root), settings: snapshotSettings() };
+  const payload = { tree: serializeForSync(root), settings: snapshotSettings() };
   const json = JSON.stringify(payload);
   if (json === lastSyncJSON) return;
   lastSyncJSON = json;
@@ -250,6 +251,7 @@ function makeLeaf() {
     files: [],
     index: 0,
     savedIndex: 0,
+    loop: false,
     el: null,
     refs: null,
     video: null
@@ -348,6 +350,7 @@ function ensureLeafEl(leaf) {
     <button class="prev" title="Previous">⏮</button>
     <button class="play" title="Play / Pause">▶</button>
     <button class="next" title="Next">⏭</button>
+    <button class="loop" title="Loop this video (per tile)">🔁</button>
     <input class="seek" type="range" min="0" max="1000" value="0" title="Seek" />
     <span class="time">0:00 / 0:00</span>
     <button class="mute" title="Mute">🔊</button>
@@ -376,6 +379,7 @@ function ensureLeafEl(leaf) {
     prev: toolbar.querySelector('.prev'),
     play: toolbar.querySelector('.play'),
     next: toolbar.querySelector('.next'),
+    loop: toolbar.querySelector('.loop'),
     seek: toolbar.querySelector('.seek'),
     time: toolbar.querySelector('.time'),
     mute: toolbar.querySelector('.mute'),
@@ -407,6 +411,7 @@ function updateLeaf(leaf) {
   }
 
   refs.close.style.display = settings.editMode ? 'inline-block' : 'none';
+  applyLoop(leaf);
 
   const current = hasFiles ? leaf.files[leaf.index] : null;
   refs.title.textContent = current ? `${leaf.index + 1}/${leaf.files.length} · ${current.name}` : '';
@@ -424,6 +429,7 @@ function wireLeafEvents(leaf) {
   refs.play.addEventListener('click', (e) => { e.stopPropagation(); togglePlay(leaf); });
   refs.prev.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, -1); });
   refs.next.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, 1); });
+  refs.loop.addEventListener('click', (e) => { e.stopPropagation(); toggleLoop(leaf); });
   refs.close.addEventListener('click', (e) => { e.stopPropagation(); closeLeaf(leaf); });
   refs.del.addEventListener('mousedown', (e) => e.stopPropagation());
   refs.del.addEventListener('click', (e) => { e.stopPropagation(); closeLeaf(leaf); flash('Tile deleted'); });
@@ -455,7 +461,8 @@ function wireLeafEvents(leaf) {
       refs.time.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
     }
   });
-  video.addEventListener('ended', () => step(leaf, 1, true));
+  // When a clip ends (and the tile isn't looping), shuffle to a random clip.
+  video.addEventListener('ended', () => advanceRandom(leaf));
 
   // Click on the tile body: split (edit mode) or focus (view mode).
   // Note: the toolbar buttons and the "Choose media folder…" / 📁 buttons all
@@ -479,7 +486,9 @@ function wireLeafEvents(leaf) {
 async function assignFolder(leaf) {
   const folder = await window.api.pickFolder();
   if (!folder) return;
-  await loadFolder(leaf, folder, 0, true);
+  await loadFolder(leaf, folder, 0, false);
+  // Start playback on a random clip from the folder.
+  advanceRandom(leaf);
 }
 
 async function loadFolder(leaf, folder, index = 0, autoplay = false) {
@@ -505,6 +514,7 @@ function loadCurrent(leaf, autoplay) {
   }
   video.src = current.url;
   video.load();
+  video.loop = !!leaf.loop;
   if (projection.role === 'mirror') video.muted = true;
   if (autoplay || (projection.role === 'mirror' && isLeafVisible(leaf))) video.play().catch(() => {});
   updateLeaf(leaf);
@@ -521,6 +531,38 @@ function step(leaf, dir, autoplay = false) {
   leaf.index = (leaf.index + dir + leaf.files.length) % leaf.files.length;
   loadCurrent(leaf, autoplay || !leaf.video.paused);
   saveState();
+}
+
+/** Pick a random file index, avoiding an immediate repeat when possible. */
+function pickRandomIndex(leaf) {
+  const n = leaf.files.length;
+  if (n <= 1) return 0;
+  let i = leaf.index;
+  while (i === leaf.index) i = Math.floor(Math.random() * n);
+  return i;
+}
+
+/** Auto-advance to a random clip from the folder (the default shuffle playback). */
+function advanceRandom(leaf) {
+  if (!leaf.files.length) return;
+  leaf.index = pickRandomIndex(leaf);
+  loadCurrent(leaf, true);
+  saveState();
+}
+
+/** Per-tile loop toggle: repeat the current clip to keep it on screen. */
+function toggleLoop(leaf) {
+  leaf.loop = !leaf.loop;
+  applyLoop(leaf);
+  saveState();
+}
+
+function applyLoop(leaf) {
+  if (leaf.video) leaf.video.loop = !!leaf.loop;
+  if (leaf.refs && leaf.refs.loop) {
+    leaf.refs.loop.classList.toggle('active', !!leaf.loop);
+    leaf.refs.loop.title = leaf.loop ? 'Looping this video — click to stop' : 'Loop this video (per tile)';
+  }
 }
 
 function fmtTime(s) {
@@ -800,15 +842,24 @@ function setCellSize(px) {
 // ============================================================================
 // Persistence
 // ============================================================================
-function serialize(node) {
-  if (node.kind === 'leaf') return { kind: 'leaf', folder: node.folder, index: node.index };
+// `withIndex` keeps the per-tile playback position for local persistence. Cross-
+// window sync omits it so each display can shuffle independently without forcing
+// every other screen to rebuild whenever a single tile advances.
+function serializeTree(node, withIndex) {
+  if (node.kind === 'leaf') {
+    const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop };
+    if (withIndex) o.index = node.index;
+    return o;
+  }
   return {
     kind: 'split',
     direction: node.direction,
     ratio: node.ratio,
-    children: [serialize(node.children[0]), serialize(node.children[1])]
+    children: [serializeTree(node.children[0], withIndex), serializeTree(node.children[1], withIndex)]
   };
 }
+function serialize(node) { return serializeTree(node, true); }
+function serializeForSync(node) { return serializeTree(node, false); }
 
 function deserialize(obj) {
   if (!obj) return makeLeaf();
@@ -816,6 +867,7 @@ function deserialize(obj) {
     const l = makeLeaf();
     l.folder = obj.folder || null;
     l.index = l.savedIndex = obj.index || 0;
+    l.loop = !!obj.loop;
     return l;
   }
   return makeSplit(obj.direction, deserialize(obj.children[0]), deserialize(obj.children[1]), obj.ratio);

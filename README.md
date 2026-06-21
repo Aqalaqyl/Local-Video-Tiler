@@ -30,6 +30,12 @@ nothing is uploaded anywhere.
 - **Per-tile media folders** — assign any folder to a tile and it becomes a
   playlist of the video files inside it, with play/pause, next/previous, seek,
   volume and mute controls.
+  - **Random / shuffle playback** — a tile starts on a random clip and, when a
+    clip finishes, automatically shuffles to another random clip from its folder.
+    (Next / Previous still step through in order for manual control.)
+  - **Per-tile loop** (🔁) — keep the current video on screen by repeating it.
+    Loop is independent per tile, so one pane can hold on a clip while the others
+    keep shuffling.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
   - **Fullscreen across ALL displays at once** (`A`) — each monitor gets its own
@@ -94,6 +100,7 @@ npm start
 | Delete / merge a tile | The **🗑** badge on the tile (in edit mode), the toolbar **✕**, or `Delete` / `Backspace` on the hovered/focused tile |
 | Assign a folder | The **📁** button on a tile, or the *Choose media folder…* button |
 | Play / pause focused tile | `Space` |
+| Loop the current video (per tile) | The **🔁** button on the tile |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |
 | Adjust grid cell size | The **Cell** slider |

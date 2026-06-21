@@ -212,6 +212,11 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
   line-height: 1;
 }
 .tile-toolbar button:hover { background: #2a2f3d; }
+.tile-toolbar .loop.active {
+  color: var(--accent-2);
+  border-color: var(--accent-2);
+  background: rgba(56,224,196,0.16);
+}
 .tile-toolbar .title {
   flex: 1 1 auto;
   min-width: 0;
