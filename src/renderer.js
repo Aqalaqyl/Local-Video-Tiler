@@ -21,6 +21,8 @@ const LS_KEY = 'lvt.state.v1';
 const stage = document.getElementById('stage');
 const preview = document.getElementById('split-preview');
 const gridOverlay = document.getElementById('grid-overlay');
+const displayOverlay = document.getElementById('display-overlay');
+const immersiveBadge = document.getElementById('immersive-badge');
 const editHint = document.getElementById('edit-hint');
 const toast = document.getElementById('toast');
 const displayPill = document.getElementById('display-pill');
@@ -49,6 +51,7 @@ function uid() { return 'n' + (uidCounter++); }
 
 let root = makeLeaf();
 let focusedLeaf = null;
+let windowState = { fullScreen: false, spanningAllDisplays: false };
 
 // --------------------------------------------------------------- Node helpers
 function makeLeaf() {
@@ -73,6 +76,14 @@ function makeSplit(direction, a, b, ratio) {
     ratio: clamp(ratio == null ? 0.5 : ratio, 0.05, 0.95),
     children: [a, b]
   };
+}
+
+function labelTiles() {
+  let n = 0;
+  forEachLeaf(root, (leaf) => {
+    n += 1;
+    if (leaf.el) leaf.el.dataset.tileLabel = 'Tile ' + n;
+  });
 }
 
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
@@ -101,6 +112,7 @@ function render() {
   forEachLeaf(root, (leaf) => { if (leaf.el && leaf.el.parentNode) leaf.el.parentNode.removeChild(leaf.el); });
   stage.textContent = '';
   stage.appendChild(renderNode(root));
+  labelTiles();
   applyFocus();
   saveState();
 }
@@ -525,12 +537,17 @@ function setEditMode(on) {
   settings.editMode = on;
   document.body.classList.toggle('editing', on);
   btnEdit.classList.toggle('active', on);
+  updateImmersiveChrome();
   if (!on) hidePreview();
   forEachLeaf(root, updateLeaf);
   if (on) {
+    const immersive = windowState.fullScreen || windowState.spanningAllDisplays;
+    editHint.innerHTML = immersive
+      ? '<strong>Edit mode · immersive</strong><span>Each tile is numbered · Click to split vertically · Hold <kbd>Shift</kbd> for horizontal · Drag dividers to resize</span>'
+      : '<strong>Edit mode</strong><span>Click a tile to split it vertically · Hold <kbd>Shift</kbd> to split horizontally · Drag dividers to resize</span>';
     editHint.classList.add('show');
     clearTimeout(setEditMode._t);
-    setEditMode._t = setTimeout(() => editHint.classList.remove('show'), 4000);
+    setEditMode._t = setTimeout(() => editHint.classList.remove('show'), immersive ? 6000 : 4000);
   } else {
     editHint.classList.remove('show');
   }
@@ -690,12 +707,16 @@ btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
 
 function applyWindowState(state) {
+  const wasFullscreen = windowState.fullScreen;
+  const wasSpanning = windowState.spanningAllDisplays;
+  windowState = state;
+
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
 
   const rootStyle = document.documentElement.style;
-  const wasSpanning = document.body.dataset.spanning === '1';
+  const wasSpanningDom = document.body.dataset.spanning === '1';
   if (state.spanningAllDisplays && state.windowBounds && state.primaryBounds) {
     // Offset of the primary display inside the (multi-monitor) window so the
     // chrome is always drawn on a real, fully-visible screen.
@@ -713,6 +734,52 @@ function applyWindowState(state) {
     rootStyle.removeProperty('--ui-top');
     rootStyle.removeProperty('--ui-width');
     document.body.dataset.spanning = '0';
+    if (state.fullScreen && !wasFullscreen) fullscreenToast();
+  }
+
+  updateDisplayOverlay(state);
+  updateImmersiveChrome();
+}
+
+function updateDisplayOverlay(state) {
+  displayOverlay.textContent = '';
+  if (!state.spanningAllDisplays || !state.windowBounds || !state.displays) return;
+
+  const wb = state.windowBounds;
+  for (let i = 0; i < state.displays.length; i++) {
+    const d = state.displays[i];
+    const b = d.bounds;
+    const el = document.createElement('div');
+    el.className = 'display-region' + (d.isPrimary ? ' primary' : '');
+    el.style.left = ((b.x - wb.x) / wb.width * 100) + '%';
+    el.style.top = ((b.y - wb.y) / wb.height * 100) + '%';
+    el.style.width = (b.width / wb.width * 100) + '%';
+    el.style.height = (b.height / wb.height * 100) + '%';
+
+    const label = document.createElement('span');
+    label.className = 'display-label';
+    label.textContent = (d.isPrimary ? '★ ' : '') + 'Display ' + (i + 1) + ' · ' + b.width + '×' + b.height;
+    el.appendChild(label);
+    displayOverlay.appendChild(el);
+  }
+}
+
+function updateImmersiveChrome() {
+  const immersive = !!(windowState.fullScreen || windowState.spanningAllDisplays);
+  document.body.classList.toggle('immersive', immersive);
+
+  if (!immersive) {
+    immersiveBadge.classList.remove('span-all');
+    immersiveBadge.textContent = '';
+    return;
+  }
+
+  if (windowState.spanningAllDisplays) {
+    immersiveBadge.classList.add('span-all');
+    immersiveBadge.textContent = '▦ All displays · ' + (windowState.displayCount || '?') + ' monitors';
+  } else {
+    immersiveBadge.classList.remove('span-all');
+    immersiveBadge.textContent = '⛶ Fullscreen';
   }
 }
 
@@ -720,7 +787,16 @@ let spanToastTimer = null;
 function spanToast(count) {
   toast.innerHTML =
     '<strong>Spanning ' + (count || 'all') + ' displays</strong>' +
-    '<span>Controls &amp; edit tools are on your primary display · <kbd>A</kbd> to exit · <kbd>E</kbd> to edit tiles</span>';
+    '<span>Dashed borders show each monitor · Controls are on your primary display · <kbd>A</kbd> to exit · <kbd>E</kbd> to edit tiles</span>';
+  toast.classList.add('show');
+  clearTimeout(spanToastTimer);
+  spanToastTimer = setTimeout(() => toast.classList.remove('show'), 6000);
+}
+
+function fullscreenToast() {
+  toast.innerHTML =
+    '<strong>Fullscreen</strong>' +
+    '<span>Press <kbd>F</kbd> to exit · <kbd>E</kbd> to edit and split tiles — numbered outlines show each pane</span>';
   toast.classList.add('show');
   clearTimeout(spanToastTimer);
   spanToastTimer = setTimeout(() => toast.classList.remove('show'), 5000);

@@ -253,6 +253,102 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
 }
 body.grid-on #grid-overlay { display: block; }
 
+/* ------------------------------------------------------ Display boundaries */
+#display-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  pointer-events: none;
+  display: none;
+}
+body.span-all #display-overlay { display: block; }
+
+.display-region {
+  position: absolute;
+  border: 2px dashed rgba(56, 224, 196, 0.75);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35) inset;
+  background: rgba(56, 224, 196, 0.04);
+}
+.display-region.primary {
+  border-color: rgba(91, 140, 255, 0.9);
+  background: rgba(91, 140, 255, 0.05);
+}
+.display-label {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: #fff;
+  background: rgba(10, 12, 18, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  padding: 4px 10px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+.display-region.primary .display-label {
+  background: rgba(91, 140, 255, 0.92);
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+
+/* ---------------------------------------------------- Immersive mode badge */
+#immersive-badge {
+  position: fixed;
+  top: 52px;
+  right: 14px;
+  z-index: 65;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: #fff;
+  background: rgba(91, 140, 255, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  padding: 6px 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+#immersive-badge.span-all { background: rgba(56, 224, 196, 0.92); color: #04130f; }
+body.immersive #immersive-badge { display: flex; }
+body.idle:not(.editing).immersive #immersive-badge { opacity: 0.35; }
+body.span-all #immersive-badge {
+  top: calc(var(--ui-top, 0px) + 52px);
+  right: calc(100vw - var(--ui-left, 0px) - var(--ui-width, 100vw) + 14px);
+}
+
+/* In immersive + edit mode, every tile gets a clear numbered outline so the
+   upcoming split is obvious even on a huge multi-monitor canvas. */
+body.immersive.editing .node-leaf {
+  box-shadow: inset 0 0 0 2px rgba(91, 140, 255, 0.85);
+}
+body.immersive.editing .node-leaf::before {
+  content: attr(data-tile-label);
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 6;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: #fff;
+  background: rgba(91, 140, 255, 0.9);
+  border-radius: 6px;
+  padding: 3px 8px;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+body.immersive.editing .node-leaf:hover {
+  box-shadow: inset 0 0 0 3px var(--accent-2);
+}
+
 /* --------------------------------------------------------- Split preview */
 #split-preview {
   position: fixed;

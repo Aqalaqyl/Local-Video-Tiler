@@ -60,6 +60,7 @@ function createWindow() {
 function sendWindowState() {
   if (!mainWindow) return;
   const primary = screen.getPrimaryDisplay();
+  const displays = screen.getAllDisplays();
   mainWindow.webContents.send('window:state', {
     fullScreen: mainWindow.isFullScreen(),
     spanningAllDisplays,
@@ -68,7 +69,12 @@ function sendWindowState() {
     // (the primary display) when the window spans every display at once.
     windowBounds: mainWindow.getBounds(),
     primaryBounds: primary.bounds,
-    displayCount: screen.getAllDisplays().length
+    displayCount: displays.length,
+    displays: displays.map((d) => ({
+      id: d.id,
+      bounds: d.bounds,
+      isPrimary: d.id === primary.id
+    }))
   });
 }
 
