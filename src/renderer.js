@@ -24,6 +24,9 @@ const gridOverlay = document.getElementById('grid-overlay');
 const editHint = document.getElementById('edit-hint');
 const toast = document.getElementById('toast');
 const displayPill = document.getElementById('display-pill');
+const layoutGuide = document.getElementById('layout-guide');
+const guideMap = document.getElementById('guide-map');
+const guideSummary = document.getElementById('guide-summary');
 
 const btnEdit = document.getElementById('btn-edit');
 const btnGrid = document.getElementById('btn-grid');
@@ -49,6 +52,7 @@ function uid() { return 'n' + (uidCounter++); }
 
 let root = makeLeaf();
 let focusedLeaf = null;
+const windowState = { fullScreen: false, spanningAllDisplays: false };
 
 // --------------------------------------------------------------- Node helpers
 function makeLeaf() {
@@ -92,6 +96,12 @@ function forEachLeaf(node, fn) {
   node.children.forEach((c) => forEachLeaf(c, fn));
 }
 
+function countLeaves(node) {
+  let count = 0;
+  forEachLeaf(node, () => { count += 1; });
+  return count;
+}
+
 // ============================================================================
 // Rendering
 // ============================================================================
@@ -102,6 +112,7 @@ function render() {
   stage.textContent = '';
   stage.appendChild(renderNode(root));
   applyFocus();
+  renderLayoutGuide();
   saveState();
 }
 
@@ -405,6 +416,7 @@ function startDividerDrag(e, node, container) {
     }
     node.ratio = ratio;
     firstChild.style.flex = `0 0 ${ratio * 100}%`;
+    renderLayoutGuide();
   }
   function onUp() {
     divider.classList.remove('dragging');
@@ -497,6 +509,51 @@ function setRegion(el, props) {
 
 function hidePreview() {
   preview.classList.remove('visible', 'vertical', 'horizontal');
+}
+
+// ============================================================================
+// Fullscreen / all-displays layout guide
+// ============================================================================
+function renderLayoutGuide() {
+  if (!guideMap || !guideSummary) return;
+  guideMap.textContent = '';
+  guideMap.appendChild(renderGuideNode(root));
+  const tiles = countLeaves(root);
+  guideSummary.textContent = tiles + (tiles === 1 ? ' tile' : ' tiles');
+}
+
+function renderGuideNode(node) {
+  if (node.kind === 'leaf') {
+    const leaf = document.createElement('div');
+    leaf.className = 'guide-leaf';
+    return leaf;
+  }
+
+  const split = document.createElement('div');
+  split.className = 'guide-split ' + node.direction;
+
+  const aWrap = document.createElement('div');
+  const bWrap = document.createElement('div');
+  aWrap.style.flex = `0 0 ${clamp(node.ratio, 0.05, 0.95) * 100}%`;
+  bWrap.style.flex = '1 1 0';
+  aWrap.style.display = 'flex';
+  bWrap.style.display = 'flex';
+  aWrap.style.minWidth = '0';
+  aWrap.style.minHeight = '0';
+  bWrap.style.minWidth = '0';
+  bWrap.style.minHeight = '0';
+
+  aWrap.appendChild(renderGuideNode(node.children[0]));
+  bWrap.appendChild(renderGuideNode(node.children[1]));
+  split.appendChild(aWrap);
+  split.appendChild(bWrap);
+  return split;
+}
+
+function refreshGuideVisibility() {
+  const show = windowState.fullScreen || windowState.spanningAllDisplays;
+  document.body.classList.toggle('guide-on', show);
+  if (layoutGuide) layoutGuide.setAttribute('aria-hidden', show ? 'false' : 'true');
 }
 
 function leafById(id) {
@@ -693,6 +750,9 @@ function applyWindowState(state) {
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
+  windowState.fullScreen = !!state.fullScreen;
+  windowState.spanningAllDisplays = !!state.spanningAllDisplays;
+  refreshGuideVisibility();
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';

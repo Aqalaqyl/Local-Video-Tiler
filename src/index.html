@@ -39,6 +39,15 @@
   <!-- Root tiling surface -->
   <main id="stage"></main>
 
+  <!-- Live mini-map layout guide shown in fullscreen / span-all modes. -->
+  <aside id="layout-guide" aria-hidden="true">
+    <div class="guide-head">
+      <strong>Layout guide</strong>
+      <span id="guide-summary">1 tile</span>
+    </div>
+    <div id="guide-map"></div>
+  </aside>
+
   <!-- Split preview shown while hovering in edit mode.
        The two shaded regions show exactly how the tile will be divided. -->
   <div id="split-preview" aria-hidden="true">

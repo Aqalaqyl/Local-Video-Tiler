@@ -125,6 +125,74 @@ body.span-all .hintbox {
   background: var(--bg);
 }
 
+/* --------------------------------------------- Fullscreen / span layout guide */
+#layout-guide {
+  position: fixed;
+  top: 56px;
+  right: 12px;
+  width: 260px;
+  max-width: 32vw;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(8, 10, 15, 0.82);
+  border: 1px solid rgba(120, 170, 255, 0.55);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  z-index: 52;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-8px) scale(0.98);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+body.guide-on #layout-guide {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+body.span-all #layout-guide {
+  right: auto;
+  left: calc(var(--ui-left, 0px) + var(--ui-width, 100vw) - min(260px, 32vw) - 12px);
+  top: calc(var(--ui-top, 0px) + 56px);
+}
+.guide-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.guide-head strong {
+  font-size: 12px;
+  letter-spacing: 0.2px;
+  color: #dce7ff;
+}
+#guide-summary {
+  font-size: 11px;
+  color: #b6c8f4;
+}
+#guide-map {
+  width: 100%;
+  height: 148px;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 170, 255, 0.5);
+  background: rgba(13, 18, 29, 0.88);
+  overflow: hidden;
+  display: flex;
+}
+.guide-split {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.guide-split.row { flex-direction: row; }
+.guide-split.col { flex-direction: column; }
+.guide-leaf {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(56, 224, 196, 0.85);
+  background: linear-gradient(145deg, rgba(56, 224, 196, 0.24), rgba(91, 140, 255, 0.15));
+}
+
 /* A split container lays out its two children either as a row or a column. */
 .node-split { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
 .node-split.row { flex-direction: row; }

@@ -29,6 +29,8 @@ nothing is uploaded anywhere.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
   - **Span / fullscreen across ALL displays at once** (`A`).
+  - **Fullscreen split indicator** — in fullscreen or span-all mode, a
+    high-contrast mini-map shows exactly how the screen is currently tiled.
   - When spanning every display, the control bar and edit tools are **pinned to
     your primary monitor** so they're always fully visible (never stranded in a
     dead zone between screens), and you can keep splitting/editing tiles right
