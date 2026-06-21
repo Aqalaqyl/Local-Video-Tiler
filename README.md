@@ -34,6 +34,9 @@ nothing is uploaded anywhere.
     dead zone between screens), and you can keep splitting/editing tiles right
     across the whole multi-monitor canvas. Hot-plugging or rearranging monitors
     re-fits the span automatically.
+  - In fullscreen or all-display mode, a high-contrast **layout guide** briefly
+    flashes on entry and stays visible while editing (or when the grid is on),
+    outlining each tile and, when spanning, each physical display.
 - **Minimal, auto-hiding interface** — the top bar, tile controls and even the
   mouse cursor fade away when you stop interacting, leaving a clean viewing
   surface. They reappear the moment you move the mouse.
@@ -70,6 +73,7 @@ npm start
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |
 | Adjust grid cell size | The **Cell** slider |
+| Show fullscreen/all-display layout guide | Enter fullscreen / all displays, or keep **Edit** / **Grid** enabled |
 | Reset layout | The **Reset** button |
 | Fullscreen (current display) | `F` or the **Fullscreen** button |
 | Fullscreen across ALL displays | `A` or the **All Displays** button |

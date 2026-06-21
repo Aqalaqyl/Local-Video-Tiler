@@ -21,6 +21,7 @@ const LS_KEY = 'lvt.state.v1';
 const stage = document.getElementById('stage');
 const preview = document.getElementById('split-preview');
 const gridOverlay = document.getElementById('grid-overlay');
+const layoutIndicator = document.getElementById('layout-indicator');
 const editHint = document.getElementById('edit-hint');
 const toast = document.getElementById('toast');
 const displayPill = document.getElementById('display-pill');
@@ -49,6 +50,14 @@ function uid() { return 'n' + (uidCounter++); }
 
 let root = makeLeaf();
 let focusedLeaf = null;
+let displayInfo = null;
+let windowState = {
+  fullScreen: false,
+  spanningAllDisplays: false,
+  windowBounds: null,
+  primaryBounds: null,
+  displayCount: 1
+};
 
 // --------------------------------------------------------------- Node helpers
 function makeLeaf() {
@@ -102,6 +111,7 @@ function render() {
   stage.textContent = '';
   stage.appendChild(renderNode(root));
   applyFocus();
+  refreshLayoutIndicator();
   saveState();
 }
 
@@ -255,10 +265,12 @@ function wireLeafEvents(leaf) {
 
   // Click on the tile body: split (edit mode) or focus (view mode).
   el.addEventListener('click', (e) => {
-    if (e.target.closest('.tile-toolbar') || e.target.closest('.tile-empty')) return;
+    if (e.target.closest('.tile-toolbar')) return;
     if (settings.editMode) {
       const s = computeSplit(leaf, e.clientX, e.clientY, e.shiftKey);
       splitLeaf(leaf, s.orientation, s.ratio);
+    } else if (e.target.closest('.tile-empty')) {
+      return;
     } else {
       setFocus(leaf);
     }
@@ -405,6 +417,7 @@ function startDividerDrag(e, node, container) {
     }
     node.ratio = ratio;
     firstChild.style.flex = `0 0 ${ratio * 100}%`;
+    refreshLayoutIndicator();
   }
   function onUp() {
     divider.classList.remove('dragging');
@@ -506,6 +519,141 @@ function leafById(id) {
 }
 
 // ============================================================================
+// Fullscreen / all-display layout indicator
+// ============================================================================
+let layoutIndicatorPulse = false;
+let layoutIndicatorTimer = null;
+
+function isLargeSurfaceMode() {
+  return !!(windowState.fullScreen || windowState.spanningAllDisplays);
+}
+
+function shouldShowLayoutIndicator() {
+  return isLargeSurfaceMode() && (settings.editMode || settings.gridOn || layoutIndicatorPulse);
+}
+
+function showLayoutIndicatorPulse() {
+  layoutIndicatorPulse = true;
+  clearTimeout(layoutIndicatorTimer);
+  refreshLayoutIndicator();
+  layoutIndicatorTimer = setTimeout(() => {
+    layoutIndicatorPulse = false;
+    refreshLayoutIndicator();
+  }, 4500);
+}
+
+function leafCount() {
+  let count = 0;
+  forEachLeaf(root, () => { count += 1; });
+  return count;
+}
+
+function refreshLayoutIndicator() {
+  if (!layoutIndicator) return;
+
+  const show = shouldShowLayoutIndicator();
+  layoutIndicator.classList.toggle('visible', show);
+  layoutIndicator.classList.toggle('pulse', layoutIndicatorPulse && show && !settings.editMode && !settings.gridOn);
+  layoutIndicator.classList.toggle('span-map', !!windowState.spanningAllDisplays);
+  if (!show) {
+    layoutIndicator.replaceChildren();
+    return;
+  }
+
+  const displayLayer = document.createElement('div');
+  displayLayer.className = 'indicator-display-layer';
+  appendDisplayBounds(displayLayer);
+
+  const tileLayer = document.createElement('div');
+  tileLayer.className = 'indicator-tile-layer';
+  appendTileBounds(tileLayer);
+
+  const badge = document.createElement('div');
+  badge.className = 'indicator-badge';
+  positionIndicatorBadge(badge);
+  badge.innerHTML = buildIndicatorBadge();
+
+  layoutIndicator.replaceChildren(displayLayer, tileLayer, badge);
+}
+
+function appendTileBounds(layer) {
+  const stageRect = stage.getBoundingClientRect();
+  if (!stageRect.width || !stageRect.height) return;
+
+  let i = 0;
+  forEachLeaf(root, (leaf) => {
+    if (!leaf.el || !leaf.el.isConnected) return;
+    i += 1;
+    const rect = leaf.el.getBoundingClientRect();
+    const tile = document.createElement('div');
+    tile.className = 'indicator-tile';
+    tile.style.left = rect.left + 'px';
+    tile.style.top = rect.top + 'px';
+    tile.style.width = rect.width + 'px';
+    tile.style.height = rect.height + 'px';
+
+    const label = document.createElement('span');
+    label.className = 'indicator-tile-label';
+    const widthPct = Math.round((rect.width / stageRect.width) * 100);
+    const heightPct = Math.round((rect.height / stageRect.height) * 100);
+    label.textContent = 'Tile ' + i + ' · ' + widthPct + '% × ' + heightPct + '%';
+    tile.appendChild(label);
+    layer.appendChild(tile);
+  });
+}
+
+function appendDisplayBounds(layer) {
+  if (!windowState.spanningAllDisplays || !displayInfo || !windowState.windowBounds) return;
+
+  displayInfo.displays.forEach((display, i) => {
+    const rect = document.createElement('div');
+    rect.className = 'indicator-display' + (display.isPrimary ? ' primary' : '');
+    rect.style.left = (display.bounds.x - windowState.windowBounds.x) + 'px';
+    rect.style.top = (display.bounds.y - windowState.windowBounds.y) + 'px';
+    rect.style.width = display.bounds.width + 'px';
+    rect.style.height = display.bounds.height + 'px';
+
+    const label = document.createElement('span');
+    label.className = 'indicator-display-label';
+    label.textContent =
+      (display.isPrimary ? 'Primary display' : 'Display ' + (i + 1)) +
+      ' · ' + display.bounds.width + '×' + display.bounds.height;
+    rect.appendChild(label);
+    layer.appendChild(rect);
+  });
+}
+
+function positionIndicatorBadge(badge) {
+  let left = 16;
+  let top = 56;
+  if (windowState.spanningAllDisplays && windowState.windowBounds && displayInfo) {
+    const primary = displayInfo.displays.find((d) => d.isPrimary);
+    if (primary) {
+      left = primary.bounds.x - windowState.windowBounds.x + 16;
+      top = Math.max(16, primary.bounds.y - windowState.windowBounds.y + 56);
+    }
+  }
+  badge.style.left = left + 'px';
+  badge.style.top = top + 'px';
+}
+
+function buildIndicatorBadge() {
+  const count = leafCount();
+  const mode = windowState.spanningAllDisplays
+    ? 'All-display layout guide'
+    : 'Fullscreen layout guide';
+  const displays = windowState.spanningAllDisplays
+    ? ' · ' + (windowState.displayCount || displayInfo?.count || 'all') + ' displays'
+    : '';
+  const grid = settings.gridOn
+    ? ' · grid ' + settings.cellSize + 'px' + (settings.snapOn ? ' + snap' : '')
+    : '';
+  return '<strong>' + mode + '</strong>' +
+    '<span>' + count + ' tile' + (count === 1 ? '' : 's') + displays + grid +
+    ' · click = vertical split · <kbd>Shift</kbd>+click = horizontal</span>';
+}
+
+// ============================================================================
 // Focus
 // ============================================================================
 function setFocus(leaf) {
@@ -534,6 +682,7 @@ function setEditMode(on) {
   } else {
     editHint.classList.remove('show');
   }
+  refreshLayoutIndicator();
   saveState();
 }
 
@@ -541,12 +690,14 @@ function setGrid(on) {
   settings.gridOn = on;
   document.body.classList.toggle('grid-on', on);
   btnGrid.classList.toggle('active', on);
+  refreshLayoutIndicator();
   saveState();
 }
 
 function setSnap(on) {
   settings.snapOn = on;
   btnSnap.classList.toggle('active', on);
+  refreshLayoutIndicator();
   saveState();
 }
 
@@ -556,6 +707,7 @@ function setCellSize(px) {
   gridOverlay.style.setProperty('--cell', px + 'px');
   gridSizeInput.value = String(px);
   gridSizeVal.textContent = String(px);
+  refreshLayoutIndicator();
   saveState();
 }
 
@@ -634,10 +786,12 @@ function wake() {
 async function refreshDisplays() {
   try {
     const info = await window.api.getDisplayInfo();
+    displayInfo = info;
     displayPill.textContent = info.count + (info.count === 1 ? ' display' : ' displays');
     displayPill.title = info.displays
       .map((d) => `${d.isPrimary ? '★ ' : ''}${d.bounds.width}×${d.bounds.height}`)
       .join('  ·  ');
+    refreshLayoutIndicator();
   } catch (_) {}
 }
 
@@ -690,9 +844,12 @@ btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
 
 function applyWindowState(state) {
+  const wasLargeSurface = isLargeSurfaceMode();
+  windowState = Object.assign({}, windowState, state);
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
+  document.body.classList.toggle('fullscreen-surface', !!state.fullScreen || !!state.spanningAllDisplays);
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -714,6 +871,12 @@ function applyWindowState(state) {
     rootStyle.removeProperty('--ui-width');
     document.body.dataset.spanning = '0';
   }
+
+  if (!wasLargeSurface && isLargeSurfaceMode()) {
+    showLayoutIndicatorPulse();
+  } else {
+    refreshLayoutIndicator();
+  }
 }
 
 let spanToastTimer = null;
@@ -729,7 +892,10 @@ function spanToast(count) {
 window.api.onWindowState(applyWindowState);
 window.api.onDisplayChanged(() => refreshDisplays());
 
-window.addEventListener('resize', () => { if (settings.editMode) hidePreview(); });
+window.addEventListener('resize', () => {
+  if (settings.editMode) hidePreview();
+  refreshLayoutIndicator();
+});
 
 // ----------------------------------------------------------------- Boot
 loadState();
