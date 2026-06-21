@@ -37,8 +37,10 @@ nothing is uploaded anywhere.
     **covers the taskbar / dock / menu bar**. The single tiling canvas is spread
     across the union of all monitors and each window shows just its own slice, so
     a tile (or a "Tile to Displays" layout) fills the screen it belongs to.
-    - Your **primary** display keeps the controls and stays editable.
-    - Every **other** display shows a clean, controls-free slice of the wall.
+    - Your **primary** display keeps the top control bar.
+    - **Every** display is a live editor — move the cursor to any screen and
+      split / resize / delete tiles there; the alignment grid spans all monitors
+      and edits sync instantly across the whole wall.
     - Hot-plugging or rearranging monitors re-fits the wall automatically.
   - When spanning every display, the control bar and edit tools are **pinned to
     your primary monitor** so they're always fully visible (never stranded in a

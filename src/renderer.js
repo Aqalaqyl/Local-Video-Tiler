@@ -59,10 +59,11 @@ let winState = {
 
 // ---------------------------------------------------------- Projection / wall
 // When spanning all displays, each monitor is covered by its own fullscreen
-// window. The main window is the `controller` (keeps the controls and edits the
-// primary display's slice); every other display gets a `mirror` window that
-// renders that display's slice of the global canvas. The whole canvas is sized
-// to the union of all displays and shifted so each window shows its own slice.
+// window. EVERY window is a full peer editor: it renders its display's slice of
+// the shared canvas, shows the grid + split preview, and lets you split / resize
+// / delete tiles right on that screen. Edits are broadcast so every display (and
+// the persisted layout on the controller) stays in sync. The whole canvas is
+// sized to the union of all displays and each window is shifted to show its slice.
 const projection = {
   active: false,
   role: 'controller',
@@ -71,6 +72,10 @@ const projection = {
 };
 
 const IS_MIRROR = new URLSearchParams(location.search).get('role') === 'mirror';
+
+// Guards against echo loops when applying a layout pushed from another window.
+let applyingRemote = false;
+let lastSyncJSON = '';
 
 function readProjectionQuery() {
   const p = new URLSearchParams(location.search);
@@ -81,28 +86,44 @@ function readProjectionQuery() {
   projection.union = { x: +p.get('ux'), y: +p.get('uy'), width: +p.get('uw'), height: +p.get('uh') };
 }
 
-/** Position the stage so this window shows only its display's slice of the canvas. */
+// Offset of this window's slice within the global canvas, per axis. Used to keep
+// the grid + snapping aligned to the SAME global grid across every display.
+function projOffX() {
+  return (projection.active && projection.viewport && projection.union) ? projection.viewport.x - projection.union.x : 0;
+}
+function projOffY() {
+  return (projection.active && projection.viewport && projection.union) ? projection.viewport.y - projection.union.y : 0;
+}
+
+/** Position the stage AND the grid so this window shows only its slice of the canvas. */
 function applyProjection() {
   const on = projection.active && projection.viewport && projection.union;
   document.body.classList.toggle('projection', !!on);
   document.body.classList.toggle('mirror', !!on && projection.role === 'mirror');
   document.body.classList.toggle('controller', !!on && projection.role === 'controller');
+  // The grid overlay moves with the stage so its lines stay continuous across
+  // every display instead of restarting at each window's edge.
+  const layers = [stage, gridOverlay];
   if (on) {
-    const offX = projection.viewport.x - projection.union.x;
-    const offY = projection.viewport.y - projection.union.y;
-    stage.style.left = (-offX) + 'px';
-    stage.style.top = (-offY) + 'px';
-    stage.style.right = 'auto';
-    stage.style.bottom = 'auto';
-    stage.style.width = projection.union.width + 'px';
-    stage.style.height = projection.union.height + 'px';
+    const offX = projOffX();
+    const offY = projOffY();
+    for (const el of layers) {
+      el.style.left = (-offX) + 'px';
+      el.style.top = (-offY) + 'px';
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+      el.style.width = projection.union.width + 'px';
+      el.style.height = projection.union.height + 'px';
+    }
   } else {
-    stage.style.left = '';
-    stage.style.top = '';
-    stage.style.right = '';
-    stage.style.bottom = '';
-    stage.style.width = '';
-    stage.style.height = '';
+    for (const el of layers) {
+      el.style.left = '';
+      el.style.top = '';
+      el.style.right = '';
+      el.style.bottom = '';
+      el.style.width = '';
+      el.style.height = '';
+    }
   }
   reconcileProjectionPlayback();
 }
@@ -133,7 +154,51 @@ function reconcileProjectionPlayback() {
   });
 }
 
-// Controller side: receive projection config + keep mirrors in sync.
+function snapshotSettings() {
+  return { editMode: settings.editMode, gridOn: settings.gridOn, snapOn: settings.snapOn, cellSize: settings.cellSize };
+}
+
+function applySettingsFromPayload(s) {
+  if (!s) return;
+  if (s.cellSize != null && s.cellSize !== settings.cellSize) setCellSize(s.cellSize);
+  if (!!s.gridOn !== settings.gridOn) setGrid(!!s.gridOn);
+  if (!!s.snapOn !== settings.snapOn) setSnap(!!s.snapOn);
+  if (!!s.editMode !== settings.editMode) setEditMode(!!s.editMode);
+}
+
+// Push the current layout + settings to peer windows (deduped to avoid echoes).
+function broadcastLayout() {
+  if (!projection.active) return;
+  const payload = { tree: serialize(root), settings: snapshotSettings() };
+  const json = JSON.stringify(payload);
+  if (json === lastSyncJSON) return;
+  lastSyncJSON = json;
+  try { window.api.pushLayout(payload); } catch (_) { /* ignore */ }
+}
+
+// Apply a layout pushed from another window onto this display's slice.
+function applyIncomingLayout(payload) {
+  if (!payload) return;
+  const json = JSON.stringify({ tree: payload.tree, settings: payload.settings });
+  if (json === lastSyncJSON) return;
+  lastSyncJSON = json;
+  applyingRemote = true;
+  try {
+    applySettingsFromPayload(payload.settings);
+    forEachLeaf(root, disposeLeaf);
+    root = payload.tree ? deserialize(payload.tree) : makeLeaf();
+    focusedLeaf = null;
+    render();
+    forEachLeaf(root, (leaf) => {
+      if (leaf.folder) loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, false);
+    });
+    applyProjection();
+  } finally {
+    applyingRemote = false;
+  }
+}
+
+// Receive projection config from the main process (controller window).
 function setProjection(config) {
   if (!config || !config.active) {
     projection.active = false;
@@ -150,37 +215,16 @@ function setProjection(config) {
   projection.union = config.union;
   applyProjection();
   renderDisplayGuide();
-  syncProjection();
-}
-
-/** Controller → mirrors: push the current layout so every screen matches. */
-function syncProjection() {
-  if (projection.active && projection.role === 'controller') {
-    try { window.api.pushLayout({ tree: serialize(root) }); } catch (_) { /* ignore */ }
-  }
-}
-
-// Mirror side: rebuild from a pushed layout and play this display's slice.
-function applyMirrorLayout(payload) {
-  const tree = payload && payload.tree;
-  forEachLeaf(root, disposeLeaf);
-  root = tree ? deserialize(tree) : makeLeaf();
-  focusedLeaf = null;
-  render();
-  applyProjection();
-  const loads = [];
-  forEachLeaf(root, (leaf) => {
-    if (leaf.folder) loads.push(loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, false));
-  });
-  Promise.all(loads).then(() => { applyProjection(); }).catch(() => {});
+  lastSyncJSON = '';
+  broadcastLayout();
 }
 
 function bootMirror() {
   readProjectionQuery();
   document.body.classList.add('mirror');
   applyProjection();
-  window.api.onLayout(applyMirrorLayout);
-  // If the controller re-broadcasts viewport (e.g. display change), update it.
+  window.api.onLayout(applyIncomingLayout);
+  // The controller may re-broadcast this window's viewport (e.g. display change).
   window.api.onProjection((config) => {
     if (config && config.active && config.role === 'mirror') {
       projection.viewport = config.viewport;
@@ -249,6 +293,7 @@ function render() {
   stage.textContent = '';
   stage.appendChild(renderNode(root));
   applyFocus();
+  if (projection.active) applyProjection();
   saveState();
 }
 
@@ -495,19 +540,23 @@ function computeSplit(leaf, clientX, clientY, shift) {
   const rect = leaf.el.getBoundingClientRect();
   const orientation = shift ? 'horizontal' : 'vertical';
   if (orientation === 'vertical') {
-    const localX = snapAxis(clientX, rect.left, rect.width);
+    const localX = snapAxis(clientX, rect.left, rect.width, projOffX());
     return { orientation, ratio: clamp(localX / rect.width, 0.05, 0.95) };
   }
-  const localY = snapAxis(clientY, rect.top, rect.height);
+  const localY = snapAxis(clientY, rect.top, rect.height, projOffY());
   return { orientation, ratio: clamp(localY / rect.height, 0.05, 0.95) };
 }
 
-/** Snap an absolute screen coordinate to the visible grid, return a tile-local offset. */
-function snapAxis(client, originEdge, size) {
+/**
+ * Snap an absolute screen coordinate to the grid and return a tile-local offset.
+ * `globalOffset` shifts into the shared canvas coordinate space so snapping (and
+ * the visible grid) line up across every display when projecting.
+ */
+function snapAxis(client, originEdge, size, globalOffset = 0) {
   let local = client - originEdge;
   if (settings.snapOn && settings.cellSize > 0) {
-    const absolute = client;
-    const snapped = Math.round(absolute / settings.cellSize) * settings.cellSize;
+    const g = client + globalOffset;
+    const snapped = Math.round(g / settings.cellSize) * settings.cellSize - globalOffset;
     local = snapped - originEdge;
   }
   return clamp(local, 0, size);
@@ -586,10 +635,10 @@ function startDividerDrag(e, node, container) {
     const rect = container.getBoundingClientRect();
     let ratio;
     if (horizontal) {
-      const localX = snapAxis(ev.clientX, rect.left, rect.width);
+      const localX = snapAxis(ev.clientX, rect.left, rect.width, projOffX());
       ratio = clamp(localX / rect.width, 0.05, 0.95);
     } else {
-      const localY = snapAxis(ev.clientY, rect.top, rect.height);
+      const localY = snapAxis(ev.clientY, rect.top, rect.height, projOffY());
       ratio = clamp(localY / rect.height, 0.05, 0.95);
     }
     node.ratio = ratio;
@@ -611,7 +660,6 @@ function startDividerDrag(e, node, container) {
 let lastMouse = { x: 0, y: 0 };
 
 function onGlobalMouseMove(e) {
-  if (IS_MIRROR) return;
   lastMouse = { x: e.clientX, y: e.clientY };
   wake();
   if (!settings.editMode) { hidePreview(); return; }
@@ -645,7 +693,7 @@ function updatePreview(x, y, shift) {
   if (shift) {
     preview.classList.add('horizontal');
     preview.classList.remove('vertical');
-    const localY = snapAxis(y, rect.top, rect.height);
+    const localY = snapAxis(y, rect.top, rect.height, projOffY());
     const pct = clamp(localY / rect.height, 0.05, 0.95);
     const aPct = Math.round(pct * 100);
 
@@ -663,7 +711,7 @@ function updatePreview(x, y, shift) {
   } else {
     preview.classList.add('vertical');
     preview.classList.remove('horizontal');
-    const localX = snapAxis(x, rect.left, rect.width);
+    const localX = snapAxis(x, rect.left, rect.width, projOffX());
     const pct = clamp(localX / rect.width, 0.05, 0.95);
     const aPct = Math.round(pct * 100);
 
@@ -767,7 +815,7 @@ function deserialize(obj) {
   if (obj.kind === 'leaf') {
     const l = makeLeaf();
     l.folder = obj.folder || null;
-    l.savedIndex = obj.index || 0;
+    l.index = l.savedIndex = obj.index || 0;
     return l;
   }
   return makeSplit(obj.direction, deserialize(obj.children[0]), deserialize(obj.children[1]), obj.ratio);
@@ -775,15 +823,14 @@ function deserialize(obj) {
 
 let saveTimer = null;
 function saveState() {
-  // Mirror windows never own the layout, so they must not persist or they would
-  // clobber the controller's saved state.
-  if (projection.role === 'mirror') return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try {
-      localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) }));
-    } catch (_) {}
-    syncProjection();
+    // Only the controller (main window) persists, so mirror windows can't clobber
+    // the saved layout. Every window broadcasts its edits to the other displays.
+    if (!IS_MIRROR) {
+      try { localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) })); } catch (_) {}
+    }
+    broadcastLayout();
   }, 200);
 }
 
@@ -1012,7 +1059,6 @@ function isTypingTarget(t) {
 document.addEventListener('mousemove', onGlobalMouseMove);
 document.addEventListener('mousedown', wake);
 document.addEventListener('keydown', (e) => {
-  if (IS_MIRROR) return;
   wake();
   if (e.key === 'Shift' && settings.editMode) updatePreview(lastMouse.x, lastMouse.y, true);
   if (isTypingTarget(e.target)) return;
@@ -1118,11 +1164,14 @@ window.addEventListener('resize', () => {
 
 // ----------------------------------------------------------------- Boot
 if (IS_MIRROR) {
-  // Display-only window: render this monitor's slice from the controller's layout.
+  // Per-display editor window: render this monitor's slice and stay in sync.
   bootMirror();
 } else {
+  // Controller (main) window: owns persistence + the control bar.
   window.api.onProjection(setProjection);
-  window.api.onProvideLayout(() => syncProjection());
+  window.api.onLayout(applyIncomingLayout);
+  // A mirror asked for the current layout — force a fresh broadcast to it.
+  window.api.onProvideLayout(() => { lastSyncJSON = ''; broadcastLayout(); });
   loadState();
   refreshDisplays();
   window.api.requestWindowState();

@@ -304,16 +304,19 @@ ipcMain.on('window:toggleSpanAll', () => toggleSpanAllDisplays());
 ipcMain.on('window:requestState', () => sendWindowState());
 
 // --- Projection (multi-display fullscreen) layout sync -------------------------
-// The controller (main window) is the source of truth for the layout. It pushes
-// the serialized tree to every mirror window so they stay in sync.
-ipcMain.on('projection:pushLayout', (_e, payload) => {
-  for (const w of projectionWindows) {
-    if (!w.isDestroyed()) w.webContents.send('projection:layout', payload);
+// Any display window can edit; its layout is relayed to every OTHER window so all
+// screens — and the controller's persisted state — stay in sync.
+ipcMain.on('projection:pushLayout', (e, payload) => {
+  const targets = [mainWindow, ...projectionWindows];
+  for (const w of targets) {
+    if (w && !w.isDestroyed() && w.webContents !== e.sender) {
+      w.webContents.send('projection:layout', payload);
+    }
   }
 });
 
 // A freshly-created mirror asks for the current layout; relay the request to the
-// controller, which answers with `projection:pushLayout`.
+// controller, which answers by broadcasting `projection:pushLayout`.
 ipcMain.on('projection:requestLayout', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('projection:provideLayout');

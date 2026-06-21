@@ -335,18 +335,12 @@ body.idle:not(.editing) #display-guide { opacity: 0; }
 .guide-cell.primary .guide-label { color: #fff; background: var(--accent); }
 
 /* ------------------------------------------------- Projection / display wall */
-/* Mirror windows are display-only: strip every piece of chrome so the screen
-   shows nothing but its slice of the video wall. */
-body.mirror { cursor: none; background: #000; }
+/* Per-display windows are full editors: keep the cursor, grid, split preview and
+   delete badges so every screen can be edited. Only hide the duplicate top
+   control bar (controls live on the primary display) and the windowed-only guide. */
+body.mirror { background: #000; }
 body.mirror #topbar,
-body.mirror #grid-overlay,
-body.mirror #display-guide,
-body.mirror #split-preview,
-body.mirror .hintbox,
-body.mirror .tile-toolbar,
-body.mirror .tile-del { display: none !important; }
-body.mirror #stage { pointer-events: none; }
-body.mirror .node-leaf { border-color: rgba(255,255,255,0.06); }
+body.mirror #display-guide { display: none !important; }
 
 /* --------------------------------------------------------- Split preview */
 #split-preview {
