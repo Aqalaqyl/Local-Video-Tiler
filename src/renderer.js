@@ -21,6 +21,7 @@ const LS_KEY = 'lvt.state.v1';
 const stage = document.getElementById('stage');
 const preview = document.getElementById('split-preview');
 const gridOverlay = document.getElementById('grid-overlay');
+const displayGuide = document.getElementById('display-guide');
 const editHint = document.getElementById('edit-hint');
 const toast = document.getElementById('toast');
 const displayPill = document.getElementById('display-pill');
@@ -31,6 +32,8 @@ const btnSnap = document.getElementById('btn-snap');
 const btnReset = document.getElementById('btn-reset');
 const btnFs = document.getElementById('btn-fs');
 const btnFsAll = document.getElementById('btn-fs-all');
+const btnGuide = document.getElementById('btn-guide');
+const btnTileDisplays = document.getElementById('btn-tile-displays');
 const btnMin = document.getElementById('btn-min');
 const btnX = document.getElementById('btn-x');
 const gridSizeInput = document.getElementById('grid-size');
@@ -41,7 +44,17 @@ const settings = {
   editMode: false,
   gridOn: false,
   snapOn: false,
-  cellSize: 80
+  cellSize: 80,
+  guideOn: false
+};
+
+// Latest window/display geometry pushed from the main process. Used to draw the
+// screen-split guide and to build a layout that matches the physical displays.
+let winState = {
+  fullScreen: false,
+  spanningAllDisplays: false,
+  windowBounds: null,
+  displays: []
 };
 
 let uidCounter = 1;
@@ -607,6 +620,7 @@ function loadState() {
   setGrid(!!settings.gridOn);
   setSnap(!!settings.snapOn);
   setEditMode(!!settings.editMode);
+  setGuide(!!settings.guideOn);
 
   render();
 
@@ -638,7 +652,171 @@ async function refreshDisplays() {
     displayPill.title = info.displays
       .map((d) => `${d.isPrimary ? '★ ' : ''}${d.bounds.width}×${d.bounds.height}`)
       .join('  ·  ');
+    btnTileDisplays.disabled = info.count < 2;
   } catch (_) {}
+}
+
+// ============================================================================
+// Screen-split guide — shows where each physical display falls so the user can
+// see how the canvas is divided (and where to split tiles) when going
+// fullscreen or spanning every monitor.
+// ============================================================================
+function unionBounds(displays) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const d of displays) {
+    minX = Math.min(minX, d.bounds.x);
+    minY = Math.min(minY, d.bounds.y);
+    maxX = Math.max(maxX, d.bounds.x + d.bounds.width);
+    maxY = Math.max(maxY, d.bounds.y + d.bounds.height);
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+function setGuide(on) {
+  settings.guideOn = on;
+  btnGuide.classList.toggle('active', on);
+  saveState();
+  renderDisplayGuide();
+}
+
+/**
+ * Position one guide region per display. When the window already spans every
+ * monitor the regions sit 1:1 on top of their physical screens; otherwise the
+ * whole multi-monitor desktop is scaled to fit inside the window as a preview
+ * of how a full-span layout would be divided.
+ */
+function renderDisplayGuide() {
+  const displays = winState.displays || [];
+  const show = settings.guideOn && displays.length > 0;
+  displayGuide.classList.toggle('visible', show);
+  if (!show) { displayGuide.textContent = ''; return; }
+
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const span = winState.spanningAllDisplays && winState.windowBounds;
+
+  let map;
+  if (span) {
+    const win = winState.windowBounds;
+    map = (b) => ({
+      left: b.x - win.x,
+      top: b.y - win.y,
+      width: b.width,
+      height: b.height
+    });
+  } else {
+    const u = unionBounds(displays);
+    const margin = 36;
+    const scale = Math.min((vw - margin * 2) / u.width, (vh - margin * 2) / u.height, 1);
+    const offX = (vw - u.width * scale) / 2;
+    const offY = (vh - u.height * scale) / 2;
+    map = (b) => ({
+      left: offX + (b.x - u.x) * scale,
+      top: offY + (b.y - u.y) * scale,
+      width: b.width * scale,
+      height: b.height * scale
+    });
+  }
+
+  displayGuide.classList.toggle('preview', !span);
+  displayGuide.textContent = '';
+  for (const d of displays) {
+    const r = map(d.bounds);
+    const cell = document.createElement('div');
+    cell.className = 'guide-cell' + (d.isPrimary ? ' primary' : '');
+    cell.style.left = r.left + 'px';
+    cell.style.top = r.top + 'px';
+    cell.style.width = r.width + 'px';
+    cell.style.height = r.height + 'px';
+    const label = document.createElement('div');
+    label.className = 'guide-label';
+    label.textContent =
+      `${d.isPrimary ? '★ ' : ''}Display ${d.index} · ${d.bounds.width}×${d.bounds.height}`;
+    cell.appendChild(label);
+    displayGuide.appendChild(cell);
+  }
+}
+
+// ============================================================================
+// Tile-to-displays — carve the canvas into a tile per physical monitor using a
+// guillotine partition of the display rectangles (handles rows, columns and
+// grids of monitors). Existing folder assignments are preserved in order.
+// ============================================================================
+function buildTreeFromRects(rects) {
+  if (rects.length === 1) return makeLeaf();
+
+  const eps = 2;
+  const minX = Math.min(...rects.map((r) => r.x));
+  const maxX = Math.max(...rects.map((r) => r.x + r.w));
+  const minY = Math.min(...rects.map((r) => r.y));
+  const maxY = Math.max(...rects.map((r) => r.y + r.h));
+
+  // Try a clean vertical cut (left | right), then a horizontal one (top / bottom).
+  const cut = (axisLo, axisHi, edgeOf, startOf) => {
+    const edges = [...new Set(rects.map(edgeOf))].sort((a, b) => a - b);
+    for (const c of edges) {
+      if (c <= axisLo + eps || c >= axisHi - eps) continue;
+      const first = rects.filter((r) => edgeOf(r) <= c + eps);
+      const second = rects.filter((r) => startOf(r) >= c - eps);
+      if (first.length && second.length && first.length + second.length === rects.length) {
+        return { c, first, second, ratio: clamp((c - axisLo) / (axisHi - axisLo), 0.05, 0.95) };
+      }
+    }
+    return null;
+  };
+
+  const v = cut(minX, maxX, (r) => r.x + r.w, (r) => r.x);
+  if (v) return makeSplit('row', buildTreeFromRects(v.first), buildTreeFromRects(v.second), v.ratio);
+  const h = cut(minY, maxY, (r) => r.y + r.h, (r) => r.y);
+  if (h) return makeSplit('col', buildTreeFromRects(h.first), buildTreeFromRects(h.second), h.ratio);
+
+  // Non-guillotine arrangement: fall back to an even split of the list.
+  const mid = Math.ceil(rects.length / 2);
+  return makeSplit('row', buildTreeFromRects(rects.slice(0, mid)), buildTreeFromRects(rects.slice(mid)), mid / rects.length);
+}
+
+function collectLeaves(node, out = []) {
+  if (node.kind === 'leaf') out.push(node);
+  else node.children.forEach((c) => collectLeaves(c, out));
+  return out;
+}
+
+function tileToDisplays() {
+  const displays = winState.displays || [];
+  if (displays.length < 2) {
+    flash('Tile to Displays needs 2+ connected displays');
+    return;
+  }
+  // Preserve current folder assignments in reading order.
+  const oldLeaves = collectLeaves(root);
+  const saved = oldLeaves.map((l) => ({ folder: l.folder, index: l.index }));
+
+  forEachLeaf(root, disposeLeaf);
+  const rects = displays
+    .slice()
+    .sort((a, b) => a.bounds.y - b.bounds.y || a.bounds.x - b.bounds.x)
+    .map((d) => ({ x: d.bounds.x, y: d.bounds.y, w: d.bounds.width, h: d.bounds.height }));
+
+  root = buildTreeFromRects(rects);
+  focusedLeaf = null;
+  render();
+
+  const newLeaves = collectLeaves(root);
+  newLeaves.forEach((leaf, i) => {
+    const s = saved[i];
+    if (s && s.folder) loadFolder(leaf, s.folder, s.index || 0, false);
+  });
+
+  flash(`Tiled layout to match ${displays.length} displays`);
+  if (!settings.guideOn) setGuide(true);
+}
+
+let flashTimer = null;
+function flash(msg) {
+  toast.innerHTML = '<strong>' + msg + '</strong>';
+  toast.classList.add('show');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => toast.classList.remove('show'), 2600);
 }
 
 // ============================================================================
@@ -661,6 +839,8 @@ document.addEventListener('keydown', (e) => {
     case 's': setSnap(!settings.snapOn); break;
     case 'f': window.api.toggleFullscreen(); break;
     case 'a': window.api.toggleSpanAll(); break;
+    case 'd': setGuide(!settings.guideOn); break;
+    case 't': tileToDisplays(); break;
     case ' ':
       if (focusedLeaf) { e.preventDefault(); togglePlay(focusedLeaf); }
       break;
@@ -685,14 +865,32 @@ btnReset.addEventListener('click', () => {
 });
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
+btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
+btnTileDisplays.addEventListener('click', () => tileToDisplays());
 btnMin.addEventListener('click', () => window.api.minimize());
 btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
 
 function applyWindowState(state) {
+  const wasSpanningAll = winState.spanningAllDisplays;
+  winState = {
+    fullScreen: !!state.fullScreen,
+    spanningAllDisplays: !!state.spanningAllDisplays,
+    windowBounds: state.windowBounds || null,
+    displays: state.displays || winState.displays || []
+  };
+
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
+
+  // Auto-show the screen-split guide the moment the canvas covers more than one
+  // physical screen, so it's always obvious how the surface is divided.
+  if (state.spanningAllDisplays && !wasSpanningAll && (state.displays || []).length > 1) {
+    setGuide(true);
+  } else {
+    renderDisplayGuide();
+  }
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -729,7 +927,10 @@ function spanToast(count) {
 window.api.onWindowState(applyWindowState);
 window.api.onDisplayChanged(() => refreshDisplays());
 
-window.addEventListener('resize', () => { if (settings.editMode) hidePreview(); });
+window.addEventListener('resize', () => {
+  if (settings.editMode) hidePreview();
+  renderDisplayGuide();
+});
 
 // ----------------------------------------------------------------- Boot
 loadState();

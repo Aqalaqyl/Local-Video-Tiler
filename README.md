@@ -34,6 +34,17 @@ nothing is uploaded anywhere.
     dead zone between screens), and you can keep splitting/editing tiles right
     across the whole multi-monitor canvas. Hot-plugging or rearranging monitors
     re-fits the span automatically.
+- **Screen-split guide** — an easy-to-see overlay that shows **exactly how the
+  canvas maps onto your physical screens**. Each monitor is outlined with a
+  glowing, labelled region (resolution + a ★ on your primary display) so you
+  always know where one display ends and the next begins.
+  - **Auto-appears** the moment you span all displays, and can be toggled any
+    time with `G`uide / the **Guide** button (`D`). When you're not spanning, it
+    previews the multi-monitor layout as a scaled mini-map so you can see how the
+    screen *would* be carved up before you commit.
+- **Tile to Displays** (`T`) — one click lays the tiles out to **match your
+  monitor arrangement** (rows, columns or grids of screens), so each video fills
+  exactly one display when you span. Existing folder assignments are kept.
 - **Minimal, auto-hiding interface** — the top bar, tile controls and even the
   mouse cursor fade away when you stop interacting, leaving a clean viewing
   surface. They reappear the moment you move the mouse.
@@ -73,6 +84,8 @@ npm start
 | Reset layout | The **Reset** button |
 | Fullscreen (current display) | `F` or the **Fullscreen** button |
 | Fullscreen across ALL displays | `A` or the **All Displays** button |
+| Toggle the screen-split guide | `D` or the **Guide** button |
+| Tile layout to match displays | `T` or the **Tile to Displays** button |
 | Exit edit mode | `Escape` |
 
 ## Supported formats
