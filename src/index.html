@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; media-src 'self' file: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;">
+  <title>Local Video Tiler</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header id="toolbar" class="toolbar hidden">
+      <div class="toolbar-left">
+        <span class="app-title">Video Tiler</span>
+        <button id="btn-reset" class="toolbar-btn" title="Reset layout to single tile">Reset</button>
+        <button id="btn-grid" class="toolbar-btn toggle" title="Toggle snap grid (G)">Grid</button>
+        <label class="grid-size-label">
+          Divisions
+          <select id="grid-divisions">
+            <option value="2">2</option>
+            <option value="3" selected>3</option>
+            <option value="4">4</option>
+            <option value="6">6</option>
+            <option value="8">8</option>
+          </select>
+        </label>
+      </div>
+      <div class="toolbar-center">
+        <span id="status-text" class="status-text">Click a tile to split · Shift+click for horizontal</span>
+      </div>
+      <div class="toolbar-right">
+        <select id="display-select" class="display-select" title="Target display">
+          <option value="window">Windowed</option>
+        </select>
+        <button id="btn-all-displays" class="toolbar-btn" title="Span all connected displays">All Displays</button>
+        <button id="btn-fullscreen" class="toolbar-btn" title="Fullscreen on selected display (F11)">Fullscreen</button>
+      </div>
+    </header>
+
+    <main id="workspace">
+      <div id="tile-root" class="tile-root"></div>
+      <canvas id="grid-canvas" class="grid-canvas hidden"></canvas>
+      <div id="split-indicator" class="split-indicator hidden"></div>
+    </main>
+
+    <footer id="hint-bar" class="hint-bar hidden">
+      <span>Click tile → vertical split</span>
+      <span class="sep">·</span>
+      <span>Shift+click → horizontal split</span>
+      <span class="sep">·</span>
+      <span>Right-click → assign folder</span>
+      <span class="sep">·</span>
+      <span>G → grid</span>
+      <span class="sep">·</span>
+      <span>Esc → exit fullscreen</span>
+    </footer>
+  </div>
+
+  <div id="context-menu" class="context-menu hidden">
+    <button data-action="assign-folder">Assign video folder…</button>
+    <button data-action="next-video">Next video</button>
+    <button data-action="prev-video">Previous video</button>
+    <hr>
+    <button data-action="split-v">Split vertically</button>
+    <button data-action="split-h">Split horizontally</button>
+    <hr>
+    <button data-action="close-tile" class="danger">Close tile</button>
+  </div>
+
+  <div id="display-preview" class="display-preview hidden">
+    <div class="preview-backdrop"></div>
+    <div class="preview-panel">
+      <h2 id="preview-title">Display Layout Preview</h2>
+      <p id="preview-desc" class="preview-desc"></p>
+      <div id="preview-frame" class="preview-frame">
+        <div id="preview-tiles" class="preview-tiles"></div>
+        <div id="preview-grid" class="preview-grid hidden"></div>
+      </div>
+      <div class="preview-actions">
+        <button id="preview-cancel" class="toolbar-btn">Cancel</button>
+        <button id="preview-confirm" class="toolbar-btn primary">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "local-video-tiler",
+  "version": "1.0.0",
+  "description": "Desktop media viewer with tiling window manager-style layout",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging"
+  },
+  "keywords": ["video", "tiler", "media", "desktop"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}
