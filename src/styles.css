@@ -1,0 +1,576 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #080808;
+  --surface: rgba(18, 18, 20, 0.92);
+  --border: rgba(255, 255, 255, 0.12);
+  --accent: #4da3ff;
+  --accent-dim: rgba(77, 163, 255, 0.35);
+  --danger: #ff5f57;
+  --text: #f0f0f2;
+  --text-dim: rgba(240, 240, 242, 0.55);
+  --split-line: rgba(77, 163, 255, 0.85);
+  --split-glow: rgba(77, 163, 255, 0.25);
+  --tile-hover: rgba(77, 163, 255, 0.08);
+  --toolbar-height: 44px;
+  --hint-height: 28px;
+  --transition: 0.28s ease;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  user-select: none;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.toolbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  height: var(--toolbar-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(12px);
+  transition: transform var(--transition), opacity var(--transition);
+}
+
+.toolbar.hidden {
+  transform: translateY(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.toolbar.visible,
+.toolbar:hover {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.toolbar-left,
+.toolbar-right,
+.toolbar-center {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar-center {
+  flex: 1;
+  justify-content: center;
+}
+
+.app-title {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-right: 4px;
+  color: var(--accent);
+}
+
+.toolbar-btn,
+.display-select,
+.grid-size-label select {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.toolbar-btn:hover,
+.display-select:hover,
+.grid-size-label select:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.toolbar-btn.toggle.active {
+  background: rgba(77, 163, 255, 0.18);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.toolbar-btn.primary {
+  background: rgba(77, 163, 255, 0.22);
+  border-color: var(--accent);
+}
+
+.grid-size-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.status-text {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+#workspace {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.tile-root {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.tile-split {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+.tile-split.vertical {
+  flex-direction: row;
+}
+
+.tile-split.horizontal {
+  flex-direction: column;
+}
+
+.tile-pane {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.tile-leaf {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  background: #050505;
+  overflow: hidden;
+  cursor: crosshair;
+}
+
+.tile-leaf:hover {
+  outline: 1px solid var(--accent-dim);
+  outline-offset: -1px;
+}
+
+.tile-leaf.active {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.tile-leaf.empty {
+  background:
+    repeating-linear-gradient(
+      45deg,
+      rgba(255, 255, 255, 0.02) 0,
+      rgba(255, 255, 255, 0.02) 8px,
+      transparent 8px,
+      transparent 16px
+    ),
+    #0c0c0c;
+}
+
+.tile-leaf video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  display: block;
+}
+
+.tile-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  text-align: center;
+  pointer-events: none;
+  background: linear-gradient(transparent 40%, rgba(0, 0, 0, 0.55));
+}
+
+.tile-overlay .tile-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.tile-meta {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.tile-leaf:hover .tile-meta,
+.tile-leaf.show-meta .tile-meta,
+body.ui-visible .tile-meta {
+  opacity: 1;
+}
+
+.tile-badge {
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+  backdrop-filter: blur(4px);
+}
+
+.split-handle {
+  flex: 0 0 6px;
+  position: relative;
+  z-index: 10;
+  background: transparent;
+  cursor: col-resize;
+  transition: background 0.15s;
+}
+
+.tile-split.horizontal .split-handle {
+  cursor: row-resize;
+}
+
+.split-handle::after {
+  content: "";
+  position: absolute;
+  background: rgba(255, 255, 255, 0.08);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.tile-split.vertical .split-handle::after {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+}
+
+.tile-split.horizontal .split-handle::after {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+}
+
+.split-handle:hover::after,
+.split-handle.dragging::after {
+  background: var(--split-line);
+  box-shadow: 0 0 12px var(--split-glow);
+}
+
+body.fullscreen-mode .split-handle::after,
+body.all-displays-mode .split-handle::after {
+  background: var(--split-line);
+  box-shadow: 0 0 16px var(--split-glow);
+}
+
+.grid-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+}
+
+.grid-canvas.hidden {
+  display: none;
+}
+
+.split-indicator {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 60;
+}
+
+.split-indicator.hidden {
+  display: none;
+}
+
+.split-indicator .indicator-line {
+  position: absolute;
+  background: var(--accent);
+  box-shadow: 0 0 20px var(--accent-dim);
+  opacity: 0.9;
+}
+
+.split-indicator .indicator-line.vertical {
+  width: 2px;
+  top: 0;
+  bottom: 0;
+}
+
+.split-indicator .indicator-line.horizontal {
+  height: 2px;
+  left: 0;
+  right: 0;
+}
+
+.hint-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  height: var(--hint-height);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  backdrop-filter: blur(12px);
+  transition: transform var(--transition), opacity var(--transition);
+}
+
+.hint-bar.hidden {
+  transform: translateY(100%);
+  opacity: 0;
+}
+
+.hint-bar.visible {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.hint-bar .sep {
+  opacity: 0.35;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.context-menu.hidden {
+  display: none;
+}
+
+.context-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.context-menu button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.context-menu button.danger {
+  color: var(--danger);
+}
+
+.context-menu hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 4px 0;
+}
+
+.display-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.display-preview.hidden {
+  display: none;
+}
+
+.preview-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+}
+
+.preview-panel {
+  position: relative;
+  width: min(720px, 92vw);
+  background: #121214;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+
+.preview-panel h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.preview-desc {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-bottom: 16px;
+}
+
+.preview-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: inset 0 0 40px rgba(77, 163, 255, 0.08);
+}
+
+.preview-tiles {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.preview-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.preview-grid.hidden {
+  display: none;
+}
+
+.preview-grid-line {
+  position: absolute;
+  background: rgba(77, 163, 255, 0.25);
+}
+
+.preview-grid-line.vertical {
+  width: 1px;
+  top: 0;
+  bottom: 0;
+}
+
+.preview-grid-line.horizontal {
+  height: 1px;
+  left: 0;
+  right: 0;
+}
+
+.preview-tile {
+  position: absolute;
+  border: 2px solid var(--split-line);
+  background: rgba(77, 163, 255, 0.06);
+  box-sizing: border-box;
+}
+
+.preview-tile-label {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  font-size: 9px;
+  color: var(--accent);
+  background: rgba(0, 0, 0, 0.6);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.preview-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.preview-split-line {
+  position: absolute;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-dim);
+  z-index: 2;
+}
+
+.preview-split-line.vertical {
+  width: 3px;
+  top: 0;
+  bottom: 0;
+}
+
+.preview-split-line.horizontal {
+  height: 3px;
+  left: 0;
+  right: 0;
+}
+
+body.fullscreen-mode::before,
+body.all-displays-mode::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  border: 3px solid var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(77, 163, 255, 0.3);
+}
+
+body.fullscreen-mode .tile-split::after,
+body.all-displays-mode .tile-split::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 1px dashed rgba(77, 163, 255, 0.2);
+}
