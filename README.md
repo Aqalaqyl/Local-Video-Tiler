@@ -32,10 +32,14 @@ nothing is uploaded anywhere.
   volume and mute controls.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
-  - **Span / fullscreen across ALL displays at once** (`A`) — a borderless,
-    always-on-top surface sized to the union of every monitor, so the app is
-    genuinely fullscreen across the whole multi-monitor canvas (works on macOS
-    too via `enableLargerThanScreen`).
+  - **Span / fullscreen across ALL displays at once** (`A`) — an immersive,
+    always-on-top surface that **covers the taskbar / dock / menu bar**:
+    - With a **single** display it uses real OS fullscreen, which reliably hides
+      the taskbar for a fully immersive surface.
+    - With **multiple** displays it stretches a borderless, `screen-saver`-level
+      window across the union of every monitor (drawn above the taskbar/dock),
+      sized larger than one screen via `enableLargerThanScreen` so macOS doesn't
+      clamp it to a single display.
   - When spanning every display, the control bar and edit tools are **pinned to
     your primary monitor** so they're always fully visible (never stranded in a
     dead zone between screens), and you can keep splitting/editing tiles right

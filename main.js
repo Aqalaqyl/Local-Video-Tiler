@@ -16,6 +16,9 @@ let mainWindow = null;
 // Remembers the windowed geometry so we can restore after an all-display span.
 let savedBounds = null;
 let spanningAllDisplays = false;
+// Whether the current span used real OS fullscreen (single-display case) so we
+// know how to undo it on restore.
+let spanUsedNativeFullscreen = false;
 
 function createWindow() {
   const primary = screen.getPrimaryDisplay();
@@ -106,25 +109,59 @@ function spanAllDisplays() {
   if (!spanningAllDisplays) {
     savedBounds = mainWindow.getBounds();
   }
-  // Leave any native fullscreen first so setBounds is honoured.
-  if (mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
 
-  const target = getAllDisplaysBounds();
-  mainWindow.setBounds(target);
+  // Strip chrome and raise the window above the taskbar / dock. The
+  // `screen-saver` level is the documented way to sit above the Windows taskbar
+  // and the macOS Dock; covering the area + this level hides the taskbar behind
+  // the window for an immersive surface.
+  mainWindow.setMenuBarVisibility(false);
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
-  mainWindow.setVisibleOnAllWorkspaces(true);
-  mainWindow.focus();
+  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
   spanningAllDisplays = true;
+  const target = getAllDisplaysBounds();
+  const singleScreen = screen.getAllDisplays().length <= 1;
+
+  if (singleScreen) {
+    // One display: use real OS fullscreen, which reliably covers the taskbar /
+    // dock / menu bar on every platform (a plain borderless window does not, as
+    // window managers reserve the panel/strut area otherwise).
+    spanUsedNativeFullscreen = true;
+    mainWindow.setBounds(target);
+    if (process.platform === 'darwin') mainWindow.setSimpleFullScreen(true);
+    else mainWindow.setFullScreen(true);
+  } else {
+    // Multiple displays: native fullscreen only covers one screen, so stretch a
+    // borderless, always-on-top window across the union of every monitor.
+    spanUsedNativeFullscreen = false;
+    if (mainWindow.isSimpleFullScreen && mainWindow.isSimpleFullScreen()) {
+      mainWindow.setSimpleFullScreen(false);
+    }
+    if (mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
+    mainWindow.setBounds(target);
+    mainWindow.setContentBounds(target);
+  }
+
+  mainWindow.moveTop();
+  mainWindow.focus();
   sendWindowState();
 }
 
 function restoreFromSpan() {
   if (!mainWindow) return;
+  if (spanUsedNativeFullscreen) {
+    if (process.platform === 'darwin') mainWindow.setSimpleFullScreen(false);
+    else mainWindow.setFullScreen(false);
+    spanUsedNativeFullscreen = false;
+  }
   mainWindow.setAlwaysOnTop(false);
   mainWindow.setVisibleOnAllWorkspaces(false);
-  if (savedBounds) mainWindow.setBounds(savedBounds);
   spanningAllDisplays = false;
+  // Restore the previous windowed geometry once we've left fullscreen.
+  const restore = () => { if (savedBounds && mainWindow) mainWindow.setBounds(savedBounds); };
+  restore();
+  setTimeout(restore, 60);
   sendWindowState();
 }
 
@@ -203,10 +240,11 @@ app.whenReady().then(() => {
   // Re-broadcast display changes so the renderer can update its info pill.
   const broadcastDisplays = () => {
     if (!mainWindow) return;
-    // If we're spanning every display, re-fit to the new arrangement so the
-    // window keeps covering all monitors after a hot-plug / resolution change.
+    // If we're spanning every display, re-apply the span so it keeps covering
+    // all monitors (and switches between native-fullscreen for a single screen
+    // and a borderless span for many) after a hot-plug / resolution change.
     if (spanningAllDisplays) {
-      mainWindow.setBounds(getAllDisplaysBounds());
+      spanAllDisplays();
     }
     mainWindow.webContents.send('display:changed');
     sendWindowState();
