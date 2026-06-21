@@ -179,6 +179,9 @@ function broadcastLayout() {
 }
 
 // Apply a layout pushed from another window onto this display's slice.
+// Reconciles against the existing tree, REUSING leaves (and their live <video>
+// playback) that still have the same folder, so an edit on another display
+// (split / delete / resize) doesn't restart the videos already playing here.
 function applyIncomingLayout(payload) {
   if (!payload) return;
   const json = JSON.stringify({ tree: payload.tree, settings: payload.settings });
@@ -187,12 +190,37 @@ function applyIncomingLayout(payload) {
   applyingRemote = true;
   try {
     applySettingsFromPayload(payload.settings);
-    forEachLeaf(root, disposeLeaf);
-    root = payload.tree ? deserialize(payload.tree) : makeLeaf();
+
+    const pool = [];
+    forEachLeaf(root, (l) => pool.push(l));
+    const used = new Set();
+    const takeLeaf = (folder) => {
+      const want = folder || null;
+      for (const l of pool) {
+        if (!used.has(l) && (l.folder || null) === want) { used.add(l); return l; }
+      }
+      return null;
+    };
+    const build = (node) => {
+      if (!node || node.kind === 'leaf') {
+        const folder = node ? (node.folder || null) : null;
+        const leaf = takeLeaf(folder) || makeLeaf();
+        leaf.folder = folder;
+        leaf.loop = node ? !!node.loop : false;
+        return leaf;
+      }
+      return makeSplit(node.direction, build(node.children[0]), build(node.children[1]), node.ratio);
+    };
+
+    const newRoot = build(payload.tree);
+    // Tiles that no longer exist get torn down; reused ones keep playing.
+    for (const l of pool) { if (!used.has(l)) disposeLeaf(l); }
+    root = newRoot;
     focusedLeaf = null;
     render();
+    // Start media only for brand-new tiles; reused tiles are already playing.
     forEachLeaf(root, (leaf) => {
-      if (leaf.folder) loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, false);
+      if (leaf.folder && leaf.files.length === 0) loadFolder(leaf, leaf.folder, 0, true);
     });
     applyProjection();
   } finally {
