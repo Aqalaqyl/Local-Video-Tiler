@@ -30,6 +30,9 @@ function createWindow() {
     frame: false,
     show: false,
     title: 'Local Video Tiler',
+    // Required so the window may be sized larger than a single screen — without
+    // it macOS clamps the window to one display and "All Displays" can't span.
+    enableLargerThanScreen: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

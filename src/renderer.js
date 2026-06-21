@@ -267,8 +267,12 @@ function wireLeafEvents(leaf) {
   video.addEventListener('ended', () => step(leaf, 1, true));
 
   // Click on the tile body: split (edit mode) or focus (view mode).
+  // Note: the toolbar buttons and the "Choose media folder…" / 📁 buttons all
+  // call stopPropagation, so they never reach here. We must NOT bail out on the
+  // empty-state placeholder itself — otherwise a freshly-created (folder-less)
+  // tile, whose placeholder covers its whole body, could never be split.
   el.addEventListener('click', (e) => {
-    if (e.target.closest('.tile-toolbar') || e.target.closest('.tile-empty')) return;
+    if (e.target.closest('.tile-toolbar')) return;
     if (settings.editMode) {
       const s = computeSplit(leaf, e.clientX, e.clientY, e.shiftKey);
       splitLeaf(leaf, s.orientation, s.ratio);

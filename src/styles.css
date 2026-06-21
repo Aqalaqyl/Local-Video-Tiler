@@ -138,12 +138,16 @@ body.span-all .hintbox {
   min-height: 0;
   overflow: hidden;
   background: #050507;
-  border: 1px solid rgba(255,255,255,0.04);
+  /* A clearly visible boundary so the user can always see how the surface has
+     been split, even over dark video. */
+  border: 1px solid rgba(255,255,255,0.14);
 }
 .node-leaf.focused { box-shadow: inset 0 0 0 2px var(--accent); }
 
-/* Editing affordance: hovering a tile glows so the target is obvious. */
-body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.5); }
+/* While editing, make every tile boundary pop so the current layout — and how a
+   click will divide it — is unmistakable. */
+body.editing .node-leaf { border-color: rgba(91,140,255,0.55); }
+body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.8); }
 
 .tile-video {
   width: 100%;
@@ -234,12 +238,16 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
 .divider::after {
   content: "";
   position: absolute;
-  background: var(--line);
+  /* Brighter than the old near-invisible line so the split between tiles always
+     reads clearly. */
+  background: rgba(255,255,255,0.28);
   transition: background 0.15s ease;
 }
 .node-split.row > .divider::after { top: 0; bottom: 0; left: 50%; width: 2px; transform: translateX(-50%); }
 .node-split.col > .divider::after { left: 0; right: 0; top: 50%; height: 2px; transform: translateY(-50%); }
-.divider:hover::after, .divider.dragging::after { background: var(--accent); }
+.divider:hover::after, .divider.dragging::after { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+/* In edit mode the dividers glow with the accent colour so the layout is obvious. */
+body.editing .divider::after { background: var(--accent); opacity: 0.85; }
 
 /* ----------------------------------------------------------- Grid overlay */
 #grid-overlay {

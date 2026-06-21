@@ -23,12 +23,19 @@ nothing is uploaded anywhere.
   - **Shift + left click → horizontal split** (top / bottom).
   - The split happens **at the cursor position**, so you choose the proportions
     as you click.
+  - You can split **any** tile this way — including brand-new, folder-less tiles.
+  - **Always-visible boundaries** — tile borders and the dividers between them
+    are clearly drawn (and glow in the accent colour while editing) so you can
+    always see how the surface has been divided.
 - **Per-tile media folders** — assign any folder to a tile and it becomes a
   playlist of the video files inside it, with play/pause, next/previous, seek,
   volume and mute controls.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
-  - **Span / fullscreen across ALL displays at once** (`A`).
+  - **Span / fullscreen across ALL displays at once** (`A`) — a borderless,
+    always-on-top surface sized to the union of every monitor, so the app is
+    genuinely fullscreen across the whole multi-monitor canvas (works on macOS
+    too via `enableLargerThanScreen`).
   - When spanning every display, the control bar and edit tools are **pinned to
     your primary monitor** so they're always fully visible (never stranded in a
     dead zone between screens), and you can keep splitting/editing tiles right
