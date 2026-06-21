@@ -21,6 +21,8 @@ const LS_KEY = 'lvt.state.v1';
 const stage = document.getElementById('stage');
 const preview = document.getElementById('split-preview');
 const gridOverlay = document.getElementById('grid-overlay');
+const layoutOverlay = document.getElementById('layout-overlay');
+const displayOverlay = document.getElementById('display-overlay');
 const editHint = document.getElementById('edit-hint');
 const toast = document.getElementById('toast');
 const displayPill = document.getElementById('display-pill');
@@ -29,6 +31,10 @@ const btnEdit = document.getElementById('btn-edit');
 const btnGrid = document.getElementById('btn-grid');
 const btnSnap = document.getElementById('btn-snap');
 const btnReset = document.getElementById('btn-reset');
+const btnPreset2col = document.getElementById('btn-preset-2col');
+const btnPreset2row = document.getElementById('btn-preset-2row');
+const btnPreset2x2 = document.getElementById('btn-preset-2x2');
+const btnPreset3x3 = document.getElementById('btn-preset-3x3');
 const btnFs = document.getElementById('btn-fs');
 const btnFsAll = document.getElementById('btn-fs-all');
 const btnMin = document.getElementById('btn-min');
@@ -49,6 +55,8 @@ function uid() { return 'n' + (uidCounter++); }
 
 let root = makeLeaf();
 let focusedLeaf = null;
+let currentWindowState = {};
+let displayInfo = null;
 
 // --------------------------------------------------------------- Node helpers
 function makeLeaf() {
@@ -102,6 +110,8 @@ function render() {
   stage.textContent = '';
   stage.appendChild(renderNode(root));
   applyFocus();
+  // Rebuild overlays after DOM settles so getBoundingClientRect is accurate.
+  requestAnimationFrame(buildLayoutOverlay);
   saveState();
 }
 
@@ -527,6 +537,7 @@ function setEditMode(on) {
   btnEdit.classList.toggle('active', on);
   if (!on) hidePreview();
   forEachLeaf(root, updateLeaf);
+  buildLayoutOverlay();
   if (on) {
     editHint.classList.add('show');
     clearTimeout(setEditMode._t);
@@ -629,15 +640,176 @@ function wake() {
 }
 
 // ============================================================================
+// Layout wireframe overlay
+// ============================================================================
+
+/**
+ * Rebuild the edit-mode overlay that shows tile numbers, folder names, and
+ * split ratios on top of every divider.  Called via requestAnimationFrame
+ * after render() so that getBoundingClientRect is accurate.
+ */
+function buildLayoutOverlay() {
+  if (!layoutOverlay) return;
+  layoutOverlay.innerHTML = '';
+  if (!settings.editMode) return;
+
+  let tileNum = 0;
+  forEachLeaf(root, (leaf) => {
+    if (!leaf.el) return;
+    tileNum++;
+    const rect = leaf.el.getBoundingClientRect();
+
+    const tile = document.createElement('div');
+    tile.className = 'lo-tile';
+    tile.style.cssText =
+      `left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px`;
+
+    const inner = document.createElement('div');
+    inner.className = 'lo-inner';
+
+    const num = document.createElement('div');
+    num.className = 'lo-num';
+    num.textContent = String(tileNum);
+    inner.appendChild(num);
+
+    if (leaf.folder) {
+      const parts = leaf.folder.replace(/\\/g, '/').split('/');
+      const name = document.createElement('div');
+      name.className = 'lo-name';
+      name.textContent = '\u{1F4C1} ' + (parts[parts.length - 1] || leaf.folder);
+      inner.appendChild(name);
+
+      if (leaf.files.length > 0) {
+        const count = document.createElement('div');
+        count.className = 'lo-count';
+        count.textContent = leaf.files.length + ' file' + (leaf.files.length !== 1 ? 's' : '');
+        inner.appendChild(count);
+      }
+    } else {
+      const empty = document.createElement('div');
+      empty.className = 'lo-empty';
+      empty.textContent = 'no folder assigned';
+      inner.appendChild(empty);
+    }
+
+    tile.appendChild(inner);
+    layoutOverlay.appendChild(tile);
+  });
+
+  // Ratio badge on every split divider.
+  function addRatioBadges(node) {
+    if (node.kind !== 'split') return;
+    const containerEl = stage.querySelector(`[data-id="${node.id}"]`);
+    if (containerEl) {
+      const dividerEl = containerEl.querySelector(':scope > .divider');
+      if (dividerEl) {
+        const dr = dividerEl.getBoundingClientRect();
+        const badge = document.createElement('div');
+        badge.className = 'lo-ratio-badge';
+        badge.textContent =
+          Math.round(node.ratio * 100) + ':' + Math.round((1 - node.ratio) * 100);
+        badge.style.left = (dr.left + dr.width / 2) + 'px';
+        badge.style.top = (dr.top + dr.height / 2) + 'px';
+        layoutOverlay.appendChild(badge);
+      }
+    }
+    node.children.forEach(addRatioBadges);
+  }
+  addRatioBadges(root);
+}
+
+// ============================================================================
+// Display boundary overlay
+// ============================================================================
+
+/**
+ * Draw dashed boundary boxes for each physical monitor when the window spans
+ * all displays.  This gives the user a clear reference for where each screen
+ * ends and the next begins.
+ */
+function buildDisplayOverlay() {
+  if (!displayOverlay) return;
+  displayOverlay.innerHTML = '';
+
+  const state = currentWindowState;
+  if (!state.spanningAllDisplays || !displayInfo || !state.windowBounds) return;
+
+  displayInfo.displays.forEach((d, i) => {
+    const x = d.bounds.x - state.windowBounds.x;
+    const y = d.bounds.y - state.windowBounds.y;
+
+    const region = document.createElement('div');
+    region.className = 'do-region' + (d.isPrimary ? ' primary' : '');
+    region.style.cssText =
+      `left:${x}px;top:${y}px;width:${d.bounds.width}px;height:${d.bounds.height}px`;
+
+    const label = document.createElement('div');
+    label.className = 'do-label';
+    label.textContent =
+      (d.isPrimary ? '\u2605 Primary \u00b7 ' : '') +
+      `Display ${i + 1}  ${d.bounds.width}\u00d7${d.bounds.height}`;
+    region.appendChild(label);
+    displayOverlay.appendChild(region);
+  });
+}
+
+// ============================================================================
+// Layout presets
+// ============================================================================
+
+/**
+ * Build a balanced BSP tree for a rows×cols equal grid.
+ * Splits are made by halving the larger axis recursively.
+ */
+function buildGridTree(rows, cols) {
+  if (rows === 1 && cols === 1) return makeLeaf();
+
+  if (cols > 1) {
+    const leftCols = Math.ceil(cols / 2);
+    const rightCols = cols - leftCols;
+    return makeSplit('row',
+      buildGridTree(rows, leftCols),
+      buildGridTree(rows, rightCols),
+      leftCols / cols
+    );
+  }
+
+  const topRows = Math.ceil(rows / 2);
+  const bottomRows = rows - topRows;
+  return makeSplit('col',
+    buildGridTree(topRows, cols),
+    buildGridTree(bottomRows, cols),
+    topRows / rows
+  );
+}
+
+function applyPresetLayout(rows, cols) {
+  forEachLeaf(root, disposeLeaf);
+  focusedLeaf = null;
+  root = buildGridTree(rows, cols);
+  render();
+  showToast(`${rows}\u00d7${cols} grid \u2014 ${rows * cols} tiles`);
+}
+
+function showToast(html) {
+  toast.innerHTML = '<strong>' + html + '</strong>';
+  toast.classList.add('show');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+// ============================================================================
 // Displays / window state
 // ============================================================================
 async function refreshDisplays() {
   try {
     const info = await window.api.getDisplayInfo();
+    displayInfo = info;
     displayPill.textContent = info.count + (info.count === 1 ? ' display' : ' displays');
     displayPill.title = info.displays
       .map((d) => `${d.isPrimary ? '★ ' : ''}${d.bounds.width}×${d.bounds.height}`)
       .join('  ·  ');
+    buildDisplayOverlay();
   } catch (_) {}
 }
 
@@ -683,6 +855,10 @@ btnReset.addEventListener('click', () => {
   focusedLeaf = null;
   render();
 });
+btnPreset2col.addEventListener('click', () => applyPresetLayout(1, 2));
+btnPreset2row.addEventListener('click', () => applyPresetLayout(2, 1));
+btnPreset2x2.addEventListener('click', () => applyPresetLayout(2, 2));
+btnPreset3x3.addEventListener('click', () => applyPresetLayout(3, 3));
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnMin.addEventListener('click', () => window.api.minimize());
@@ -690,9 +866,11 @@ btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
 
 function applyWindowState(state) {
+  currentWindowState = state;
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
+  document.body.classList.toggle('is-fullscreen', !!state.fullScreen && !state.spanningAllDisplays);
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -714,22 +892,29 @@ function applyWindowState(state) {
     rootStyle.removeProperty('--ui-width');
     document.body.dataset.spanning = '0';
   }
+
+  buildDisplayOverlay();
 }
 
-let spanToastTimer = null;
 function spanToast(count) {
   toast.innerHTML =
     '<strong>Spanning ' + (count || 'all') + ' displays</strong>' +
-    '<span>Controls &amp; edit tools are on your primary display · <kbd>A</kbd> to exit · <kbd>E</kbd> to edit tiles</span>';
+    '<span>Controls &amp; edit tools are on your primary display \u00b7 <kbd>A</kbd> to exit \u00b7 <kbd>E</kbd> to edit tiles</span>';
   toast.classList.add('show');
-  clearTimeout(spanToastTimer);
-  spanToastTimer = setTimeout(() => toast.classList.remove('show'), 5000);
+  clearTimeout(spanToast._t);
+  spanToast._t = setTimeout(() => toast.classList.remove('show'), 5000);
 }
 
 window.api.onWindowState(applyWindowState);
 window.api.onDisplayChanged(() => refreshDisplays());
 
-window.addEventListener('resize', () => { if (settings.editMode) hidePreview(); });
+window.addEventListener('resize', () => {
+  if (settings.editMode) {
+    hidePreview();
+    requestAnimationFrame(buildLayoutOverlay);
+  }
+  buildDisplayOverlay();
+});
 
 // ----------------------------------------------------------------- Boot
 loadState();

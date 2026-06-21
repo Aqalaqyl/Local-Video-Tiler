@@ -24,6 +24,10 @@
       </label>
       <span class="sep"></span>
       <button id="btn-reset" class="tool" title="Reset layout to a single tile">Reset</button>
+      <button id="btn-preset-2col" class="tool preset" title="2 columns side-by-side">▥ 2</button>
+      <button id="btn-preset-2row" class="tool preset" title="2 rows top/bottom">▤ 2</button>
+      <button id="btn-preset-2x2" class="tool preset" title="2×2 equal grid">⊞ 4</button>
+      <button id="btn-preset-3x3" class="tool preset" title="3×3 equal grid">⊟ 9</button>
       <button id="btn-fs" class="tool" title="Fullscreen on current display (F)">Fullscreen</button>
       <button id="btn-fs-all" class="tool" title="Span / fullscreen across ALL displays (A)">All Displays</button>
       <span id="display-pill" class="pill" title="Connected displays">1 display</span>
@@ -35,6 +39,15 @@
 
   <!-- Alignment grid overlay -->
   <div id="grid-overlay" aria-hidden="true"></div>
+
+  <!-- Display boundary overlay: visible when spanning all monitors -->
+  <div id="display-overlay" aria-hidden="true"></div>
+
+  <!-- Layout wireframe overlay: visible in edit mode, shows tile numbers + ratios -->
+  <div id="layout-overlay" aria-hidden="true"></div>
+
+  <!-- Screen-edge indicator: coloured border to show fullscreen / span state -->
+  <div id="screen-indicator" aria-hidden="true"></div>
 
   <!-- Root tiling surface -->
   <main id="stage"></main>
@@ -51,7 +64,7 @@
   <!-- Transient hint shown when entering edit mode -->
   <div id="edit-hint" class="hintbox" aria-hidden="true">
     <strong>Edit mode</strong>
-    <span>Click a tile to split it vertically · Hold <kbd>Shift</kbd> to split horizontally · Drag dividers to resize</span>
+    <span>Click a tile to split vertically · <kbd>Shift</kbd>+click to split horizontally · Drag dividers to resize · <kbd>G</kbd> grid · <kbd>S</kbd> snap</span>
   </div>
 
   <!-- Transient toast (e.g. when spanning all displays) -->
