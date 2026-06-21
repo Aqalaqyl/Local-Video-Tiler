@@ -16,9 +16,26 @@ let mainWindow = null;
 // Remembers the windowed geometry so we can restore after an all-display span.
 let savedBounds = null;
 let spanningAllDisplays = false;
-// Whether the current span used real OS fullscreen (single-display case) so we
-// know how to undo it on restore.
-let spanUsedNativeFullscreen = false;
+
+// While spanning, every NON-primary display gets its own fullscreen "mirror"
+// window showing that display's slice of the global canvas. The primary display
+// is covered by the main window (which keeps the controls).
+/** @type {BrowserWindow[]} */
+let projectionWindows = [];
+
+/** Fullscreen a window on whichever display it currently occupies. */
+function setWindowFullscreen(win, on) {
+  if (!win || win.isDestroyed()) return;
+  if (process.platform === 'darwin') win.setSimpleFullScreen(on);
+  else win.setFullScreen(on);
+}
+
+function isWindowFullscreen(win) {
+  if (!win || win.isDestroyed()) return false;
+  return process.platform === 'darwin'
+    ? (win.isSimpleFullScreen && win.isSimpleFullScreen())
+    : win.isFullScreen();
+}
 
 function createWindow() {
   const primary = screen.getPrimaryDisplay();
@@ -52,6 +69,7 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
   mainWindow.on('closed', () => {
+    closeProjectionWindows();
     mainWindow = null;
   });
 
@@ -104,6 +122,62 @@ function getAllDisplaysBounds() {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
+/**
+ * Create a frameless, fullscreen "mirror" window pinned to one display. It loads
+ * the same UI in `role=mirror`, told its viewport (the display) and the union of
+ * all displays, so it renders just that display's slice of the global canvas.
+ */
+function createProjectionWindow(display, union) {
+  const b = display.bounds;
+  const win = new BrowserWindow({
+    x: b.x,
+    y: b.y,
+    width: b.width,
+    height: b.height,
+    frame: false,
+    show: false,
+    backgroundColor: '#000000',
+    enableLargerThanScreen: true,
+    skipTaskbar: true,
+    title: 'Local Video Tiler',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      webSecurity: true,
+      backgroundThrottling: false
+    }
+  });
+  win.removeMenu();
+  win.loadFile(path.join(__dirname, 'src', 'index.html'), {
+    query: {
+      role: 'mirror',
+      vx: String(b.x), vy: String(b.y), vw: String(b.width), vh: String(b.height),
+      ux: String(union.x), uy: String(union.y), uw: String(union.width), uh: String(union.height)
+    }
+  });
+  win.once('ready-to-show', () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.setBounds(b);
+    win.setAlwaysOnTop(true, 'screen-saver');
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    setWindowFullscreen(win, true);
+  });
+  win.on('closed', () => {
+    projectionWindows = projectionWindows.filter((w) => w !== win);
+  });
+  return win;
+}
+
+function closeProjectionWindows() {
+  for (const w of projectionWindows.slice()) {
+    try { if (!w.isDestroyed()) w.destroy(); } catch (_) { /* ignore */ }
+  }
+  projectionWindows = [];
+}
+
 function spanAllDisplays() {
   if (!mainWindow) return;
   if (!spanningAllDisplays) {
@@ -111,36 +185,33 @@ function spanAllDisplays() {
   }
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
 
-  // Strip chrome and raise the window above the taskbar / dock. The
-  // `screen-saver` level is the documented way to sit above the Windows taskbar
-  // and the macOS Dock; covering the area + this level hides the taskbar behind
-  // the window for an immersive surface.
+  const displays = screen.getAllDisplays();
+  const primary = screen.getPrimaryDisplay();
+  const union = getAllDisplaysBounds();
+  spanningAllDisplays = true;
+
+  // The main window becomes the controller, fullscreen on the PRIMARY display.
+  // Real OS fullscreen reliably covers the taskbar / dock / menu bar — that's
+  // what gives a genuinely immersive surface on each individual screen.
   mainWindow.setMenuBarVisibility(false);
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
+  mainWindow.setBounds(primary.bounds);
+  setWindowFullscreen(mainWindow, true);
+  sendProjection(mainWindow, {
+    active: true,
+    role: 'controller',
+    viewport: primary.bounds,
+    union,
+    displayCount: displays.length
+  });
 
-  spanningAllDisplays = true;
-  const target = getAllDisplaysBounds();
-  const singleScreen = screen.getAllDisplays().length <= 1;
-
-  if (singleScreen) {
-    // One display: use real OS fullscreen, which reliably covers the taskbar /
-    // dock / menu bar on every platform (a plain borderless window does not, as
-    // window managers reserve the panel/strut area otherwise).
-    spanUsedNativeFullscreen = true;
-    mainWindow.setBounds(target);
-    if (process.platform === 'darwin') mainWindow.setSimpleFullScreen(true);
-    else mainWindow.setFullScreen(true);
-  } else {
-    // Multiple displays: native fullscreen only covers one screen, so stretch a
-    // borderless, always-on-top window across the union of every monitor.
-    spanUsedNativeFullscreen = false;
-    if (mainWindow.isSimpleFullScreen && mainWindow.isSimpleFullScreen()) {
-      mainWindow.setSimpleFullScreen(false);
-    }
-    if (mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
-    mainWindow.setBounds(target);
-    mainWindow.setContentBounds(target);
+  // Every other display gets its own fullscreen mirror window.
+  closeProjectionWindows();
+  for (const d of displays) {
+    if (d.id === primary.id) continue;
+    projectionWindows.push(createProjectionWindow(d, union));
   }
 
   mainWindow.moveTop();
@@ -150,19 +221,21 @@ function spanAllDisplays() {
 
 function restoreFromSpan() {
   if (!mainWindow) return;
-  if (spanUsedNativeFullscreen) {
-    if (process.platform === 'darwin') mainWindow.setSimpleFullScreen(false);
-    else mainWindow.setFullScreen(false);
-    spanUsedNativeFullscreen = false;
-  }
+  closeProjectionWindows();
+  if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
   mainWindow.setAlwaysOnTop(false);
   mainWindow.setVisibleOnAllWorkspaces(false);
+  sendProjection(mainWindow, { active: false });
   spanningAllDisplays = false;
   // Restore the previous windowed geometry once we've left fullscreen.
-  const restore = () => { if (savedBounds && mainWindow) mainWindow.setBounds(savedBounds); };
+  const restore = () => { if (savedBounds && mainWindow && !mainWindow.isDestroyed()) mainWindow.setBounds(savedBounds); };
   restore();
   setTimeout(restore, 60);
   sendWindowState();
+}
+
+function sendProjection(win, config) {
+  if (win && !win.isDestroyed()) win.webContents.send('projection:set', config);
 }
 
 function toggleSpanAllDisplays() {
@@ -229,6 +302,23 @@ ipcMain.on('window:toggleFullscreen', () => {
 ipcMain.on('window:toggleSpanAll', () => toggleSpanAllDisplays());
 
 ipcMain.on('window:requestState', () => sendWindowState());
+
+// --- Projection (multi-display fullscreen) layout sync -------------------------
+// The controller (main window) is the source of truth for the layout. It pushes
+// the serialized tree to every mirror window so they stay in sync.
+ipcMain.on('projection:pushLayout', (_e, payload) => {
+  for (const w of projectionWindows) {
+    if (!w.isDestroyed()) w.webContents.send('projection:layout', payload);
+  }
+});
+
+// A freshly-created mirror asks for the current layout; relay the request to the
+// controller, which answers with `projection:pushLayout`.
+ipcMain.on('projection:requestLayout', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('projection:provideLayout');
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Lifecycle

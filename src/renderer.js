@@ -57,6 +57,140 @@ let winState = {
   displays: []
 };
 
+// ---------------------------------------------------------- Projection / wall
+// When spanning all displays, each monitor is covered by its own fullscreen
+// window. The main window is the `controller` (keeps the controls and edits the
+// primary display's slice); every other display gets a `mirror` window that
+// renders that display's slice of the global canvas. The whole canvas is sized
+// to the union of all displays and shifted so each window shows its own slice.
+const projection = {
+  active: false,
+  role: 'controller',
+  viewport: null,
+  union: null
+};
+
+const IS_MIRROR = new URLSearchParams(location.search).get('role') === 'mirror';
+
+function readProjectionQuery() {
+  const p = new URLSearchParams(location.search);
+  if (p.get('role') !== 'mirror') return;
+  projection.active = true;
+  projection.role = 'mirror';
+  projection.viewport = { x: +p.get('vx'), y: +p.get('vy'), width: +p.get('vw'), height: +p.get('vh') };
+  projection.union = { x: +p.get('ux'), y: +p.get('uy'), width: +p.get('uw'), height: +p.get('uh') };
+}
+
+/** Position the stage so this window shows only its display's slice of the canvas. */
+function applyProjection() {
+  const on = projection.active && projection.viewport && projection.union;
+  document.body.classList.toggle('projection', !!on);
+  document.body.classList.toggle('mirror', !!on && projection.role === 'mirror');
+  document.body.classList.toggle('controller', !!on && projection.role === 'controller');
+  if (on) {
+    const offX = projection.viewport.x - projection.union.x;
+    const offY = projection.viewport.y - projection.union.y;
+    stage.style.left = (-offX) + 'px';
+    stage.style.top = (-offY) + 'px';
+    stage.style.right = 'auto';
+    stage.style.bottom = 'auto';
+    stage.style.width = projection.union.width + 'px';
+    stage.style.height = projection.union.height + 'px';
+  } else {
+    stage.style.left = '';
+    stage.style.top = '';
+    stage.style.right = '';
+    stage.style.bottom = '';
+    stage.style.width = '';
+    stage.style.height = '';
+  }
+  reconcileProjectionPlayback();
+}
+
+function isLeafVisible(leaf) {
+  if (!leaf.el) return false;
+  const r = leaf.el.getBoundingClientRect();
+  return r.right > 1 && r.bottom > 1 && r.left < window.innerWidth - 1 && r.top < window.innerHeight - 1;
+}
+
+/** On mirror windows, only decode/play videos whose tile falls on this display. */
+function reconcileProjectionPlayback() {
+  if (!(projection.active && projection.role === 'mirror')) return;
+  forEachLeaf(root, (leaf) => {
+    if (!leaf.video) return;
+    const visible = isLeafVisible(leaf) && leaf.files.length > 0;
+    if (visible) {
+      const cur = leaf.files[leaf.index];
+      if (cur && leaf.video.getAttribute('src') !== cur.url) { leaf.video.src = cur.url; leaf.video.load(); }
+      leaf.video.muted = true;
+      leaf.video.play().catch(() => {});
+    } else {
+      try {
+        leaf.video.pause();
+        if (leaf.video.getAttribute('src')) { leaf.video.removeAttribute('src'); leaf.video.load(); }
+      } catch (_) { /* ignore */ }
+    }
+  });
+}
+
+// Controller side: receive projection config + keep mirrors in sync.
+function setProjection(config) {
+  if (!config || !config.active) {
+    projection.active = false;
+    projection.role = 'controller';
+    projection.viewport = null;
+    projection.union = null;
+    applyProjection();
+    renderDisplayGuide();
+    return;
+  }
+  projection.active = true;
+  projection.role = config.role || 'controller';
+  projection.viewport = config.viewport;
+  projection.union = config.union;
+  applyProjection();
+  renderDisplayGuide();
+  syncProjection();
+}
+
+/** Controller → mirrors: push the current layout so every screen matches. */
+function syncProjection() {
+  if (projection.active && projection.role === 'controller') {
+    try { window.api.pushLayout({ tree: serialize(root) }); } catch (_) { /* ignore */ }
+  }
+}
+
+// Mirror side: rebuild from a pushed layout and play this display's slice.
+function applyMirrorLayout(payload) {
+  const tree = payload && payload.tree;
+  forEachLeaf(root, disposeLeaf);
+  root = tree ? deserialize(tree) : makeLeaf();
+  focusedLeaf = null;
+  render();
+  applyProjection();
+  const loads = [];
+  forEachLeaf(root, (leaf) => {
+    if (leaf.folder) loads.push(loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, false));
+  });
+  Promise.all(loads).then(() => { applyProjection(); }).catch(() => {});
+}
+
+function bootMirror() {
+  readProjectionQuery();
+  document.body.classList.add('mirror');
+  applyProjection();
+  window.api.onLayout(applyMirrorLayout);
+  // If the controller re-broadcasts viewport (e.g. display change), update it.
+  window.api.onProjection((config) => {
+    if (config && config.active && config.role === 'mirror') {
+      projection.viewport = config.viewport;
+      projection.union = config.union;
+      applyProjection();
+    }
+  });
+  window.api.requestLayout();
+}
+
 let uidCounter = 1;
 function uid() { return 'n' + (uidCounter++); }
 
@@ -317,9 +451,17 @@ function loadCurrent(leaf, autoplay) {
   const { video } = leaf;
   const current = leaf.files[leaf.index];
   if (!current) { video.removeAttribute('src'); video.load(); return; }
+  // On a mirror window, skip videos whose tile is outside this display's slice
+  // so each screen only decodes what it actually shows.
+  if (projection.role === 'mirror' && !isLeafVisible(leaf)) {
+    video.removeAttribute('src');
+    video.load();
+    return;
+  }
   video.src = current.url;
   video.load();
-  if (autoplay) video.play().catch(() => {});
+  if (projection.role === 'mirror') video.muted = true;
+  if (autoplay || (projection.role === 'mirror' && isLeafVisible(leaf))) video.play().catch(() => {});
   updateLeaf(leaf);
 }
 
@@ -469,6 +611,7 @@ function startDividerDrag(e, node, container) {
 let lastMouse = { x: 0, y: 0 };
 
 function onGlobalMouseMove(e) {
+  if (IS_MIRROR) return;
   lastMouse = { x: e.clientX, y: e.clientY };
   wake();
   if (!settings.editMode) { hidePreview(); return; }
@@ -632,11 +775,15 @@ function deserialize(obj) {
 
 let saveTimer = null;
 function saveState() {
+  // Mirror windows never own the layout, so they must not persist or they would
+  // clobber the controller's saved state.
+  if (projection.role === 'mirror') return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try {
       localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) }));
     } catch (_) {}
+    syncProjection();
   }, 200);
 }
 
@@ -721,7 +868,9 @@ function setGuide(on) {
  */
 function renderDisplayGuide() {
   const displays = winState.displays || [];
-  const show = settings.guideOn && displays.length > 0;
+  // The guide is a windowed preview tool; while projecting, each display is its
+  // own fullscreen window so the guide is redundant (and would mis-position).
+  const show = settings.guideOn && displays.length > 0 && !projection.active;
   displayGuide.classList.toggle('visible', show);
   if (!show) { displayGuide.textContent = ''; return; }
 
@@ -863,6 +1012,7 @@ function isTypingTarget(t) {
 document.addEventListener('mousemove', onGlobalMouseMove);
 document.addEventListener('mousedown', wake);
 document.addEventListener('keydown', (e) => {
+  if (IS_MIRROR) return;
   wake();
   if (e.key === 'Shift' && settings.editMode) updatePreview(lastMouse.x, lastMouse.y, true);
   if (isTypingTarget(e.target)) return;
@@ -922,14 +1072,8 @@ function applyWindowState(state) {
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
-
-  // Auto-show the screen-split guide the moment the canvas covers more than one
-  // physical screen, so it's always obvious how the surface is divided.
-  if (state.spanningAllDisplays && !wasSpanningAll && (state.displays || []).length > 1) {
-    setGuide(true);
-  } else {
-    renderDisplayGuide();
-  }
+  void wasSpanningAll;
+  renderDisplayGuide();
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -969,10 +1113,18 @@ window.api.onDisplayChanged(() => refreshDisplays());
 window.addEventListener('resize', () => {
   if (settings.editMode) hidePreview();
   renderDisplayGuide();
+  if (projection.active) applyProjection();
 });
 
 // ----------------------------------------------------------------- Boot
-loadState();
-refreshDisplays();
-window.api.requestWindowState();
-wake();
+if (IS_MIRROR) {
+  // Display-only window: render this monitor's slice from the controller's layout.
+  bootMirror();
+} else {
+  window.api.onProjection(setProjection);
+  window.api.onProvideLayout(() => syncProjection());
+  loadState();
+  refreshDisplays();
+  window.api.requestWindowState();
+  wake();
+}

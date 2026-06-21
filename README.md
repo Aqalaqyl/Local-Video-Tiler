@@ -32,14 +32,14 @@ nothing is uploaded anywhere.
   volume and mute controls.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
-  - **Span / fullscreen across ALL displays at once** (`A`) — an immersive,
-    always-on-top surface that **covers the taskbar / dock / menu bar**:
-    - With a **single** display it uses real OS fullscreen, which reliably hides
-      the taskbar for a fully immersive surface.
-    - With **multiple** displays it stretches a borderless, `screen-saver`-level
-      window across the union of every monitor (drawn above the taskbar/dock),
-      sized larger than one screen via `enableLargerThanScreen` so macOS doesn't
-      clamp it to a single display.
+  - **Fullscreen across ALL displays at once** (`A`) — each monitor gets its own
+    **real OS fullscreen window**, so every screen is genuinely fullscreen and
+    **covers the taskbar / dock / menu bar**. The single tiling canvas is spread
+    across the union of all monitors and each window shows just its own slice, so
+    a tile (or a "Tile to Displays" layout) fills the screen it belongs to.
+    - Your **primary** display keeps the controls and stays editable.
+    - Every **other** display shows a clean, controls-free slice of the wall.
+    - Hot-plugging or rearranging monitors re-fits the wall automatically.
   - When spanning every display, the control bar and edit tools are **pinned to
     your primary monitor** so they're always fully visible (never stranded in a
     dead zone between screens), and you can keep splitting/editing tiles right
@@ -65,6 +65,9 @@ nothing is uploaded anywhere.
   perfectly aligned layouts.
 - **Resizable dividers** — drag the divider between any two tiles to rebalance
   them (snaps to the grid when snap is on).
+- **Delete tiles** — made a wrong split? While editing, hit the **🗑** badge on a
+  tile or press `Delete` / `Backspace` to remove it; its space is reclaimed by
+  the neighbouring tile.
 - **Layout persistence** — your layout, folder assignments and settings are
   remembered between sessions.
 
@@ -86,7 +89,7 @@ npm start
 | Vertical split | Left-click a tile (in edit mode) |
 | Horizontal split | `Shift` + left-click a tile (in edit mode) |
 | Resize tiles | Drag the divider between them |
-| Close / merge a tile | The **✕** button on the tile (visible in edit mode) |
+| Delete / merge a tile | The **🗑** badge on the tile (in edit mode), the toolbar **✕**, or `Delete` / `Backspace` on the hovered/focused tile |
 | Assign a folder | The **📁** button on a tile, or the *Choose media folder…* button |
 | Play / pause focused tile | `Space` |
 | Toggle alignment grid | `G` or the **Grid** button |
