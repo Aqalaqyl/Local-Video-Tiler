@@ -176,9 +176,18 @@ function ensureLeafEl(leaf) {
     <span class="title"></span>
     <button class="close" title="Close tile">✕</button>`;
 
+  // A always-visible delete badge (only while editing) so removing a mistaken
+  // tile is obvious without having to hover the media toolbar first.
+  const del = document.createElement('button');
+  del.className = 'tile-del';
+  del.type = 'button';
+  del.title = 'Delete this tile (Del)';
+  del.textContent = '🗑';
+
   el.appendChild(video);
   el.appendChild(empty);
   el.appendChild(toolbar);
+  el.appendChild(del);
 
   const refs = {
     empty,
@@ -193,7 +202,8 @@ function ensureLeafEl(leaf) {
     mute: toolbar.querySelector('.mute'),
     vol: toolbar.querySelector('.vol'),
     title: toolbar.querySelector('.title'),
-    close: toolbar.querySelector('.close')
+    close: toolbar.querySelector('.close'),
+    del
   };
 
   leaf.el = el;
@@ -236,6 +246,8 @@ function wireLeafEvents(leaf) {
   refs.prev.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, -1); });
   refs.next.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, 1); });
   refs.close.addEventListener('click', (e) => { e.stopPropagation(); closeLeaf(leaf); });
+  refs.del.addEventListener('mousedown', (e) => e.stopPropagation());
+  refs.del.addEventListener('click', (e) => { e.stopPropagation(); closeLeaf(leaf); flash('Tile deleted'); });
 
   refs.seek.addEventListener('input', (e) => {
     e.stopPropagation();
@@ -397,6 +409,24 @@ function disposeLeaf(leaf) {
   if (leaf.video) {
     try { leaf.video.pause(); leaf.video.removeAttribute('src'); leaf.video.load(); } catch (_) {}
   }
+}
+
+/**
+ * Delete the most relevant tile for a keyboard shortcut: the tile under the
+ * cursor while editing, otherwise the focused tile. Lets the user quickly undo a
+ * mis-click while carving up the layout.
+ */
+function deleteActiveTile() {
+  let target = null;
+  if (settings.editMode) {
+    const el = document.elementFromPoint(lastMouse.x, lastMouse.y);
+    const tile = el && el.closest && el.closest('.node-leaf');
+    if (tile) target = leafById(tile.dataset.id);
+  }
+  if (!target) target = focusedLeaf;
+  if (!target) { flash('Hover or click a tile, then press Delete'); return; }
+  closeLeaf(target);
+  flash('Tile deleted');
 }
 
 // ============================================================================
@@ -845,6 +875,11 @@ document.addEventListener('keydown', (e) => {
     case 'a': window.api.toggleSpanAll(); break;
     case 'd': setGuide(!settings.guideOn); break;
     case 't': tileToDisplays(); break;
+    case 'delete':
+    case 'backspace':
+      e.preventDefault();
+      deleteActiveTile();
+      break;
     case ' ':
       if (focusedLeaf) { e.preventDefault(); togglePlay(focusedLeaf); }
       break;

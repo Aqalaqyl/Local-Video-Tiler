@@ -226,6 +226,30 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
 .tile-toolbar .time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .tile-toolbar .close { color: var(--danger); border-color: rgba(255,91,110,0.4); }
 
+/* Always-visible delete badge while editing (top-right of each tile). */
+.tile-del {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  color: #fff;
+  background: rgba(255,91,110,0.92);
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+.tile-del:hover { background: var(--danger); transform: scale(1.06); }
+body.editing .node-leaf .tile-del { display: flex; }
+
 /* Dividers between siblings; draggable to resize. */
 .divider {
   flex: 0 0 var(--divider);
