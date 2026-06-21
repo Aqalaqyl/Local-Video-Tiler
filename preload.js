@@ -25,5 +25,26 @@ contextBridge.exposeInMainWorld('api', {
     const handler = (_e, state) => cb(state);
     ipcRenderer.on('window:state', handler);
     return () => ipcRenderer.removeListener('window:state', handler);
+  },
+
+  // Projection / multi-display fullscreen
+  onProjection: (cb) => {
+    const handler = (_e, config) => cb(config);
+    ipcRenderer.on('projection:set', handler);
+    return () => ipcRenderer.removeListener('projection:set', handler);
+  },
+  // Controller → mirrors: push the current layout (serialized tree).
+  pushLayout: (payload) => ipcRenderer.send('projection:pushLayout', payload),
+  // Mirror → controller: ask for the current layout once ready.
+  requestLayout: () => ipcRenderer.send('projection:requestLayout'),
+  onProvideLayout: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('projection:provideLayout', handler);
+    return () => ipcRenderer.removeListener('projection:provideLayout', handler);
+  },
+  onLayout: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('projection:layout', handler);
+    return () => ipcRenderer.removeListener('projection:layout', handler);
   }
 });

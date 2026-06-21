@@ -99,6 +99,8 @@ body.span-all .hintbox {
 }
 .tool:hover { background: #262a36; border-color: #3a3f4e; }
 .tool.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tool:disabled { opacity: 0.4; cursor: not-allowed; }
+.tool:disabled:hover { background: var(--panel-2); border-color: var(--line); }
 .tool.win { padding: 6px 10px; min-width: 34px; }
 .tool.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 
@@ -136,12 +138,16 @@ body.span-all .hintbox {
   min-height: 0;
   overflow: hidden;
   background: #050507;
-  border: 1px solid rgba(255,255,255,0.04);
+  /* A clearly visible boundary so the user can always see how the surface has
+     been split, even over dark video. */
+  border: 1px solid rgba(255,255,255,0.14);
 }
 .node-leaf.focused { box-shadow: inset 0 0 0 2px var(--accent); }
 
-/* Editing affordance: hovering a tile glows so the target is obvious. */
-body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.5); }
+/* While editing, make every tile boundary pop so the current layout — and how a
+   click will divide it — is unmistakable. */
+body.editing .node-leaf { border-color: rgba(91,140,255,0.55); }
+body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.8); }
 
 .tile-video {
   width: 100%;
@@ -206,6 +212,11 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
   line-height: 1;
 }
 .tile-toolbar button:hover { background: #2a2f3d; }
+.tile-toolbar .loop.active {
+  color: var(--accent-2);
+  border-color: var(--accent-2);
+  background: rgba(56,224,196,0.16);
+}
 .tile-toolbar .title {
   flex: 1 1 auto;
   min-width: 0;
@@ -220,6 +231,30 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
 .tile-toolbar .time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .tile-toolbar .close { color: var(--danger); border-color: rgba(255,91,110,0.4); }
 
+/* Always-visible delete badge while editing (top-right of each tile). */
+.tile-del {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  color: #fff;
+  background: rgba(255,91,110,0.92);
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+.tile-del:hover { background: var(--danger); transform: scale(1.06); }
+body.editing .node-leaf .tile-del { display: flex; }
+
 /* Dividers between siblings; draggable to resize. */
 .divider {
   flex: 0 0 var(--divider);
@@ -232,12 +267,16 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
 .divider::after {
   content: "";
   position: absolute;
-  background: var(--line);
+  /* Brighter than the old near-invisible line so the split between tiles always
+     reads clearly. */
+  background: rgba(255,255,255,0.28);
   transition: background 0.15s ease;
 }
 .node-split.row > .divider::after { top: 0; bottom: 0; left: 50%; width: 2px; transform: translateX(-50%); }
 .node-split.col > .divider::after { left: 0; right: 0; top: 50%; height: 2px; transform: translateY(-50%); }
-.divider:hover::after, .divider.dragging::after { background: var(--accent); }
+.divider:hover::after, .divider.dragging::after { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+/* In edit mode the dividers glow with the accent colour so the layout is obvious. */
+body.editing .divider::after { background: var(--accent); opacity: 0.85; }
 
 /* ----------------------------------------------------------- Grid overlay */
 #grid-overlay {
@@ -252,6 +291,61 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
   background-size: var(--cell, 80px) var(--cell, 80px);
 }
 body.grid-on #grid-overlay { display: block; }
+
+/* ------------------------------------------------- Screen-split / display guide */
+#display-guide {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  pointer-events: none;
+  display: none;
+  transition: opacity 0.25s ease;
+}
+#display-guide.visible { display: block; }
+/* Dim the canvas a touch behind the preview mini-map so the guide reads clearly. */
+#display-guide.preview { background: rgba(5,6,10,0.55); }
+
+/* Hide the guide along with the rest of the chrome while idle (it reappears the
+   instant the mouse moves), keeping the viewing surface clean. */
+body.idle:not(.editing) #display-guide { opacity: 0; }
+
+.guide-cell {
+  position: absolute;
+  border: 3px dashed var(--accent-2);
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.5), 0 0 22px rgba(56,224,196,0.35) inset;
+  background: rgba(56,224,196,0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.guide-cell.primary {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.5), 0 0 26px rgba(91,140,255,0.40) inset;
+  background: rgba(91,140,255,0.08);
+}
+/* Labels are centred in each region so the user can see at a glance how the
+   surface maps onto each physical screen, never hidden behind the top bar. */
+.guide-label {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: #04130f;
+  background: var(--accent-2);
+  border-radius: 7px;
+  padding: 5px 12px;
+  white-space: nowrap;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.55);
+}
+.guide-cell.primary .guide-label { color: #fff; background: var(--accent); }
+
+/* ------------------------------------------------- Projection / display wall */
+/* Per-display windows are full editors: keep the cursor, grid, split preview and
+   delete badges so every screen can be edited. Only hide the duplicate top
+   control bar (controls live on the primary display) and the windowed-only guide. */
+body.mirror { background: #000; }
+body.mirror #topbar,
+body.mirror #display-guide { display: none !important; }
 
 /* --------------------------------------------------------- Split preview */
 #split-preview {

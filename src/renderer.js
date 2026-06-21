@@ -19,8 +19,10 @@ const LS_KEY = 'lvt.state.v1';
 
 // ---------------------------------------------------------------- DOM handles
 const stage = document.getElementById('stage');
+const topbar = document.getElementById('topbar');
 const preview = document.getElementById('split-preview');
 const gridOverlay = document.getElementById('grid-overlay');
+const displayGuide = document.getElementById('display-guide');
 const editHint = document.getElementById('edit-hint');
 const toast = document.getElementById('toast');
 const displayPill = document.getElementById('display-pill');
@@ -31,6 +33,8 @@ const btnSnap = document.getElementById('btn-snap');
 const btnReset = document.getElementById('btn-reset');
 const btnFs = document.getElementById('btn-fs');
 const btnFsAll = document.getElementById('btn-fs-all');
+const btnGuide = document.getElementById('btn-guide');
+const btnTileDisplays = document.getElementById('btn-tile-displays');
 const btnMin = document.getElementById('btn-min');
 const btnX = document.getElementById('btn-x');
 const gridSizeInput = document.getElementById('grid-size');
@@ -41,8 +45,225 @@ const settings = {
   editMode: false,
   gridOn: false,
   snapOn: false,
-  cellSize: 80
+  cellSize: 80,
+  guideOn: false
 };
+
+// Latest window/display geometry pushed from the main process. Used to draw the
+// screen-split guide and to build a layout that matches the physical displays.
+let winState = {
+  fullScreen: false,
+  spanningAllDisplays: false,
+  windowBounds: null,
+  displays: []
+};
+
+// ---------------------------------------------------------- Projection / wall
+// When spanning all displays, each monitor is covered by its own fullscreen
+// window. EVERY window is a full peer editor: it renders its display's slice of
+// the shared canvas, shows the grid + split preview, and lets you split / resize
+// / delete tiles right on that screen. Edits are broadcast so every display (and
+// the persisted layout on the controller) stays in sync. The whole canvas is
+// sized to the union of all displays and each window is shifted to show its slice.
+const projection = {
+  active: false,
+  role: 'controller',
+  viewport: null,
+  union: null
+};
+
+const IS_MIRROR = new URLSearchParams(location.search).get('role') === 'mirror';
+
+// Guards against echo loops when applying a layout pushed from another window.
+let applyingRemote = false;
+let lastSyncJSON = '';
+
+function readProjectionQuery() {
+  const p = new URLSearchParams(location.search);
+  if (p.get('role') !== 'mirror') return;
+  projection.active = true;
+  projection.role = 'mirror';
+  projection.viewport = { x: +p.get('vx'), y: +p.get('vy'), width: +p.get('vw'), height: +p.get('vh') };
+  projection.union = { x: +p.get('ux'), y: +p.get('uy'), width: +p.get('uw'), height: +p.get('uh') };
+}
+
+// Offset of this window's slice within the global canvas, per axis. Used to keep
+// the grid + snapping aligned to the SAME global grid across every display.
+function projOffX() {
+  return (projection.active && projection.viewport && projection.union) ? projection.viewport.x - projection.union.x : 0;
+}
+function projOffY() {
+  return (projection.active && projection.viewport && projection.union) ? projection.viewport.y - projection.union.y : 0;
+}
+
+/** Position the stage AND the grid so this window shows only its slice of the canvas. */
+function applyProjection() {
+  const on = projection.active && projection.viewport && projection.union;
+  document.body.classList.toggle('projection', !!on);
+  document.body.classList.toggle('mirror', !!on && projection.role === 'mirror');
+  document.body.classList.toggle('controller', !!on && projection.role === 'controller');
+  // The grid overlay moves with the stage so its lines stay continuous across
+  // every display instead of restarting at each window's edge.
+  const layers = [stage, gridOverlay];
+  if (on) {
+    const offX = projOffX();
+    const offY = projOffY();
+    for (const el of layers) {
+      el.style.left = (-offX) + 'px';
+      el.style.top = (-offY) + 'px';
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+      el.style.width = projection.union.width + 'px';
+      el.style.height = projection.union.height + 'px';
+    }
+  } else {
+    for (const el of layers) {
+      el.style.left = '';
+      el.style.top = '';
+      el.style.right = '';
+      el.style.bottom = '';
+      el.style.width = '';
+      el.style.height = '';
+    }
+  }
+  reconcileProjectionPlayback();
+}
+
+function isLeafVisible(leaf) {
+  if (!leaf.el) return false;
+  const r = leaf.el.getBoundingClientRect();
+  return r.right > 1 && r.bottom > 1 && r.left < window.innerWidth - 1 && r.top < window.innerHeight - 1;
+}
+
+/** On mirror windows, only decode/play videos whose tile falls on this display. */
+function reconcileProjectionPlayback() {
+  if (!(projection.active && projection.role === 'mirror')) return;
+  forEachLeaf(root, (leaf) => {
+    if (!leaf.video) return;
+    const visible = isLeafVisible(leaf) && leaf.files.length > 0;
+    if (visible) {
+      const cur = leaf.files[leaf.index];
+      if (cur && leaf.video.getAttribute('src') !== cur.url) { leaf.video.src = cur.url; leaf.video.load(); }
+      leaf.video.muted = true;
+      leaf.video.loop = !!leaf.loop;
+      leaf.video.play().catch(() => {});
+    } else {
+      try {
+        leaf.video.pause();
+        if (leaf.video.getAttribute('src')) { leaf.video.removeAttribute('src'); leaf.video.load(); }
+      } catch (_) { /* ignore */ }
+    }
+  });
+}
+
+function snapshotSettings() {
+  return { editMode: settings.editMode, gridOn: settings.gridOn, snapOn: settings.snapOn, cellSize: settings.cellSize };
+}
+
+function applySettingsFromPayload(s) {
+  if (!s) return;
+  if (s.cellSize != null && s.cellSize !== settings.cellSize) setCellSize(s.cellSize);
+  if (!!s.gridOn !== settings.gridOn) setGrid(!!s.gridOn);
+  if (!!s.snapOn !== settings.snapOn) setSnap(!!s.snapOn);
+  if (!!s.editMode !== settings.editMode) setEditMode(!!s.editMode);
+}
+
+// Push the current layout + settings to peer windows (deduped to avoid echoes).
+function broadcastLayout() {
+  if (!projection.active) return;
+  const payload = { tree: serializeForSync(root), settings: snapshotSettings() };
+  const json = JSON.stringify(payload);
+  if (json === lastSyncJSON) return;
+  lastSyncJSON = json;
+  try { window.api.pushLayout(payload); } catch (_) { /* ignore */ }
+}
+
+// Apply a layout pushed from another window onto this display's slice.
+// Reconciles against the existing tree, REUSING leaves (and their live <video>
+// playback) that still have the same folder, so an edit on another display
+// (split / delete / resize) doesn't restart the videos already playing here.
+function applyIncomingLayout(payload) {
+  if (!payload) return;
+  const json = JSON.stringify({ tree: payload.tree, settings: payload.settings });
+  if (json === lastSyncJSON) return;
+  lastSyncJSON = json;
+  applyingRemote = true;
+  try {
+    applySettingsFromPayload(payload.settings);
+
+    const pool = [];
+    forEachLeaf(root, (l) => pool.push(l));
+    const used = new Set();
+    const takeLeaf = (folder) => {
+      const want = folder || null;
+      for (const l of pool) {
+        if (!used.has(l) && (l.folder || null) === want) { used.add(l); return l; }
+      }
+      return null;
+    };
+    const build = (node) => {
+      if (!node || node.kind === 'leaf') {
+        const folder = node ? (node.folder || null) : null;
+        const leaf = takeLeaf(folder) || makeLeaf();
+        leaf.folder = folder;
+        leaf.loop = node ? !!node.loop : false;
+        return leaf;
+      }
+      return makeSplit(node.direction, build(node.children[0]), build(node.children[1]), node.ratio);
+    };
+
+    const newRoot = build(payload.tree);
+    // Tiles that no longer exist get torn down; reused ones keep playing.
+    for (const l of pool) { if (!used.has(l)) disposeLeaf(l); }
+    root = newRoot;
+    focusedLeaf = null;
+    render();
+    // Start media only for brand-new tiles; reused tiles are already playing.
+    forEachLeaf(root, (leaf) => {
+      if (leaf.folder && leaf.files.length === 0) loadFolder(leaf, leaf.folder, 0, true);
+    });
+    applyProjection();
+  } finally {
+    applyingRemote = false;
+  }
+}
+
+// Receive projection config from the main process (controller window).
+function setProjection(config) {
+  if (!config || !config.active) {
+    projection.active = false;
+    projection.role = 'controller';
+    projection.viewport = null;
+    projection.union = null;
+    applyProjection();
+    renderDisplayGuide();
+    return;
+  }
+  projection.active = true;
+  projection.role = config.role || 'controller';
+  projection.viewport = config.viewport;
+  projection.union = config.union;
+  applyProjection();
+  renderDisplayGuide();
+  lastSyncJSON = '';
+  broadcastLayout();
+}
+
+function bootMirror() {
+  readProjectionQuery();
+  document.body.classList.add('mirror');
+  applyProjection();
+  window.api.onLayout(applyIncomingLayout);
+  // The controller may re-broadcast this window's viewport (e.g. display change).
+  window.api.onProjection((config) => {
+    if (config && config.active && config.role === 'mirror') {
+      projection.viewport = config.viewport;
+      projection.union = config.union;
+      applyProjection();
+    }
+  });
+  window.api.requestLayout();
+}
 
 let uidCounter = 1;
 function uid() { return 'n' + (uidCounter++); }
@@ -59,6 +280,7 @@ function makeLeaf() {
     files: [],
     index: 0,
     savedIndex: 0,
+    loop: false,
     el: null,
     refs: null,
     video: null
@@ -102,7 +324,30 @@ function render() {
   stage.textContent = '';
   stage.appendChild(renderNode(root));
   applyFocus();
+  if (projection.active) applyProjection();
+  positionTileBadges();
   saveState();
+}
+
+/**
+ * Keep each tile's delete/close badge clear of the top control bar so it stays
+ * clickable even while the UI is open (the bar otherwise covers the top-row
+ * tiles' top-right corner).
+ */
+function positionTileBadges() {
+  if (IS_MIRROR || !topbar) return;
+  const cs = getComputedStyle(topbar);
+  // The bar slides in/out via a CSS transform, so use its layout box (top +
+  // offsetHeight) rather than getBoundingClientRect (which reflects the
+  // mid-transition transform) to know where it really sits.
+  const barShown = cs.display !== 'none' &&
+    !(document.body.classList.contains('idle') && !document.body.classList.contains('editing'));
+  const barBottom = barShown ? (parseFloat(cs.top) || 0) + topbar.offsetHeight : 0;
+  forEachLeaf(root, (leaf) => {
+    if (!leaf.refs || !leaf.refs.del || !leaf.el) return;
+    const tileTop = leaf.el.getBoundingClientRect().top;
+    leaf.refs.del.style.top = Math.max(8, Math.round(barBottom - tileTop) + 8) + 'px';
+  });
 }
 
 function renderNode(node) {
@@ -156,6 +401,7 @@ function ensureLeafEl(leaf) {
     <button class="prev" title="Previous">⏮</button>
     <button class="play" title="Play / Pause">▶</button>
     <button class="next" title="Next">⏭</button>
+    <button class="loop" title="Loop this video (per tile)">🔁</button>
     <input class="seek" type="range" min="0" max="1000" value="0" title="Seek" />
     <span class="time">0:00 / 0:00</span>
     <button class="mute" title="Mute">🔊</button>
@@ -163,9 +409,18 @@ function ensureLeafEl(leaf) {
     <span class="title"></span>
     <button class="close" title="Close tile">✕</button>`;
 
+  // A always-visible delete badge (only while editing) so removing a mistaken
+  // tile is obvious without having to hover the media toolbar first.
+  const del = document.createElement('button');
+  del.className = 'tile-del';
+  del.type = 'button';
+  del.title = 'Delete this tile (Del)';
+  del.textContent = '🗑';
+
   el.appendChild(video);
   el.appendChild(empty);
   el.appendChild(toolbar);
+  el.appendChild(del);
 
   const refs = {
     empty,
@@ -175,12 +430,14 @@ function ensureLeafEl(leaf) {
     prev: toolbar.querySelector('.prev'),
     play: toolbar.querySelector('.play'),
     next: toolbar.querySelector('.next'),
+    loop: toolbar.querySelector('.loop'),
     seek: toolbar.querySelector('.seek'),
     time: toolbar.querySelector('.time'),
     mute: toolbar.querySelector('.mute'),
     vol: toolbar.querySelector('.vol'),
     title: toolbar.querySelector('.title'),
-    close: toolbar.querySelector('.close')
+    close: toolbar.querySelector('.close'),
+    del
   };
 
   leaf.el = el;
@@ -205,6 +462,7 @@ function updateLeaf(leaf) {
   }
 
   refs.close.style.display = settings.editMode ? 'inline-block' : 'none';
+  applyLoop(leaf);
 
   const current = hasFiles ? leaf.files[leaf.index] : null;
   refs.title.textContent = current ? `${leaf.index + 1}/${leaf.files.length} · ${current.name}` : '';
@@ -222,7 +480,10 @@ function wireLeafEvents(leaf) {
   refs.play.addEventListener('click', (e) => { e.stopPropagation(); togglePlay(leaf); });
   refs.prev.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, -1); });
   refs.next.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, 1); });
+  refs.loop.addEventListener('click', (e) => { e.stopPropagation(); toggleLoop(leaf); });
   refs.close.addEventListener('click', (e) => { e.stopPropagation(); closeLeaf(leaf); });
+  refs.del.addEventListener('mousedown', (e) => e.stopPropagation());
+  refs.del.addEventListener('click', (e) => { e.stopPropagation(); closeLeaf(leaf); flash('Tile deleted'); });
 
   refs.seek.addEventListener('input', (e) => {
     e.stopPropagation();
@@ -251,11 +512,16 @@ function wireLeafEvents(leaf) {
       refs.time.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
     }
   });
-  video.addEventListener('ended', () => step(leaf, 1, true));
+  // When a clip ends (and the tile isn't looping), shuffle to a random clip.
+  video.addEventListener('ended', () => advanceRandom(leaf));
 
   // Click on the tile body: split (edit mode) or focus (view mode).
+  // Note: the toolbar buttons and the "Choose media folder…" / 📁 buttons all
+  // call stopPropagation, so they never reach here. We must NOT bail out on the
+  // empty-state placeholder itself — otherwise a freshly-created (folder-less)
+  // tile, whose placeholder covers its whole body, could never be split.
   el.addEventListener('click', (e) => {
-    if (e.target.closest('.tile-toolbar') || e.target.closest('.tile-empty')) return;
+    if (e.target.closest('.tile-toolbar')) return;
     if (settings.editMode) {
       const s = computeSplit(leaf, e.clientX, e.clientY, e.shiftKey);
       splitLeaf(leaf, s.orientation, s.ratio);
@@ -271,7 +537,9 @@ function wireLeafEvents(leaf) {
 async function assignFolder(leaf) {
   const folder = await window.api.pickFolder();
   if (!folder) return;
-  await loadFolder(leaf, folder, 0, true);
+  await loadFolder(leaf, folder, 0, false);
+  // Start playback on a random clip from the folder.
+  advanceRandom(leaf);
 }
 
 async function loadFolder(leaf, folder, index = 0, autoplay = false) {
@@ -288,9 +556,18 @@ function loadCurrent(leaf, autoplay) {
   const { video } = leaf;
   const current = leaf.files[leaf.index];
   if (!current) { video.removeAttribute('src'); video.load(); return; }
+  // On a mirror window, skip videos whose tile is outside this display's slice
+  // so each screen only decodes what it actually shows.
+  if (projection.role === 'mirror' && !isLeafVisible(leaf)) {
+    video.removeAttribute('src');
+    video.load();
+    return;
+  }
   video.src = current.url;
   video.load();
-  if (autoplay) video.play().catch(() => {});
+  video.loop = !!leaf.loop;
+  if (projection.role === 'mirror') video.muted = true;
+  if (autoplay || (projection.role === 'mirror' && isLeafVisible(leaf))) video.play().catch(() => {});
   updateLeaf(leaf);
 }
 
@@ -305,6 +582,38 @@ function step(leaf, dir, autoplay = false) {
   leaf.index = (leaf.index + dir + leaf.files.length) % leaf.files.length;
   loadCurrent(leaf, autoplay || !leaf.video.paused);
   saveState();
+}
+
+/** Pick a random file index, avoiding an immediate repeat when possible. */
+function pickRandomIndex(leaf) {
+  const n = leaf.files.length;
+  if (n <= 1) return 0;
+  let i = leaf.index;
+  while (i === leaf.index) i = Math.floor(Math.random() * n);
+  return i;
+}
+
+/** Auto-advance to a random clip from the folder (the default shuffle playback). */
+function advanceRandom(leaf) {
+  if (!leaf.files.length) return;
+  leaf.index = pickRandomIndex(leaf);
+  loadCurrent(leaf, true);
+  saveState();
+}
+
+/** Per-tile loop toggle: repeat the current clip to keep it on screen. */
+function toggleLoop(leaf) {
+  leaf.loop = !leaf.loop;
+  applyLoop(leaf);
+  saveState();
+}
+
+function applyLoop(leaf) {
+  if (leaf.video) leaf.video.loop = !!leaf.loop;
+  if (leaf.refs && leaf.refs.loop) {
+    leaf.refs.loop.classList.toggle('active', !!leaf.loop);
+    leaf.refs.loop.title = leaf.loop ? 'Looping this video — click to stop' : 'Loop this video (per tile)';
+  }
 }
 
 function fmtTime(s) {
@@ -324,19 +633,23 @@ function computeSplit(leaf, clientX, clientY, shift) {
   const rect = leaf.el.getBoundingClientRect();
   const orientation = shift ? 'horizontal' : 'vertical';
   if (orientation === 'vertical') {
-    const localX = snapAxis(clientX, rect.left, rect.width);
+    const localX = snapAxis(clientX, rect.left, rect.width, projOffX());
     return { orientation, ratio: clamp(localX / rect.width, 0.05, 0.95) };
   }
-  const localY = snapAxis(clientY, rect.top, rect.height);
+  const localY = snapAxis(clientY, rect.top, rect.height, projOffY());
   return { orientation, ratio: clamp(localY / rect.height, 0.05, 0.95) };
 }
 
-/** Snap an absolute screen coordinate to the visible grid, return a tile-local offset. */
-function snapAxis(client, originEdge, size) {
+/**
+ * Snap an absolute screen coordinate to the grid and return a tile-local offset.
+ * `globalOffset` shifts into the shared canvas coordinate space so snapping (and
+ * the visible grid) line up across every display when projecting.
+ */
+function snapAxis(client, originEdge, size, globalOffset = 0) {
   let local = client - originEdge;
   if (settings.snapOn && settings.cellSize > 0) {
-    const absolute = client;
-    const snapped = Math.round(absolute / settings.cellSize) * settings.cellSize;
+    const g = client + globalOffset;
+    const snapped = Math.round(g / settings.cellSize) * settings.cellSize - globalOffset;
     local = snapped - originEdge;
   }
   return clamp(local, 0, size);
@@ -382,6 +695,24 @@ function disposeLeaf(leaf) {
   }
 }
 
+/**
+ * Delete the most relevant tile for a keyboard shortcut: the tile under the
+ * cursor while editing, otherwise the focused tile. Lets the user quickly undo a
+ * mis-click while carving up the layout.
+ */
+function deleteActiveTile() {
+  let target = null;
+  if (settings.editMode) {
+    const el = document.elementFromPoint(lastMouse.x, lastMouse.y);
+    const tile = el && el.closest && el.closest('.node-leaf');
+    if (tile) target = leafById(tile.dataset.id);
+  }
+  if (!target) target = focusedLeaf;
+  if (!target) { flash('Hover or click a tile, then press Delete'); return; }
+  closeLeaf(target);
+  flash('Tile deleted');
+}
+
 // ============================================================================
 // Divider resizing
 // ============================================================================
@@ -397,10 +728,10 @@ function startDividerDrag(e, node, container) {
     const rect = container.getBoundingClientRect();
     let ratio;
     if (horizontal) {
-      const localX = snapAxis(ev.clientX, rect.left, rect.width);
+      const localX = snapAxis(ev.clientX, rect.left, rect.width, projOffX());
       ratio = clamp(localX / rect.width, 0.05, 0.95);
     } else {
-      const localY = snapAxis(ev.clientY, rect.top, rect.height);
+      const localY = snapAxis(ev.clientY, rect.top, rect.height, projOffY());
       ratio = clamp(localY / rect.height, 0.05, 0.95);
     }
     node.ratio = ratio;
@@ -455,7 +786,7 @@ function updatePreview(x, y, shift) {
   if (shift) {
     preview.classList.add('horizontal');
     preview.classList.remove('vertical');
-    const localY = snapAxis(y, rect.top, rect.height);
+    const localY = snapAxis(y, rect.top, rect.height, projOffY());
     const pct = clamp(localY / rect.height, 0.05, 0.95);
     const aPct = Math.round(pct * 100);
 
@@ -473,7 +804,7 @@ function updatePreview(x, y, shift) {
   } else {
     preview.classList.add('vertical');
     preview.classList.remove('horizontal');
-    const localX = snapAxis(x, rect.left, rect.width);
+    const localX = snapAxis(x, rect.left, rect.width, projOffX());
     const pct = clamp(localX / rect.width, 0.05, 0.95);
     const aPct = Math.round(pct * 100);
 
@@ -527,6 +858,7 @@ function setEditMode(on) {
   btnEdit.classList.toggle('active', on);
   if (!on) hidePreview();
   forEachLeaf(root, updateLeaf);
+  positionTileBadges();
   if (on) {
     editHint.classList.add('show');
     clearTimeout(setEditMode._t);
@@ -562,22 +894,32 @@ function setCellSize(px) {
 // ============================================================================
 // Persistence
 // ============================================================================
-function serialize(node) {
-  if (node.kind === 'leaf') return { kind: 'leaf', folder: node.folder, index: node.index };
+// `withIndex` keeps the per-tile playback position for local persistence. Cross-
+// window sync omits it so each display can shuffle independently without forcing
+// every other screen to rebuild whenever a single tile advances.
+function serializeTree(node, withIndex) {
+  if (node.kind === 'leaf') {
+    const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop };
+    if (withIndex) o.index = node.index;
+    return o;
+  }
   return {
     kind: 'split',
     direction: node.direction,
     ratio: node.ratio,
-    children: [serialize(node.children[0]), serialize(node.children[1])]
+    children: [serializeTree(node.children[0], withIndex), serializeTree(node.children[1], withIndex)]
   };
 }
+function serialize(node) { return serializeTree(node, true); }
+function serializeForSync(node) { return serializeTree(node, false); }
 
 function deserialize(obj) {
   if (!obj) return makeLeaf();
   if (obj.kind === 'leaf') {
     const l = makeLeaf();
     l.folder = obj.folder || null;
-    l.savedIndex = obj.index || 0;
+    l.index = l.savedIndex = obj.index || 0;
+    l.loop = !!obj.loop;
     return l;
   }
   return makeSplit(obj.direction, deserialize(obj.children[0]), deserialize(obj.children[1]), obj.ratio);
@@ -587,9 +929,12 @@ let saveTimer = null;
 function saveState() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try {
-      localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) }));
-    } catch (_) {}
+    // Only the controller (main window) persists, so mirror windows can't clobber
+    // the saved layout. Every window broadcasts its edits to the other displays.
+    if (!IS_MIRROR) {
+      try { localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) })); } catch (_) {}
+    }
+    broadcastLayout();
   }, 200);
 }
 
@@ -607,12 +952,14 @@ function loadState() {
   setGrid(!!settings.gridOn);
   setSnap(!!settings.snapOn);
   setEditMode(!!settings.editMode);
+  setGuide(!!settings.guideOn);
 
   render();
 
-  // Repopulate media for any leaf that had a folder assigned.
+  // Repopulate media for any leaf that had a folder assigned, and start playing
+  // it right away so the wall comes alive as soon as the program opens.
   forEachLeaf(root, (leaf) => {
-    if (leaf.folder) loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, false);
+    if (leaf.folder) loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, true);
   });
 }
 
@@ -638,7 +985,173 @@ async function refreshDisplays() {
     displayPill.title = info.displays
       .map((d) => `${d.isPrimary ? '★ ' : ''}${d.bounds.width}×${d.bounds.height}`)
       .join('  ·  ');
+    btnTileDisplays.disabled = info.count < 2;
   } catch (_) {}
+}
+
+// ============================================================================
+// Screen-split guide — shows where each physical display falls so the user can
+// see how the canvas is divided (and where to split tiles) when going
+// fullscreen or spanning every monitor.
+// ============================================================================
+function unionBounds(displays) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const d of displays) {
+    minX = Math.min(minX, d.bounds.x);
+    minY = Math.min(minY, d.bounds.y);
+    maxX = Math.max(maxX, d.bounds.x + d.bounds.width);
+    maxY = Math.max(maxY, d.bounds.y + d.bounds.height);
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+function setGuide(on) {
+  settings.guideOn = on;
+  btnGuide.classList.toggle('active', on);
+  saveState();
+  renderDisplayGuide();
+}
+
+/**
+ * Position one guide region per display. When the window already spans every
+ * monitor the regions sit 1:1 on top of their physical screens; otherwise the
+ * whole multi-monitor desktop is scaled to fit inside the window as a preview
+ * of how a full-span layout would be divided.
+ */
+function renderDisplayGuide() {
+  const displays = winState.displays || [];
+  // The guide is a windowed preview tool; while projecting, each display is its
+  // own fullscreen window so the guide is redundant (and would mis-position).
+  const show = settings.guideOn && displays.length > 0 && !projection.active;
+  displayGuide.classList.toggle('visible', show);
+  if (!show) { displayGuide.textContent = ''; return; }
+
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const span = winState.spanningAllDisplays && winState.windowBounds;
+
+  let map;
+  if (span) {
+    const win = winState.windowBounds;
+    map = (b) => ({
+      left: b.x - win.x,
+      top: b.y - win.y,
+      width: b.width,
+      height: b.height
+    });
+  } else {
+    const u = unionBounds(displays);
+    const margin = 36;
+    const scale = Math.min((vw - margin * 2) / u.width, (vh - margin * 2) / u.height, 1);
+    const offX = (vw - u.width * scale) / 2;
+    const offY = (vh - u.height * scale) / 2;
+    map = (b) => ({
+      left: offX + (b.x - u.x) * scale,
+      top: offY + (b.y - u.y) * scale,
+      width: b.width * scale,
+      height: b.height * scale
+    });
+  }
+
+  displayGuide.classList.toggle('preview', !span);
+  displayGuide.textContent = '';
+  for (const d of displays) {
+    const r = map(d.bounds);
+    const cell = document.createElement('div');
+    cell.className = 'guide-cell' + (d.isPrimary ? ' primary' : '');
+    cell.style.left = r.left + 'px';
+    cell.style.top = r.top + 'px';
+    cell.style.width = r.width + 'px';
+    cell.style.height = r.height + 'px';
+    const label = document.createElement('div');
+    label.className = 'guide-label';
+    label.textContent =
+      `${d.isPrimary ? '★ ' : ''}Display ${d.index} · ${d.bounds.width}×${d.bounds.height}`;
+    cell.appendChild(label);
+    displayGuide.appendChild(cell);
+  }
+}
+
+// ============================================================================
+// Tile-to-displays — carve the canvas into a tile per physical monitor using a
+// guillotine partition of the display rectangles (handles rows, columns and
+// grids of monitors). Existing folder assignments are preserved in order.
+// ============================================================================
+function buildTreeFromRects(rects) {
+  if (rects.length === 1) return makeLeaf();
+
+  const eps = 2;
+  const minX = Math.min(...rects.map((r) => r.x));
+  const maxX = Math.max(...rects.map((r) => r.x + r.w));
+  const minY = Math.min(...rects.map((r) => r.y));
+  const maxY = Math.max(...rects.map((r) => r.y + r.h));
+
+  // Try a clean vertical cut (left | right), then a horizontal one (top / bottom).
+  const cut = (axisLo, axisHi, edgeOf, startOf) => {
+    const edges = [...new Set(rects.map(edgeOf))].sort((a, b) => a - b);
+    for (const c of edges) {
+      if (c <= axisLo + eps || c >= axisHi - eps) continue;
+      const first = rects.filter((r) => edgeOf(r) <= c + eps);
+      const second = rects.filter((r) => startOf(r) >= c - eps);
+      if (first.length && second.length && first.length + second.length === rects.length) {
+        return { c, first, second, ratio: clamp((c - axisLo) / (axisHi - axisLo), 0.05, 0.95) };
+      }
+    }
+    return null;
+  };
+
+  const v = cut(minX, maxX, (r) => r.x + r.w, (r) => r.x);
+  if (v) return makeSplit('row', buildTreeFromRects(v.first), buildTreeFromRects(v.second), v.ratio);
+  const h = cut(minY, maxY, (r) => r.y + r.h, (r) => r.y);
+  if (h) return makeSplit('col', buildTreeFromRects(h.first), buildTreeFromRects(h.second), h.ratio);
+
+  // Non-guillotine arrangement: fall back to an even split of the list.
+  const mid = Math.ceil(rects.length / 2);
+  return makeSplit('row', buildTreeFromRects(rects.slice(0, mid)), buildTreeFromRects(rects.slice(mid)), mid / rects.length);
+}
+
+function collectLeaves(node, out = []) {
+  if (node.kind === 'leaf') out.push(node);
+  else node.children.forEach((c) => collectLeaves(c, out));
+  return out;
+}
+
+function tileToDisplays() {
+  const displays = winState.displays || [];
+  if (displays.length < 2) {
+    flash('Tile to Displays needs 2+ connected displays');
+    return;
+  }
+  // Preserve current folder assignments in reading order.
+  const oldLeaves = collectLeaves(root);
+  const saved = oldLeaves.map((l) => ({ folder: l.folder, index: l.index }));
+
+  forEachLeaf(root, disposeLeaf);
+  const rects = displays
+    .slice()
+    .sort((a, b) => a.bounds.y - b.bounds.y || a.bounds.x - b.bounds.x)
+    .map((d) => ({ x: d.bounds.x, y: d.bounds.y, w: d.bounds.width, h: d.bounds.height }));
+
+  root = buildTreeFromRects(rects);
+  focusedLeaf = null;
+  render();
+
+  const newLeaves = collectLeaves(root);
+  newLeaves.forEach((leaf, i) => {
+    const s = saved[i];
+    if (s && s.folder) loadFolder(leaf, s.folder, s.index || 0, false);
+  });
+
+  flash(`Tiled layout to match ${displays.length} displays`);
+  if (!settings.guideOn) setGuide(true);
+}
+
+let flashTimer = null;
+function flash(msg) {
+  toast.innerHTML = '<strong>' + msg + '</strong>';
+  toast.classList.add('show');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => toast.classList.remove('show'), 2600);
 }
 
 // ============================================================================
@@ -661,6 +1174,13 @@ document.addEventListener('keydown', (e) => {
     case 's': setSnap(!settings.snapOn); break;
     case 'f': window.api.toggleFullscreen(); break;
     case 'a': window.api.toggleSpanAll(); break;
+    case 'd': setGuide(!settings.guideOn); break;
+    case 't': tileToDisplays(); break;
+    case 'delete':
+    case 'backspace':
+      e.preventDefault();
+      deleteActiveTile();
+      break;
     case ' ':
       if (focusedLeaf) { e.preventDefault(); togglePlay(focusedLeaf); }
       break;
@@ -685,14 +1205,27 @@ btnReset.addEventListener('click', () => {
 });
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
+btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
+btnTileDisplays.addEventListener('click', () => tileToDisplays());
 btnMin.addEventListener('click', () => window.api.minimize());
 btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
 
 function applyWindowState(state) {
+  const wasSpanningAll = winState.spanningAllDisplays;
+  winState = {
+    fullScreen: !!state.fullScreen,
+    spanningAllDisplays: !!state.spanningAllDisplays,
+    windowBounds: state.windowBounds || null,
+    displays: state.displays || winState.displays || []
+  };
+
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
+  void wasSpanningAll;
+  renderDisplayGuide();
+  positionTileBadges();
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -729,10 +1262,25 @@ function spanToast(count) {
 window.api.onWindowState(applyWindowState);
 window.api.onDisplayChanged(() => refreshDisplays());
 
-window.addEventListener('resize', () => { if (settings.editMode) hidePreview(); });
+window.addEventListener('resize', () => {
+  if (settings.editMode) hidePreview();
+  renderDisplayGuide();
+  if (projection.active) applyProjection();
+  positionTileBadges();
+});
 
 // ----------------------------------------------------------------- Boot
-loadState();
-refreshDisplays();
-window.api.requestWindowState();
-wake();
+if (IS_MIRROR) {
+  // Per-display editor window: render this monitor's slice and stay in sync.
+  bootMirror();
+} else {
+  // Controller (main) window: owns persistence + the control bar.
+  window.api.onProjection(setProjection);
+  window.api.onLayout(applyIncomingLayout);
+  // A mirror asked for the current layout — force a fresh broadcast to it.
+  window.api.onProvideLayout(() => { lastSyncJSON = ''; broadcastLayout(); });
+  loadState();
+  refreshDisplays();
+  window.api.requestWindowState();
+  wake();
+}

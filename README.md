@@ -23,17 +23,47 @@ nothing is uploaded anywhere.
   - **Shift + left click → horizontal split** (top / bottom).
   - The split happens **at the cursor position**, so you choose the proportions
     as you click.
+  - You can split **any** tile this way — including brand-new, folder-less tiles.
+  - **Always-visible boundaries** — tile borders and the dividers between them
+    are clearly drawn (and glow in the accent colour while editing) so you can
+    always see how the surface has been divided.
 - **Per-tile media folders** — assign any folder to a tile and it becomes a
   playlist of the video files inside it, with play/pause, next/previous, seek,
   volume and mute controls.
+  - **Random / shuffle playback** — a tile starts on a random clip and, when a
+    clip finishes, automatically shuffles to another random clip from its folder.
+    (Next / Previous still step through in order for manual control.)
+  - **Per-tile loop** (🔁) — keep the current video on screen by repeating it.
+    Loop is independent per tile, so one pane can hold on a clip while the others
+    keep shuffling.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
-  - **Span / fullscreen across ALL displays at once** (`A`).
+  - **Fullscreen across ALL displays at once** (`A`) — each monitor gets its own
+    **real OS fullscreen window**, so every screen is genuinely fullscreen and
+    **covers the taskbar / dock / menu bar**. The single tiling canvas is spread
+    across the union of all monitors and each window shows just its own slice, so
+    a tile (or a "Tile to Displays" layout) fills the screen it belongs to.
+    - Your **primary** display keeps the top control bar.
+    - **Every** display is a live editor — move the cursor to any screen and
+      split / resize / delete tiles there; the alignment grid spans all monitors
+      and edits sync instantly across the whole wall.
+    - Hot-plugging or rearranging monitors re-fits the wall automatically.
   - When spanning every display, the control bar and edit tools are **pinned to
     your primary monitor** so they're always fully visible (never stranded in a
     dead zone between screens), and you can keep splitting/editing tiles right
     across the whole multi-monitor canvas. Hot-plugging or rearranging monitors
     re-fits the span automatically.
+- **Screen-split guide** — an easy-to-see overlay that shows **exactly how the
+  canvas maps onto your physical screens**. Each monitor is outlined with a
+  glowing, labelled region (resolution + a ★ on your primary display) so you
+  always know where one display ends and the next begins.
+  - **Auto-appears** the moment you span all displays, and can be toggled any
+    time with `G`uide / the **Guide** button (`D`). When you're not spanning, it
+    previews the multi-monitor layout as a scaled mini-map so you can see how the
+    screen *would* be carved up before you commit.
+- **Tile to Displays** (`T`) — one click lays the tiles out to **match your
+  monitor arrangement** (rows, columns or grids of screens), so each video fills
+  exactly one display when you span. Existing folder assignments are kept.
 - **Minimal, auto-hiding interface** — the top bar, tile controls and even the
   mouse cursor fade away when you stop interacting, leaving a clean viewing
   surface. They reappear the moment you move the mouse.
@@ -43,6 +73,11 @@ nothing is uploaded anywhere.
   perfectly aligned layouts.
 - **Resizable dividers** — drag the divider between any two tiles to rebalance
   them (snaps to the grid when snap is on).
+- **Delete tiles** — made a wrong split? While editing, hit the **🗑** badge on a
+  tile or press `Delete` / `Backspace` to remove it; its space is reclaimed by
+  the neighbouring tile.
+- **Autoplay on launch** — tiles with an assigned folder start playing as soon as
+  the program opens.
 - **Layout persistence** — your layout, folder assignments and settings are
   remembered between sessions.
 
@@ -64,15 +99,18 @@ npm start
 | Vertical split | Left-click a tile (in edit mode) |
 | Horizontal split | `Shift` + left-click a tile (in edit mode) |
 | Resize tiles | Drag the divider between them |
-| Close / merge a tile | The **✕** button on the tile (visible in edit mode) |
+| Delete / merge a tile | The **🗑** badge on the tile (in edit mode), the toolbar **✕**, or `Delete` / `Backspace` on the hovered/focused tile |
 | Assign a folder | The **📁** button on a tile, or the *Choose media folder…* button |
 | Play / pause focused tile | `Space` |
+| Loop the current video (per tile) | The **🔁** button on the tile |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |
 | Adjust grid cell size | The **Cell** slider |
 | Reset layout | The **Reset** button |
 | Fullscreen (current display) | `F` or the **Fullscreen** button |
 | Fullscreen across ALL displays | `A` or the **All Displays** button |
+| Toggle the screen-split guide | `D` or the **Guide** button |
+| Tile layout to match displays | `T` or the **Tile to Displays** button |
 | Exit edit mode | `Escape` |
 
 ## Supported formats
