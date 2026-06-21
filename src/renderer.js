@@ -19,6 +19,7 @@ const LS_KEY = 'lvt.state.v1';
 
 // ---------------------------------------------------------------- DOM handles
 const stage = document.getElementById('stage');
+const topbar = document.getElementById('topbar');
 const preview = document.getElementById('split-preview');
 const gridOverlay = document.getElementById('grid-overlay');
 const displayGuide = document.getElementById('display-guide');
@@ -296,7 +297,29 @@ function render() {
   stage.appendChild(renderNode(root));
   applyFocus();
   if (projection.active) applyProjection();
+  positionTileBadges();
   saveState();
+}
+
+/**
+ * Keep each tile's delete/close badge clear of the top control bar so it stays
+ * clickable even while the UI is open (the bar otherwise covers the top-row
+ * tiles' top-right corner).
+ */
+function positionTileBadges() {
+  if (IS_MIRROR || !topbar) return;
+  const cs = getComputedStyle(topbar);
+  // The bar slides in/out via a CSS transform, so use its layout box (top +
+  // offsetHeight) rather than getBoundingClientRect (which reflects the
+  // mid-transition transform) to know where it really sits.
+  const barShown = cs.display !== 'none' &&
+    !(document.body.classList.contains('idle') && !document.body.classList.contains('editing'));
+  const barBottom = barShown ? (parseFloat(cs.top) || 0) + topbar.offsetHeight : 0;
+  forEachLeaf(root, (leaf) => {
+    if (!leaf.refs || !leaf.refs.del || !leaf.el) return;
+    const tileTop = leaf.el.getBoundingClientRect().top;
+    leaf.refs.del.style.top = Math.max(8, Math.round(barBottom - tileTop) + 8) + 'px';
+  });
 }
 
 function renderNode(node) {
@@ -807,6 +830,7 @@ function setEditMode(on) {
   btnEdit.classList.toggle('active', on);
   if (!on) hidePreview();
   forEachLeaf(root, updateLeaf);
+  positionTileBadges();
   if (on) {
     editHint.classList.add('show');
     clearTimeout(setEditMode._t);
@@ -904,9 +928,10 @@ function loadState() {
 
   render();
 
-  // Repopulate media for any leaf that had a folder assigned.
+  // Repopulate media for any leaf that had a folder assigned, and start playing
+  // it right away so the wall comes alive as soon as the program opens.
   forEachLeaf(root, (leaf) => {
-    if (leaf.folder) loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, false);
+    if (leaf.folder) loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, true);
   });
 }
 
@@ -1172,6 +1197,7 @@ function applyWindowState(state) {
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
   void wasSpanningAll;
   renderDisplayGuide();
+  positionTileBadges();
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -1212,6 +1238,7 @@ window.addEventListener('resize', () => {
   if (settings.editMode) hidePreview();
   renderDisplayGuide();
   if (projection.active) applyProjection();
+  positionTileBadges();
 });
 
 // ----------------------------------------------------------------- Boot

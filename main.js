@@ -59,7 +59,9 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
       // Allow file:// media to load from the file:// page.
-      webSecurity: true
+      webSecurity: true,
+      // Let assigned folders start playing on launch without a user gesture.
+      autoplayPolicy: 'no-user-gesture-required'
     }
   });
 
@@ -146,7 +148,8 @@ function createProjectionWindow(display, union) {
       nodeIntegration: false,
       sandbox: false,
       webSecurity: true,
-      backgroundThrottling: false
+      backgroundThrottling: false,
+      autoplayPolicy: 'no-user-gesture-required'
     }
   });
   win.removeMenu();

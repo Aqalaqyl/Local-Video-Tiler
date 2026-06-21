@@ -76,6 +76,8 @@ nothing is uploaded anywhere.
 - **Delete tiles** — made a wrong split? While editing, hit the **🗑** badge on a
   tile or press `Delete` / `Backspace` to remove it; its space is reclaimed by
   the neighbouring tile.
+- **Autoplay on launch** — tiles with an assigned folder start playing as soon as
+  the program opens.
 - **Layout persistence** — your layout, folder assignments and settings are
   remembered between sessions.
 
