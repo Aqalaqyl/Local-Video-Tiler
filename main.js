@@ -167,6 +167,8 @@ function createProjectionWindow(display, union) {
     win.setAlwaysOnTop(true, 'screen-saver');
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     setWindowFullscreen(win, true);
+    // Re-sync after fullscreen using display.bounds (global coords), not getBounds().
+    setTimeout(() => syncProjectionViewport(win, 'mirror', union, null, b), 80);
   });
   win.on('closed', () => {
     projectionWindows = projectionWindows.filter((w) => w !== win);
@@ -209,6 +211,8 @@ function spanAllDisplays() {
     union,
     displayCount: displays.length
   });
+  // Re-sync after fullscreen using display.bounds (global coords), not getBounds().
+  setTimeout(() => syncProjectionViewport(mainWindow, 'controller', union, displays.length, primary.bounds), 80);
 
   // Every other display gets its own fullscreen mirror window.
   closeProjectionWindows();
@@ -239,6 +243,23 @@ function restoreFromSpan() {
 
 function sendProjection(win, config) {
   if (win && !win.isDestroyed()) win.webContents.send('projection:set', config);
+}
+
+/** Push display bounds in global desktop coordinates (never win.getBounds() — fullscreen on a secondary monitor often reports 0,0). */
+function syncProjectionViewport(win, role, union, displayCount, displayBounds) {
+  if (!win || win.isDestroyed() || !displayBounds) return;
+  sendProjection(win, {
+    active: true,
+    role,
+    viewport: {
+      x: displayBounds.x,
+      y: displayBounds.y,
+      width: displayBounds.width,
+      height: displayBounds.height
+    },
+    union,
+    displayCount
+  });
 }
 
 function toggleSpanAllDisplays() {
