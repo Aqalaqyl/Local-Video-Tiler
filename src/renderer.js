@@ -35,6 +35,7 @@ const btnFs = document.getElementById('btn-fs');
 const btnFsAll = document.getElementById('btn-fs-all');
 const btnGuide = document.getElementById('btn-guide');
 const btnTileDisplays = document.getElementById('btn-tile-displays');
+const btnAssign = document.getElementById('btn-assign');
 const btnMin = document.getElementById('btn-min');
 const btnX = document.getElementById('btn-x');
 const gridSizeInput = document.getElementById('grid-size');
@@ -217,6 +218,7 @@ function applyIncomingLayout(payload) {
     for (const l of pool) { if (!used.has(l)) disposeLeaf(l); }
     root = newRoot;
     focusedLeaf = null;
+    selectedLeaves.clear();
     render();
     // Start media only for brand-new tiles; reused tiles are already playing.
     forEachLeaf(root, (leaf) => {
@@ -270,6 +272,8 @@ function uid() { return 'n' + (uidCounter++); }
 
 let root = makeLeaf();
 let focusedLeaf = null;
+/** @type {Set<object>} Tiles chosen for batch folder assignment (Ctrl/Cmd+click). */
+const selectedLeaves = new Set();
 
 // --------------------------------------------------------------- Node helpers
 function makeLeaf() {
@@ -323,7 +327,7 @@ function render() {
   forEachLeaf(root, (leaf) => { if (leaf.el && leaf.el.parentNode) leaf.el.parentNode.removeChild(leaf.el); });
   stage.textContent = '';
   stage.appendChild(renderNode(root));
-  applyFocus();
+  applySelection();
   if (projection.active) applyProjection();
   positionTileBadges();
   saveState();
@@ -522,11 +526,15 @@ function wireLeafEvents(leaf) {
   // tile, whose placeholder covers its whole body, could never be split.
   el.addEventListener('click', (e) => {
     if (e.target.closest('.tile-toolbar')) return;
+    if (isMultiSelectModifier(e)) {
+      toggleSelection(leaf);
+      return;
+    }
     if (settings.editMode) {
       const s = computeSplit(leaf, e.clientX, e.clientY, e.shiftKey);
       splitLeaf(leaf, s.orientation, s.ratio);
     } else {
-      setFocus(leaf);
+      setSelectionSingle(leaf);
     }
   });
 }
@@ -534,12 +542,49 @@ function wireLeafEvents(leaf) {
 // ============================================================================
 // Media
 // ============================================================================
+function isMultiSelectModifier(e) {
+  return !!(e && (e.ctrlKey || e.metaKey));
+}
+
+function pruneSelection() {
+  const live = new Set();
+  forEachLeaf(root, (l) => live.add(l));
+  for (const l of selectedLeaves) {
+    if (!live.has(l)) selectedLeaves.delete(l);
+  }
+}
+
+function getAssignmentTargets(leaf) {
+  pruneSelection();
+  if (selectedLeaves.size > 0) return [...selectedLeaves];
+  return leaf ? [leaf] : [];
+}
+
 async function assignFolder(leaf) {
+  const targets = getAssignmentTargets(leaf);
+  if (!targets.length) return;
   const folder = await window.api.pickFolder();
   if (!folder) return;
-  await loadFolder(leaf, folder, 0, false);
-  // Start playback on a random clip from the folder.
-  advanceRandom(leaf);
+  for (const t of targets) {
+    await loadFolder(t, folder, 0, false);
+    advanceRandom(t);
+  }
+  if (targets.length > 1) flash(`Assigned folder to ${targets.length} tiles`);
+}
+
+async function assignFolderToSelection() {
+  const targets = getAssignmentTargets(null);
+  if (!targets.length) {
+    flash('Ctrl+click tiles to select them, then assign a folder');
+    return;
+  }
+  const folder = await window.api.pickFolder();
+  if (!folder) return;
+  for (const t of targets) {
+    await loadFolder(t, folder, 0, false);
+    advanceRandom(t);
+  }
+  flash(`Assigned folder to ${targets.length} tile${targets.length === 1 ? '' : 's'}`);
 }
 
 async function loadFolder(leaf, folder, index = 0, autoplay = false) {
@@ -685,7 +730,8 @@ function closeLeaf(leaf) {
       grand.children[i] = sibling;
     }
   }
-  if (focusedLeaf === leaf) focusedLeaf = null;
+  if (focusedLeaf === leaf) focusedLeaf = selectedLeaves.size ? [...selectedLeaves].pop() : null;
+  selectedLeaves.delete(leaf);
   render();
 }
 
@@ -837,16 +883,55 @@ function leafById(id) {
 }
 
 // ============================================================================
-// Focus
+// Focus / multi-select
 // ============================================================================
-function setFocus(leaf) {
+function setSelectionSingle(leaf) {
+  selectedLeaves.clear();
+  selectedLeaves.add(leaf);
   focusedLeaf = leaf;
-  applyFocus();
+  applySelection();
 }
-function applyFocus() {
+
+function toggleSelection(leaf) {
+  if (selectedLeaves.has(leaf)) selectedLeaves.delete(leaf);
+  else selectedLeaves.add(leaf);
+  focusedLeaf = leaf;
+  applySelection();
+}
+
+function clearSelection() {
+  selectedLeaves.clear();
+  applySelection();
+}
+
+function setFocus(leaf) {
+  setSelectionSingle(leaf);
+}
+
+function updateAssignButton() {
+  if (!btnAssign) return;
+  const n = selectedLeaves.size;
+  btnAssign.disabled = n === 0;
+  btnAssign.classList.toggle('active', n > 0);
+  btnAssign.title = n > 0
+    ? `Assign the same folder to ${n} selected tile(s)`
+    : 'Ctrl+click tiles to select, then assign a shared folder';
+  btnAssign.textContent = n > 0 ? `📁 Folder (${n})` : '📁 Folder';
+}
+
+function applySelection() {
+  pruneSelection();
   forEachLeaf(root, (l) => {
-    if (l.el) l.el.classList.toggle('focused', l === focusedLeaf);
+    if (!l.el) return;
+    const sel = selectedLeaves.has(l);
+    l.el.classList.toggle('selected', sel);
+    l.el.classList.toggle('focused', l === focusedLeaf);
   });
+  updateAssignButton();
+}
+
+function applyFocus() {
+  applySelection();
 }
 
 // ============================================================================
@@ -1134,6 +1219,7 @@ function tileToDisplays() {
 
   root = buildTreeFromRects(rects);
   focusedLeaf = null;
+  selectedLeaves.clear();
   render();
 
   const newLeaves = collectLeaves(root);
@@ -1185,6 +1271,7 @@ document.addEventListener('keydown', (e) => {
       if (focusedLeaf) { e.preventDefault(); togglePlay(focusedLeaf); }
       break;
     case 'escape':
+      if (selectedLeaves.size > 0) { clearSelection(); break; }
       if (settings.editMode) setEditMode(false);
       break;
     default: break;
@@ -1201,12 +1288,14 @@ btnReset.addEventListener('click', () => {
   forEachLeaf(root, disposeLeaf);
   root = makeLeaf();
   focusedLeaf = null;
+  selectedLeaves.clear();
   render();
 });
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
 btnTileDisplays.addEventListener('click', () => tileToDisplays());
+if (btnAssign) btnAssign.addEventListener('click', () => assignFolderToSelection());
 btnMin.addEventListener('click', () => window.api.minimize());
 btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
