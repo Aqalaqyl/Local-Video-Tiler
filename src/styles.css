@@ -340,6 +340,21 @@ body.idle:not(.editing) #display-guide { opacity: 0; }
 .guide-cell.primary .guide-label { color: #fff; background: var(--accent); }
 
 /* ------------------------------------------------- Projection / display wall */
+/* Each per-display window shows only its slice of the shared canvas. Clip
+   overflow so tiles never bleed past the physical screen edge. */
+body.projection {
+  overflow: hidden;
+}
+body.projection #stage,
+body.projection #grid-overlay {
+  overflow: hidden;
+}
+body.projection #stage > .node-split,
+body.projection #stage > .node-leaf {
+  width: 100%;
+  height: 100%;
+}
+
 /* Per-display windows are full editors: keep the cursor, grid, split preview and
    delete badges so every screen can be edited. Only hide the duplicate top
    control bar (controls live on the primary display) and the windowed-only guide. */

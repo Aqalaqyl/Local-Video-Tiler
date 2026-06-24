@@ -135,16 +135,20 @@ function isLeafVisible(leaf) {
   return r.right > 1 && r.bottom > 1 && r.left < window.innerWidth - 1 && r.top < window.innerHeight - 1;
 }
 
-/** On mirror windows, only decode/play videos whose tile falls on this display. */
+/**
+ * While projecting across displays, each window only decodes/plays tiles that
+ * fall on its own slice. Mirrors are always muted; the controller keeps audio
+ * only for tiles visible on the primary display.
+ */
 function reconcileProjectionPlayback() {
-  if (!(projection.active && projection.role === 'mirror')) return;
+  if (!projection.active) return;
   forEachLeaf(root, (leaf) => {
     if (!leaf.video) return;
     const visible = isLeafVisible(leaf) && leaf.files.length > 0;
     if (visible) {
       const cur = leaf.files[leaf.index];
       if (cur && leaf.video.getAttribute('src') !== cur.url) { leaf.video.src = cur.url; leaf.video.load(); }
-      leaf.video.muted = true;
+      leaf.video.muted = projection.role === 'mirror';
       leaf.video.loop = !!leaf.loop;
       leaf.video.play().catch(() => {});
     } else {
@@ -220,7 +224,9 @@ function applyIncomingLayout(payload) {
     render();
     // Start media only for brand-new tiles; reused tiles are already playing.
     forEachLeaf(root, (leaf) => {
-      if (leaf.folder && leaf.files.length === 0) loadFolder(leaf, leaf.folder, 0, true);
+      if (leaf.folder && leaf.files.length === 0) {
+        loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf));
+      }
     });
     applyProjection();
   } finally {
@@ -324,7 +330,10 @@ function render() {
   stage.textContent = '';
   stage.appendChild(renderNode(root));
   applyFocus();
-  if (projection.active) applyProjection();
+  if (projection.active) {
+    applyProjection();
+    reconcileProjectionPlayback();
+  }
   positionTileBadges();
   saveState();
 }
@@ -538,8 +547,7 @@ async function assignFolder(leaf) {
   const folder = await window.api.pickFolder();
   if (!folder) return;
   await loadFolder(leaf, folder, 0, false);
-  // Start playback on a random clip from the folder.
-  advanceRandom(leaf);
+  advanceRandom(leaf, true);
 }
 
 async function loadFolder(leaf, folder, index = 0, autoplay = false) {
@@ -555,19 +563,24 @@ async function loadFolder(leaf, folder, index = 0, autoplay = false) {
 function loadCurrent(leaf, autoplay) {
   const { video } = leaf;
   const current = leaf.files[leaf.index];
-  if (!current) { video.removeAttribute('src'); video.load(); return; }
-  // On a mirror window, skip videos whose tile is outside this display's slice
-  // so each screen only decodes what it actually shows.
-  if (projection.role === 'mirror' && !isLeafVisible(leaf)) {
-    video.removeAttribute('src');
-    video.load();
+  // While projecting, only load media for tiles on this window's slice so we
+  // don't decode (or hear) videos that belong on another display.
+  const visible = !projection.active || isLeafVisible(leaf);
+  if (!current || !visible) {
+    try {
+      video.pause();
+      if (video.getAttribute('src')) { video.removeAttribute('src'); video.load(); }
+    } catch (_) { /* ignore */ }
+    updateLeaf(leaf);
     return;
   }
+  // Pause before swapping src so a prior clip can't keep playing audio.
+  try { video.pause(); } catch (_) { /* ignore */ }
   video.src = current.url;
   video.load();
   video.loop = !!leaf.loop;
   if (projection.role === 'mirror') video.muted = true;
-  if (autoplay || (projection.role === 'mirror' && isLeafVisible(leaf))) video.play().catch(() => {});
+  if (autoplay) video.play().catch(() => {});
   updateLeaf(leaf);
 }
 
@@ -594,9 +607,9 @@ function pickRandomIndex(leaf) {
 }
 
 /** Auto-advance to a random clip from the folder (the default shuffle playback). */
-function advanceRandom(leaf) {
+function advanceRandom(leaf, initial = false) {
   if (!leaf.files.length) return;
-  leaf.index = pickRandomIndex(leaf);
+  leaf.index = initial ? Math.floor(Math.random() * leaf.files.length) : pickRandomIndex(leaf);
   loadCurrent(leaf, true);
   saveState();
 }
@@ -956,10 +969,10 @@ function loadState() {
 
   render();
 
-  // Repopulate media for any leaf that had a folder assigned, and start playing
-  // it right away so the wall comes alive as soon as the program opens.
+  // Repopulate media for any leaf that had a folder assigned, then shuffle to a
+  // random clip so launch matches the documented random-start behaviour.
   forEachLeaf(root, (leaf) => {
-    if (leaf.folder) loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, true);
+    if (leaf.folder) loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf, true));
   });
 }
 
@@ -1105,7 +1118,27 @@ function buildTreeFromRects(rects) {
   const h = cut(minY, maxY, (r) => r.y + r.h, (r) => r.y);
   if (h) return makeSplit('col', buildTreeFromRects(h.first), buildTreeFromRects(h.second), h.ratio);
 
-  // Non-guillotine arrangement: fall back to an even split of the list.
+  // Non-guillotine arrangement: split the bounding box at its midpoint on the
+  // longer axis so tiles still align to physical screen regions.
+  const spanW = maxX - minX;
+  const spanH = maxY - minY;
+  if (spanW >= spanH) {
+    const midX = minX + spanW / 2;
+    const first = rects.filter((r) => r.x + r.w / 2 < midX);
+    const second = rects.filter((r) => r.x + r.w / 2 >= midX);
+    if (first.length && second.length) {
+      return makeSplit('row', buildTreeFromRects(first), buildTreeFromRects(second),
+        clamp((midX - minX) / spanW, 0.05, 0.95));
+    }
+  } else {
+    const midY = minY + spanH / 2;
+    const first = rects.filter((r) => r.y + r.h / 2 < midY);
+    const second = rects.filter((r) => r.y + r.h / 2 >= midY);
+    if (first.length && second.length) {
+      return makeSplit('col', buildTreeFromRects(first), buildTreeFromRects(second),
+        clamp((midY - minY) / spanH, 0.05, 0.95));
+    }
+  }
   const mid = Math.ceil(rects.length / 2);
   return makeSplit('row', buildTreeFromRects(rects.slice(0, mid)), buildTreeFromRects(rects.slice(mid)), mid / rects.length);
 }
@@ -1265,7 +1298,10 @@ window.api.onDisplayChanged(() => refreshDisplays());
 window.addEventListener('resize', () => {
   if (settings.editMode) hidePreview();
   renderDisplayGuide();
-  if (projection.active) applyProjection();
+  if (projection.active) {
+    applyProjection();
+    reconcileProjectionPlayback();
+  }
   positionTileBadges();
 });
 
