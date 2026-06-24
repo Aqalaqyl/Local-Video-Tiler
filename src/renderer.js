@@ -1133,36 +1133,34 @@ function allocSlice(alloc, direction, ratio, first) {
 
 /**
  * Pad a leaf so its content rectangle fits precisely inside the flex allocation.
- * Needed when monitors in a row/column have different widths/heights — without
- * padding the shorter display's tile stretches past the screen edge.
+ * Needed when a monitor is offset inside the union (e.g. a 1080p screen vertically
+ * centred beside a taller 4K panel). Padding is built inside-out: bottom/right
+ * spacers hug the content, then top/left spacers wrap that stack — applying top
+ * then bottom sequentially would nest the top spacer inside the bottom split and
+ * stretch the content tile past the screen edge.
  */
 function padToAlloc(node, content, alloc) {
   const eps = 2;
   let n = node;
-  let a = { x: alloc.x, y: alloc.y, w: alloc.w, h: alloc.h };
 
-  const topPad = content.y - a.y;
-  if (topPad > eps) {
-    const r = topPad / a.h;
-    n = makeSplit('col', makeSpacerLeaf(), n, r);
-    a = { x: a.x, y: a.y + topPad, w: a.w, h: a.h - topPad };
-  }
-  const bottomPad = (a.y + a.h) - (content.y + content.h);
+  const topPad = content.y - alloc.y;
+  const bottomPad = (alloc.y + alloc.h) - (content.y + content.h);
+  const leftPad = content.x - alloc.x;
+  const rightPad = (alloc.x + alloc.w) - (content.x + content.w);
+
   if (bottomPad > eps) {
-    const r = content.h / a.h;
-    n = makeSplit('col', n, makeSpacerLeaf(), r);
-    a = { x: a.x, y: a.y, w: a.w, h: content.h };
+    const restH = content.h + bottomPad;
+    n = makeSplit('col', n, makeSpacerLeaf(), content.h / restH);
   }
-  const leftPad = content.x - a.x;
-  if (leftPad > eps) {
-    const r = leftPad / a.w;
-    n = makeSplit('row', makeSpacerLeaf(), n, r);
-    a = { x: a.x + leftPad, y: a.y, w: a.w - leftPad, h: a.h };
+  if (topPad > eps) {
+    n = makeSplit('col', makeSpacerLeaf(), n, topPad / alloc.h);
   }
-  const rightPad = (a.x + a.w) - (content.x + content.w);
   if (rightPad > eps) {
-    const r = content.w / a.w;
-    n = makeSplit('row', n, makeSpacerLeaf(), r);
+    const restW = content.w + rightPad;
+    n = makeSplit('row', n, makeSpacerLeaf(), content.w / restW);
+  }
+  if (leftPad > eps) {
+    n = makeSplit('row', makeSpacerLeaf(), n, leftPad / alloc.w);
   }
   return n;
 }
