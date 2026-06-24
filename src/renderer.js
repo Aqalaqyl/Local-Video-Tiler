@@ -28,6 +28,7 @@ const toast = document.getElementById('toast');
 const displayPill = document.getElementById('display-pill');
 
 const btnEdit = document.getElementById('btn-edit');
+const btnEditFloat = document.getElementById('btn-edit-float');
 const btnGrid = document.getElementById('btn-grid');
 const btnSnap = document.getElementById('btn-snap');
 const btnReset = document.getElementById('btn-reset');
@@ -937,14 +938,31 @@ function applyFocus() {
 // ============================================================================
 // Settings toggles
 // ============================================================================
+function countLeaves() {
+  let n = 0;
+  forEachLeaf(root, () => { n++; });
+  return n;
+}
+
+/** While spanning, one tile covering the whole canvas can't be edited per-monitor until laid out. */
+function shouldAutoTileForEdit() {
+  const displays = winState.displays || [];
+  if (displays.length < 2) return false;
+  if (!winState.spanningAllDisplays && !projection.active) return false;
+  return countLeaves() < displays.length;
+}
+
 function setEditMode(on) {
+  if (on && shouldAutoTileForEdit()) tileToDisplays();
   settings.editMode = on;
   document.body.classList.toggle('editing', on);
-  btnEdit.classList.toggle('active', on);
+  if (btnEdit) btnEdit.classList.toggle('active', on);
+  if (btnEditFloat) btnEditFloat.classList.toggle('active', on);
   if (!on) hidePreview();
   forEachLeaf(root, updateLeaf);
   positionTileBadges();
   if (on) {
+    wake();
     editHint.classList.add('show');
     clearTimeout(setEditMode._t);
     setEditMode._t = setTimeout(() => editHint.classList.remove('show'), 4000);
@@ -1282,6 +1300,7 @@ document.addEventListener('keyup', (e) => {
 });
 
 btnEdit.addEventListener('click', () => setEditMode(!settings.editMode));
+if (btnEditFloat) btnEditFloat.addEventListener('click', () => setEditMode(!settings.editMode));
 btnGrid.addEventListener('click', () => setGrid(!settings.gridOn));
 btnSnap.addEventListener('click', () => setSnap(!settings.snapOn));
 btnReset.addEventListener('click', () => {

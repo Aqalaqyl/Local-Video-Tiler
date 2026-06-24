@@ -349,6 +349,18 @@ body.mirror { background: #000; }
 body.mirror #topbar,
 body.mirror #display-guide { display: none !important; }
 
+/* Floating edit control on non-primary displays (no top bar there). */
+.edit-float {
+  display: none;
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 65;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.55);
+}
+body.mirror .edit-float { display: inline-block; }
+body.mirror .edit-float.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
 /* --------------------------------------------------------- Split preview */
 #split-preview {
   position: fixed;
