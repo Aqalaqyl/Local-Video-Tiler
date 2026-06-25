@@ -79,6 +79,8 @@ const IS_MIRROR = new URLSearchParams(location.search).get('role') === 'mirror';
 // Guards against echo loops when applying a layout pushed from another window.
 let applyingRemote = false;
 let lastSyncJSON = '';
+// True once Tile to Displays (or the edit-mode auto-tile) has run this span session.
+let spanLayoutInitialized = false;
 
 function readProjectionQuery() {
   const p = new URLSearchParams(location.search);
@@ -167,7 +169,8 @@ function applySettingsFromPayload(s) {
   if (s.cellSize != null && s.cellSize !== settings.cellSize) setCellSize(s.cellSize);
   if (!!s.gridOn !== settings.gridOn) setGrid(!!s.gridOn);
   if (!!s.snapOn !== settings.snapOn) setSnap(!!s.snapOn);
-  if (!!s.editMode !== settings.editMode) setEditMode(!!s.editMode);
+  // Never auto-tile while applying a synced layout — that would wipe custom splits.
+  if (!!s.editMode !== settings.editMode) setEditMode(!!s.editMode, { skipAutoTile: true });
 }
 
 // Push the current layout + settings to peer windows (deduped to avoid echoes).
@@ -239,7 +242,9 @@ function setProjection(config) {
     projection.viewport = null;
     projection.union = null;
     applyProjection();
+    render();
     renderDisplayGuide();
+    flushSaveState();
     return;
   }
   projection.active = true;
@@ -946,14 +951,18 @@ function countLeaves() {
 
 /** While spanning, one tile covering the whole canvas can't be edited per-monitor until laid out. */
 function shouldAutoTileForEdit() {
+  if (spanLayoutInitialized) return false;
   const displays = winState.displays || [];
   if (displays.length < 2) return false;
   if (!winState.spanningAllDisplays && !projection.active) return false;
   return countLeaves() < displays.length;
 }
 
-function setEditMode(on) {
-  if (on && shouldAutoTileForEdit()) tileToDisplays();
+function setEditMode(on, opts = {}) {
+  if (on && !opts.skipAutoTile && shouldAutoTileForEdit()) {
+    tileToDisplays();
+    spanLayoutInitialized = true;
+  }
   settings.editMode = on;
   document.body.classList.toggle('editing', on);
   if (btnEdit) btnEdit.classList.toggle('active', on);
@@ -1029,14 +1038,18 @@ function deserialize(obj) {
 }
 
 let saveTimer = null;
+function flushSaveState() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  if (!IS_MIRROR) {
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) })); } catch (_) {}
+  }
+}
+
 function saveState() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    // Only the controller (main window) persists, so mirror windows can't clobber
-    // the saved layout. Every window broadcasts its edits to the other displays.
-    if (!IS_MIRROR) {
-      try { localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) })); } catch (_) {}
-    }
+    flushSaveState();
     broadcastLayout();
   }, 200);
 }
@@ -1054,7 +1067,7 @@ function loadState() {
   setCellSize(settings.cellSize || 80);
   setGrid(!!settings.gridOn);
   setSnap(!!settings.snapOn);
-  setEditMode(!!settings.editMode);
+  setEditMode(!!settings.editMode, { skipAutoTile: true });
   setGuide(!!settings.guideOn);
 
   render();
@@ -1238,6 +1251,7 @@ function tileToDisplays() {
   root = buildTreeFromRects(rects);
   focusedLeaf = null;
   selectedLeaves.clear();
+  spanLayoutInitialized = true;
   render();
 
   const newLeaves = collectLeaves(root);
@@ -1290,7 +1304,11 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'escape':
       if (selectedLeaves.size > 0) { clearSelection(); break; }
-      if (settings.editMode) setEditMode(false);
+      if (settings.editMode) { setEditMode(false); break; }
+      if (winState.spanningAllDisplays || projection.active) {
+        window.api.toggleSpanAll();
+        break;
+      }
       break;
     default: break;
   }
@@ -1331,7 +1349,15 @@ function applyWindowState(state) {
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
-  void wasSpanningAll;
+
+  if (wasSpanningAll && !state.spanningAllDisplays) {
+    spanLayoutInitialized = false;
+    flushSaveState();
+  } else if (state.spanningAllDisplays && !wasSpanningAll) {
+    const displays = winState.displays || [];
+    spanLayoutInitialized = displays.length >= 2 && countLeaves() >= displays.length;
+  }
+
   renderDisplayGuide();
   positionTileBadges();
 

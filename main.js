@@ -78,7 +78,11 @@ function createWindow() {
   // Keep the renderer informed about fullscreen state for UI affordances.
   const emitState = () => sendWindowState();
   mainWindow.on('enter-full-screen', emitState);
-  mainWindow.on('leave-full-screen', emitState);
+  mainWindow.on('leave-full-screen', () => {
+    // Escape / OS fullscreen exit while spanning should fully leave span mode.
+    if (spanningAllDisplays) restoreFromSpan();
+    else sendWindowState();
+  });
   mainWindow.on('maximize', emitState);
   mainWindow.on('unmaximize', emitState);
 }
