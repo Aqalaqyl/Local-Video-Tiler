@@ -146,6 +146,14 @@ body.span-all .hintbox {
 .node-leaf.selected { box-shadow: inset 0 0 0 2px var(--accent-2); }
 .node-leaf.selected.focused { box-shadow: inset 0 0 0 2px var(--accent-2), 0 0 0 1px var(--accent); }
 
+/* Invisible padding tiles used to fit displays of different sizes into the union canvas. */
+.node-leaf.pad-spacer {
+  pointer-events: none;
+  visibility: hidden;
+  border-color: transparent;
+  background: transparent;
+}
+
 /* While editing, make every tile boundary pop so the current layout — and how a
    click will divide it — is unmistakable. */
 body.editing .node-leaf { border-color: rgba(91,140,255,0.55); }
@@ -342,6 +350,21 @@ body.idle:not(.editing) #display-guide { opacity: 0; }
 .guide-cell.primary .guide-label { color: #fff; background: var(--accent); }
 
 /* ------------------------------------------------- Projection / display wall */
+/* Clip each projection window to its physical display slice and keep the union
+   overflow so tiles never bleed past the physical screen edge. */
+body.projection {
+  overflow: hidden;
+}
+body.projection #stage,
+body.projection #grid-overlay {
+  overflow: hidden;
+}
+body.projection #stage > .node-split,
+body.projection #stage > .node-leaf {
+  width: 100%;
+  height: 100%;
+}
+
 /* Per-display windows are full editors: keep the cursor, grid, split preview and
    delete badges so every screen can be edited. Only hide the duplicate top
    control bar (controls live on the primary display) and the windowed-only guide. */

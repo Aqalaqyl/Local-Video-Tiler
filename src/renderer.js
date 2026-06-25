@@ -114,6 +114,9 @@ function applyProjection() {
   if (on) {
     const offX = projOffX();
     const offY = projOffY();
+    const vw = projection.viewport.width;
+    const vh = projection.viewport.height;
+    const clip = `inset(${offY}px ${projection.union.width - offX - vw}px ${projection.union.height - offY - vh}px ${offX}px)`;
     for (const el of layers) {
       el.style.left = (-offX) + 'px';
       el.style.top = (-offY) + 'px';
@@ -121,6 +124,7 @@ function applyProjection() {
       el.style.bottom = 'auto';
       el.style.width = projection.union.width + 'px';
       el.style.height = projection.union.height + 'px';
+      el.style.clipPath = clip;
     }
   } else {
     for (const el of layers) {
@@ -130,6 +134,7 @@ function applyProjection() {
       el.style.bottom = '';
       el.style.width = '';
       el.style.height = '';
+      el.style.clipPath = '';
     }
   }
   reconcileProjectionPlayback();
@@ -149,7 +154,7 @@ function isLeafVisible(leaf) {
 function reconcileProjectionPlayback() {
   if (!projection.active) return;
   forEachLeaf(root, (leaf) => {
-    if (!leaf.video) return;
+    if (leaf.spacer || !leaf.video) return;
     const visible = isLeafVisible(leaf) && leaf.files.length > 0;
     if (visible) {
       const cur = leaf.files[leaf.index];
@@ -214,19 +219,25 @@ function applyIncomingLayout(payload) {
     const pool = [];
     forEachLeaf(root, (l) => pool.push(l));
     const used = new Set();
-    const takeLeaf = (folder) => {
+    const takeLeaf = (folder, spacer) => {
       const want = folder || null;
       for (const l of pool) {
-        if (!used.has(l) && (l.folder || null) === want) { used.add(l); return l; }
+        if (!used.has(l) && !!l.spacer === !!spacer && (l.folder || null) === want) {
+          used.add(l); return l;
+        }
       }
+      if (spacer) return makeSpacerLeaf();
       return null;
     };
     const build = (node) => {
       if (!node || node.kind === 'leaf') {
         const folder = node ? (node.folder || null) : null;
-        const leaf = takeLeaf(folder) || makeLeaf();
+        const spacer = node ? !!node.spacer : false;
+        const leaf = takeLeaf(folder, spacer) || makeLeaf();
         leaf.folder = folder;
         leaf.loop = node ? !!node.loop : false;
+        leaf.spacer = spacer;
+        if (leaf.el) leaf.el.classList.toggle('pad-spacer', spacer);
         return leaf;
       }
       return makeSplit(node.direction, build(node.children[0]), build(node.children[1]), node.ratio);
@@ -308,10 +319,17 @@ function makeLeaf() {
     index: 0,
     savedIndex: 0,
     loop: false,
+    spacer: false,
     el: null,
     refs: null,
     video: null
   };
+}
+
+function makeSpacerLeaf() {
+  const l = makeLeaf();
+  l.spacer = true;
+  return l;
 }
 
 function makeSplit(direction, a, b, ratio) {
@@ -405,7 +423,7 @@ function ensureLeafEl(leaf) {
   if (leaf.el) return leaf.el;
 
   const el = document.createElement('div');
-  el.className = 'node-leaf';
+  el.className = 'node-leaf' + (leaf.spacer ? ' pad-spacer' : '');
   el.dataset.id = leaf.id;
 
   const video = document.createElement('video');
@@ -551,6 +569,7 @@ function wireLeafEvents(leaf) {
   // empty-state placeholder itself — otherwise a freshly-created (folder-less)
   // tile, whose placeholder covers its whole body, could never be split.
   el.addEventListener('click', (e) => {
+    if (leaf.spacer) return;
     if (e.target.closest('.tile-toolbar')) return;
     if (isMultiSelectModifier(e)) {
       toggleSelection(leaf);
@@ -852,6 +871,7 @@ function leavesOnDisplay(display) {
   const out = [];
   const b = display.bounds;
   forEachLeaf(root, (leaf) => {
+    if (leaf.spacer) return;
     const r = getLeafUnionRect(leaf);
     if (!r) return;
     const cx = r.x + r.w / 2;
@@ -1041,7 +1061,8 @@ function onGlobalMouseMove(e) {
 function updatePreview(x, y, shift) {
   const leafEl = document.elementFromPoint(x, y);
   const tile = leafEl && leafEl.closest && leafEl.closest('.node-leaf');
-  if (!tile || (leafEl.closest && (leafEl.closest('.tile-toolbar') || leafEl.closest('.divider')))) {
+  if (!tile || tile.classList.contains('pad-spacer') ||
+    (leafEl.closest && (leafEl.closest('.tile-toolbar') || leafEl.closest('.divider')))) {
     hidePreview();
     return;
   }
@@ -1239,6 +1260,7 @@ function setCellSize(px) {
 function serializeTree(node, withIndex) {
   if (node.kind === 'leaf') {
     const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop };
+    if (node.spacer) o.spacer = true;
     if (withIndex) o.index = node.index;
     return o;
   }
@@ -1255,7 +1277,7 @@ function serializeForSync(node) { return serializeTree(node, false); }
 function deserialize(obj) {
   if (!obj) return makeLeaf();
   if (obj.kind === 'leaf') {
-    const l = makeLeaf();
+    const l = obj.spacer ? makeSpacerLeaf() : makeLeaf();
     l.folder = obj.folder || null;
     l.index = l.savedIndex = obj.index || 0;
     l.loop = !!obj.loop;
@@ -1420,8 +1442,66 @@ function renderDisplayGuide() {
 // guillotine partition of the display rectangles (handles rows, columns and
 // grids of monitors). Existing folder assignments are preserved in order.
 // ============================================================================
-function buildTreeFromRects(rects) {
-  if (rects.length === 1) return makeLeaf();
+function rectBBox(rects) {
+  const minX = Math.min(...rects.map((r) => r.x));
+  const minY = Math.min(...rects.map((r) => r.y));
+  const maxX = Math.max(...rects.map((r) => r.x + r.w));
+  const maxY = Math.max(...rects.map((r) => r.y + r.h));
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+/** Return the alloc rectangle given to the first (true) or second (false) child of a split. */
+function allocSlice(alloc, direction, ratio, first) {
+  if (direction === 'row') {
+    const w1 = alloc.w * ratio;
+    if (first) return { x: alloc.x, y: alloc.y, w: w1, h: alloc.h };
+    return { x: alloc.x + w1, y: alloc.y, w: alloc.w - w1, h: alloc.h };
+  }
+  const h1 = alloc.h * ratio;
+  if (first) return { x: alloc.x, y: alloc.y, w: alloc.w, h: h1 };
+  return { x: alloc.x, y: alloc.y + h1, w: alloc.w, h: alloc.h - h1 };
+}
+
+/**
+ * Pad a leaf so its content rectangle fits precisely inside the flex allocation.
+ * Needed when a monitor is offset inside the union (e.g. a 1080p screen vertically
+ * centred beside a taller 4K panel). Padding is built inside-out: bottom/right
+ * spacers hug the content, then top/left spacers wrap that stack — applying top
+ * then bottom sequentially would nest the top spacer inside the bottom split and
+ * stretch the content tile past the screen edge.
+ */
+function padToAlloc(node, content, alloc) {
+  const eps = 2;
+  let n = node;
+
+  const topPad = content.y - alloc.y;
+  const bottomPad = (alloc.y + alloc.h) - (content.y + content.h);
+  const leftPad = content.x - alloc.x;
+  const rightPad = (alloc.x + alloc.w) - (content.x + content.w);
+
+  if (bottomPad > eps) {
+    const restH = content.h + bottomPad;
+    n = makeSplit('col', n, makeSpacerLeaf(), content.h / restH);
+  }
+  if (topPad > eps) {
+    n = makeSplit('col', makeSpacerLeaf(), n, topPad / alloc.h);
+  }
+  if (rightPad > eps) {
+    const restW = content.w + rightPad;
+    n = makeSplit('row', n, makeSpacerLeaf(), content.w / restW);
+  }
+  if (leftPad > eps) {
+    n = makeSplit('row', makeSpacerLeaf(), n, leftPad / alloc.w);
+  }
+  return n;
+}
+
+function buildTreeFromRects(rects, alloc) {
+  if (rects.length === 0) return makeLeaf();
+  const content = rects.length === 1 ? rects[0] : rectBBox(rects);
+  if (!alloc) alloc = content;
+
+  if (rects.length === 1) return padToAlloc(makeLeaf(), content, alloc);
 
   const eps = 2;
   const minX = Math.min(...rects.map((r) => r.x));
@@ -1444,13 +1524,51 @@ function buildTreeFromRects(rects) {
   };
 
   const v = cut(minX, maxX, (r) => r.x + r.w, (r) => r.x);
-  if (v) return makeSplit('row', buildTreeFromRects(v.first), buildTreeFromRects(v.second), v.ratio);
+  if (v) {
+    const a0 = allocSlice(alloc, 'row', v.ratio, true);
+    const a1 = allocSlice(alloc, 'row', v.ratio, false);
+    return makeSplit('row', buildTreeFromRects(v.first, a0), buildTreeFromRects(v.second, a1), v.ratio);
+  }
   const h = cut(minY, maxY, (r) => r.y + r.h, (r) => r.y);
-  if (h) return makeSplit('col', buildTreeFromRects(h.first), buildTreeFromRects(h.second), h.ratio);
+  if (h) {
+    const a0 = allocSlice(alloc, 'col', h.ratio, true);
+    const a1 = allocSlice(alloc, 'col', h.ratio, false);
+    return makeSplit('col', buildTreeFromRects(h.first, a0), buildTreeFromRects(h.second, a1), h.ratio);
+  }
 
-  // Non-guillotine arrangement: fall back to an even split of the list.
+  // Non-guillotine arrangement: split the bounding box at its midpoint on the
+  // longer axis so tiles still align to physical screen regions.
+  const spanW = maxX - minX;
+  const spanH = maxY - minY;
+  if (spanW >= spanH) {
+    const midX = minX + spanW / 2;
+    const first = rects.filter((r) => r.x + r.w / 2 < midX);
+    const second = rects.filter((r) => r.x + r.w / 2 >= midX);
+    if (first.length && second.length) {
+      const ratio = clamp((midX - minX) / spanW, 0.05, 0.95);
+      return makeSplit('row',
+        buildTreeFromRects(first, allocSlice(alloc, 'row', ratio, true)),
+        buildTreeFromRects(second, allocSlice(alloc, 'row', ratio, false)),
+        ratio);
+    }
+  } else {
+    const midY = minY + spanH / 2;
+    const first = rects.filter((r) => r.y + r.h / 2 < midY);
+    const second = rects.filter((r) => r.y + r.h / 2 >= midY);
+    if (first.length && second.length) {
+      const ratio = clamp((midY - minY) / spanH, 0.05, 0.95);
+      return makeSplit('col',
+        buildTreeFromRects(first, allocSlice(alloc, 'col', ratio, true)),
+        buildTreeFromRects(second, allocSlice(alloc, 'col', ratio, false)),
+        ratio);
+    }
+  }
   const mid = Math.ceil(rects.length / 2);
-  return makeSplit('row', buildTreeFromRects(rects.slice(0, mid)), buildTreeFromRects(rects.slice(mid)), mid / rects.length);
+  const ratio = mid / rects.length;
+  return makeSplit('row',
+    buildTreeFromRects(rects.slice(0, mid), allocSlice(alloc, 'row', ratio, true)),
+    buildTreeFromRects(rects.slice(mid), allocSlice(alloc, 'row', ratio, false)),
+    ratio);
 }
 
 function collectLeaves(node, out = []) {
@@ -1462,6 +1580,7 @@ function collectLeaves(node, out = []) {
 function groupLeavesByDisplay(leaves) {
   const groups = new Map();
   for (const leaf of leaves) {
+    if (leaf.spacer) continue;
     const d = displayForLeaf(leaf);
     if (!d) continue;
     if (!groups.has(d.id)) groups.set(d.id, []);
@@ -1523,7 +1642,7 @@ async function restoreLeafMediaState(leaf, saved) {
 function isAlreadyTiledToDisplays() {
   const displays = winState.displays || [];
   if (displays.length < 2) return false;
-  const leaves = collectLeaves(root);
+  const leaves = collectLeaves(root).filter((l) => !l.spacer);
   if (leaves.length !== displays.length) return false;
   const seen = new Set();
   for (const leaf of leaves) {
@@ -1553,12 +1672,13 @@ async function tileToDisplays() {
   }
 
   forEachLeaf(root, disposeLeaf);
+  const union = unionBounds(displays);
   const rects = displays
     .slice()
     .sort((a, b) => a.bounds.y - b.bounds.y || a.bounds.x - b.bounds.x)
     .map((d) => ({ x: d.bounds.x, y: d.bounds.y, w: d.bounds.width, h: d.bounds.height }));
 
-  root = buildTreeFromRects(rects);
+  root = buildTreeFromRects(rects, { x: union.x, y: union.y, w: union.width, h: union.height });
   focusedLeaf = null;
   selectedLeaves.clear();
   spanLayoutInitialized = true;
@@ -1566,6 +1686,7 @@ async function tileToDisplays() {
 
   const restores = [];
   for (const leaf of collectLeaves(root)) {
+    if (leaf.spacer) continue;
     const d = displayForLeaf(leaf);
     const saved = d && savedByDisplay.get(d.id);
     if (saved) restores.push(restoreLeafMediaState(leaf, saved));
