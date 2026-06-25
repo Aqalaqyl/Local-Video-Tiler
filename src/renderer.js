@@ -28,6 +28,7 @@ const toast = document.getElementById('toast');
 const displayPill = document.getElementById('display-pill');
 
 const btnEdit = document.getElementById('btn-edit');
+const btnEditFloat = document.getElementById('btn-edit-float');
 const btnGrid = document.getElementById('btn-grid');
 const btnSnap = document.getElementById('btn-snap');
 const btnReset = document.getElementById('btn-reset');
@@ -35,6 +36,7 @@ const btnFs = document.getElementById('btn-fs');
 const btnFsAll = document.getElementById('btn-fs-all');
 const btnGuide = document.getElementById('btn-guide');
 const btnTileDisplays = document.getElementById('btn-tile-displays');
+const btnAssign = document.getElementById('btn-assign');
 const btnMin = document.getElementById('btn-min');
 const btnX = document.getElementById('btn-x');
 const gridSizeInput = document.getElementById('grid-size');
@@ -77,6 +79,8 @@ const IS_MIRROR = new URLSearchParams(location.search).get('role') === 'mirror';
 // Guards against echo loops when applying a layout pushed from another window.
 let applyingRemote = false;
 let lastSyncJSON = '';
+// True once Tile to Displays (or the edit-mode auto-tile) has run this span session.
+let spanLayoutInitialized = false;
 
 function readProjectionQuery() {
   const p = new URLSearchParams(location.search);
@@ -165,7 +169,8 @@ function applySettingsFromPayload(s) {
   if (s.cellSize != null && s.cellSize !== settings.cellSize) setCellSize(s.cellSize);
   if (!!s.gridOn !== settings.gridOn) setGrid(!!s.gridOn);
   if (!!s.snapOn !== settings.snapOn) setSnap(!!s.snapOn);
-  if (!!s.editMode !== settings.editMode) setEditMode(!!s.editMode);
+  // Never auto-tile while applying a synced layout — that would wipe custom splits.
+  if (!!s.editMode !== settings.editMode) setEditMode(!!s.editMode, { skipAutoTile: true });
 }
 
 // Push the current layout + settings to peer windows (deduped to avoid echoes).
@@ -217,6 +222,7 @@ function applyIncomingLayout(payload) {
     for (const l of pool) { if (!used.has(l)) disposeLeaf(l); }
     root = newRoot;
     focusedLeaf = null;
+    selectedLeaves.clear();
     render();
     // Start media only for brand-new tiles; reused tiles are already playing.
     forEachLeaf(root, (leaf) => {
@@ -236,7 +242,9 @@ function setProjection(config) {
     projection.viewport = null;
     projection.union = null;
     applyProjection();
+    render();
     renderDisplayGuide();
+    flushSaveState();
     return;
   }
   projection.active = true;
@@ -270,6 +278,8 @@ function uid() { return 'n' + (uidCounter++); }
 
 let root = makeLeaf();
 let focusedLeaf = null;
+/** @type {Set<object>} Tiles chosen for batch folder assignment (Ctrl/Cmd+click). */
+const selectedLeaves = new Set();
 
 // --------------------------------------------------------------- Node helpers
 function makeLeaf() {
@@ -323,7 +333,7 @@ function render() {
   forEachLeaf(root, (leaf) => { if (leaf.el && leaf.el.parentNode) leaf.el.parentNode.removeChild(leaf.el); });
   stage.textContent = '';
   stage.appendChild(renderNode(root));
-  applyFocus();
+  applySelection();
   if (projection.active) applyProjection();
   positionTileBadges();
   saveState();
@@ -522,11 +532,15 @@ function wireLeafEvents(leaf) {
   // tile, whose placeholder covers its whole body, could never be split.
   el.addEventListener('click', (e) => {
     if (e.target.closest('.tile-toolbar')) return;
+    if (isMultiSelectModifier(e)) {
+      toggleSelection(leaf);
+      return;
+    }
     if (settings.editMode) {
       const s = computeSplit(leaf, e.clientX, e.clientY, e.shiftKey);
       splitLeaf(leaf, s.orientation, s.ratio);
     } else {
-      setFocus(leaf);
+      setSelectionSingle(leaf);
     }
   });
 }
@@ -534,12 +548,49 @@ function wireLeafEvents(leaf) {
 // ============================================================================
 // Media
 // ============================================================================
+function isMultiSelectModifier(e) {
+  return !!(e && (e.ctrlKey || e.metaKey));
+}
+
+function pruneSelection() {
+  const live = new Set();
+  forEachLeaf(root, (l) => live.add(l));
+  for (const l of selectedLeaves) {
+    if (!live.has(l)) selectedLeaves.delete(l);
+  }
+}
+
+function getAssignmentTargets(leaf) {
+  pruneSelection();
+  if (selectedLeaves.size > 0) return [...selectedLeaves];
+  return leaf ? [leaf] : [];
+}
+
 async function assignFolder(leaf) {
+  const targets = getAssignmentTargets(leaf);
+  if (!targets.length) return;
   const folder = await window.api.pickFolder();
   if (!folder) return;
-  await loadFolder(leaf, folder, 0, false);
-  // Start playback on a random clip from the folder.
-  advanceRandom(leaf);
+  for (const t of targets) {
+    await loadFolder(t, folder, 0, false);
+    advanceRandom(t);
+  }
+  if (targets.length > 1) flash(`Assigned folder to ${targets.length} tiles`);
+}
+
+async function assignFolderToSelection() {
+  const targets = getAssignmentTargets(null);
+  if (!targets.length) {
+    flash('Ctrl+click tiles to select them, then assign a folder');
+    return;
+  }
+  const folder = await window.api.pickFolder();
+  if (!folder) return;
+  for (const t of targets) {
+    await loadFolder(t, folder, 0, false);
+    advanceRandom(t);
+  }
+  flash(`Assigned folder to ${targets.length} tile${targets.length === 1 ? '' : 's'}`);
 }
 
 async function loadFolder(leaf, folder, index = 0, autoplay = false) {
@@ -685,7 +736,8 @@ function closeLeaf(leaf) {
       grand.children[i] = sibling;
     }
   }
-  if (focusedLeaf === leaf) focusedLeaf = null;
+  if (focusedLeaf === leaf) focusedLeaf = selectedLeaves.size ? [...selectedLeaves].pop() : null;
+  selectedLeaves.delete(leaf);
   render();
 }
 
@@ -837,29 +889,89 @@ function leafById(id) {
 }
 
 // ============================================================================
-// Focus
+// Focus / multi-select
 // ============================================================================
-function setFocus(leaf) {
+function setSelectionSingle(leaf) {
+  selectedLeaves.clear();
+  selectedLeaves.add(leaf);
   focusedLeaf = leaf;
-  applyFocus();
+  applySelection();
 }
-function applyFocus() {
+
+function toggleSelection(leaf) {
+  if (selectedLeaves.has(leaf)) selectedLeaves.delete(leaf);
+  else selectedLeaves.add(leaf);
+  focusedLeaf = leaf;
+  applySelection();
+}
+
+function clearSelection() {
+  selectedLeaves.clear();
+  applySelection();
+}
+
+function setFocus(leaf) {
+  setSelectionSingle(leaf);
+}
+
+function updateAssignButton() {
+  if (!btnAssign) return;
+  const n = selectedLeaves.size;
+  btnAssign.disabled = n === 0;
+  btnAssign.classList.toggle('active', n > 0);
+  btnAssign.title = n > 0
+    ? `Assign the same folder to ${n} selected tile(s)`
+    : 'Ctrl+click tiles to select, then assign a shared folder';
+  btnAssign.textContent = n > 0 ? `📁 Folder (${n})` : '📁 Folder';
+}
+
+function applySelection() {
+  pruneSelection();
   forEachLeaf(root, (l) => {
-    if (l.el) l.el.classList.toggle('focused', l === focusedLeaf);
+    if (!l.el) return;
+    const sel = selectedLeaves.has(l);
+    l.el.classList.toggle('selected', sel);
+    l.el.classList.toggle('focused', l === focusedLeaf);
   });
+  updateAssignButton();
+}
+
+function applyFocus() {
+  applySelection();
 }
 
 // ============================================================================
 // Settings toggles
 // ============================================================================
-function setEditMode(on) {
+function countLeaves() {
+  let n = 0;
+  forEachLeaf(root, () => { n++; });
+  return n;
+}
+
+/** While spanning, one tile covering the whole canvas can't be edited per-monitor until laid out. */
+function shouldAutoTileForEdit() {
+  if (spanLayoutInitialized) return false;
+  const displays = winState.displays || [];
+  if (displays.length < 2) return false;
+  if (!winState.spanningAllDisplays && !projection.active) return false;
+  return countLeaves() < displays.length;
+}
+
+function setEditMode(on, opts = {}) {
+  if (on && !opts.skipAutoTile && shouldAutoTileForEdit()) {
+    tileToDisplays();
+    spanLayoutInitialized = true;
+  }
   settings.editMode = on;
   document.body.classList.toggle('editing', on);
-  btnEdit.classList.toggle('active', on);
+  if (btnEdit) btnEdit.classList.toggle('active', on);
+  if (btnEditFloat) btnEditFloat.classList.toggle('active', on);
   if (!on) hidePreview();
   forEachLeaf(root, updateLeaf);
   positionTileBadges();
   if (on) {
+    wake();
     editHint.classList.add('show');
     clearTimeout(setEditMode._t);
     setEditMode._t = setTimeout(() => editHint.classList.remove('show'), 4000);
@@ -926,14 +1038,18 @@ function deserialize(obj) {
 }
 
 let saveTimer = null;
+function flushSaveState() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  if (!IS_MIRROR) {
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) })); } catch (_) {}
+  }
+}
+
 function saveState() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    // Only the controller (main window) persists, so mirror windows can't clobber
-    // the saved layout. Every window broadcasts its edits to the other displays.
-    if (!IS_MIRROR) {
-      try { localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) })); } catch (_) {}
-    }
+    flushSaveState();
     broadcastLayout();
   }, 200);
 }
@@ -951,7 +1067,7 @@ function loadState() {
   setCellSize(settings.cellSize || 80);
   setGrid(!!settings.gridOn);
   setSnap(!!settings.snapOn);
-  setEditMode(!!settings.editMode);
+  setEditMode(!!settings.editMode, { skipAutoTile: true });
   setGuide(!!settings.guideOn);
 
   render();
@@ -1134,6 +1250,8 @@ function tileToDisplays() {
 
   root = buildTreeFromRects(rects);
   focusedLeaf = null;
+  selectedLeaves.clear();
+  spanLayoutInitialized = true;
   render();
 
   const newLeaves = collectLeaves(root);
@@ -1185,7 +1303,12 @@ document.addEventListener('keydown', (e) => {
       if (focusedLeaf) { e.preventDefault(); togglePlay(focusedLeaf); }
       break;
     case 'escape':
-      if (settings.editMode) setEditMode(false);
+      if (selectedLeaves.size > 0) { clearSelection(); break; }
+      if (settings.editMode) { setEditMode(false); break; }
+      if (winState.spanningAllDisplays || projection.active) {
+        window.api.toggleSpanAll();
+        break;
+      }
       break;
     default: break;
   }
@@ -1195,18 +1318,21 @@ document.addEventListener('keyup', (e) => {
 });
 
 btnEdit.addEventListener('click', () => setEditMode(!settings.editMode));
+if (btnEditFloat) btnEditFloat.addEventListener('click', () => setEditMode(!settings.editMode));
 btnGrid.addEventListener('click', () => setGrid(!settings.gridOn));
 btnSnap.addEventListener('click', () => setSnap(!settings.snapOn));
 btnReset.addEventListener('click', () => {
   forEachLeaf(root, disposeLeaf);
   root = makeLeaf();
   focusedLeaf = null;
+  selectedLeaves.clear();
   render();
 });
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
 btnTileDisplays.addEventListener('click', () => tileToDisplays());
+if (btnAssign) btnAssign.addEventListener('click', () => assignFolderToSelection());
 btnMin.addEventListener('click', () => window.api.minimize());
 btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
@@ -1223,7 +1349,15 @@ function applyWindowState(state) {
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
-  void wasSpanningAll;
+
+  if (wasSpanningAll && !state.spanningAllDisplays) {
+    spanLayoutInitialized = false;
+    flushSaveState();
+  } else if (state.spanningAllDisplays && !wasSpanningAll) {
+    const displays = winState.displays || [];
+    spanLayoutInitialized = displays.length >= 2 && countLeaves() >= displays.length;
+  }
+
   renderDisplayGuide();
   positionTileBadges();
 
