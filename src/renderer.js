@@ -141,25 +141,38 @@ function isLeafVisible(leaf) {
   return r.right > 1 && r.bottom > 1 && r.left < window.innerWidth - 1 && r.top < window.innerHeight - 1;
 }
 
-/** On mirror windows, only decode/play videos whose tile falls on this display. */
+/**
+ * While projecting across displays, each window only decodes/plays tiles that
+ * fall on its own slice. Mirrors are always muted; the controller keeps audio
+ * only for tiles visible on the primary display.
+ */
 function reconcileProjectionPlayback() {
-  if (!(projection.active && projection.role === 'mirror')) return;
+  if (!projection.active) return;
   forEachLeaf(root, (leaf) => {
     if (!leaf.video) return;
     const visible = isLeafVisible(leaf) && leaf.files.length > 0;
     if (visible) {
       const cur = leaf.files[leaf.index];
-      if (cur && leaf.video.getAttribute('src') !== cur.url) { leaf.video.src = cur.url; leaf.video.load(); }
-      leaf.video.muted = true;
-      leaf.video.loop = !!leaf.loop;
-      leaf.video.play().catch(() => {});
+      const src = leaf.video.getAttribute('src');
+      if (cur && src !== cur.url) loadCurrent(leaf, true);
+      else {
+        leaf.video.muted = projection.role === 'mirror';
+        leaf.video.loop = !!leaf.loop;
+        leaf.video.play().catch(() => {});
+      }
     } else {
-      try {
-        leaf.video.pause();
-        if (leaf.video.getAttribute('src')) { leaf.video.removeAttribute('src'); leaf.video.load(); }
-      } catch (_) { /* ignore */ }
+      stopVideoElement(leaf.video);
     }
   });
+}
+
+function stopVideoElement(video) {
+  if (!video) return;
+  try {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  } catch (_) { /* ignore */ }
 }
 
 function snapshotSettings() {
@@ -226,9 +239,11 @@ function applyIncomingLayout(payload) {
     focusedLeaf = null;
     selectedLeaves.clear();
     render();
-    // Start media only for brand-new tiles; reused tiles are already playing.
+    // Start media only for brand-new tiles; shuffle to a random first clip.
     forEachLeaf(root, (leaf) => {
-      if (leaf.folder && leaf.files.length === 0) loadFolder(leaf, leaf.folder, 0, true);
+      if (leaf.folder && leaf.files.length === 0) {
+        loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf, true));
+      }
     });
     applyProjection();
   } finally {
@@ -525,7 +540,10 @@ function wireLeafEvents(leaf) {
     }
   });
   // When a clip ends (and the tile isn't looping), shuffle to a random clip.
-  video.addEventListener('ended', () => advanceRandom(leaf));
+  video.addEventListener('ended', () => {
+    if (leaf.video.loop) return;
+    advanceRandom(leaf);
+  });
 
   // Click on the tile body: split (edit mode) or focus (view mode).
   // Note: the toolbar buttons and the "Choose media folder…" / 📁 buttons all
@@ -575,7 +593,7 @@ async function assignFolder(leaf) {
   if (!folder) return;
   for (const t of targets) {
     await loadFolder(t, folder, 0, false);
-    advanceRandom(t);
+    advanceRandom(t, true);
   }
   if (targets.length > 1) flash(`Assigned folder to ${targets.length} tiles`);
 }
@@ -590,7 +608,7 @@ async function assignFolderToSelection() {
   if (!folder) return;
   for (const t of targets) {
     await loadFolder(t, folder, 0, false);
-    advanceRandom(t);
+    advanceRandom(t, true);
   }
   flash(`Assigned folder to ${targets.length} tile${targets.length === 1 ? '' : 's'}`);
 }
@@ -600,27 +618,42 @@ async function loadFolder(leaf, folder, index = 0, autoplay = false) {
   leaf.folder = res.folder;
   leaf.files = res.files || [];
   leaf.index = clamp(index, 0, Math.max(0, leaf.files.length - 1));
-  loadCurrent(leaf, autoplay);
+  if (leaf.files.length > 0) loadCurrent(leaf, autoplay);
+  else stopVideoElement(leaf.video);
   updateLeaf(leaf);
   saveState();
 }
 
 function loadCurrent(leaf, autoplay) {
   const { video } = leaf;
+  if (!video) return;
+  leaf._loadGen = (leaf._loadGen || 0) + 1;
+  const gen = leaf._loadGen;
   const current = leaf.files[leaf.index];
-  if (!current) { video.removeAttribute('src'); video.load(); return; }
-  // On a mirror window, skip videos whose tile is outside this display's slice
-  // so each screen only decodes what it actually shows.
-  if (projection.role === 'mirror' && !isLeafVisible(leaf)) {
-    video.removeAttribute('src');
-    video.load();
+  const visible = !projection.active || isLeafVisible(leaf);
+
+  stopVideoElement(video);
+
+  if (!current || !visible) {
+    updateLeaf(leaf);
     return;
   }
+
+  const wantPlay = !!autoplay;
   video.src = current.url;
   video.load();
   video.loop = !!leaf.loop;
   if (projection.role === 'mirror') video.muted = true;
-  if (autoplay || (projection.role === 'mirror' && isLeafVisible(leaf))) video.play().catch(() => {});
+
+  const tryPlay = () => {
+    if (leaf._loadGen !== gen) return;
+    if (wantPlay) video.play().catch(() => {});
+  };
+
+  if (wantPlay) {
+    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) tryPlay();
+    else video.addEventListener('canplay', tryPlay, { once: true });
+  }
   updateLeaf(leaf);
 }
 
@@ -637,7 +670,7 @@ function step(leaf, dir, autoplay = false) {
   saveState();
 }
 
-/** Pick a random file index, avoiding an immediate repeat when possible. */
+/** Pick a random file index, avoiding an immediate repeat when advancing. */
 function pickRandomIndex(leaf) {
   const n = leaf.files.length;
   if (n <= 1) return 0;
@@ -647,11 +680,18 @@ function pickRandomIndex(leaf) {
 }
 
 /** Auto-advance to a random clip from the folder (the default shuffle playback). */
-function advanceRandom(leaf) {
-  if (!leaf.files.length) return;
-  leaf.index = pickRandomIndex(leaf);
-  loadCurrent(leaf, true);
-  saveState();
+function advanceRandom(leaf, initial = false) {
+  if (!leaf.files.length || leaf._advancing) return;
+  leaf._advancing = true;
+  try {
+    leaf.index = initial
+      ? Math.floor(Math.random() * leaf.files.length)
+      : pickRandomIndex(leaf);
+    loadCurrent(leaf, true);
+    saveState();
+  } finally {
+    leaf._advancing = false;
+  }
 }
 
 /** Per-tile loop toggle: repeat the current clip to keep it on screen. */
@@ -744,9 +784,7 @@ function closeLeaf(leaf) {
 }
 
 function disposeLeaf(leaf) {
-  if (leaf.video) {
-    try { leaf.video.pause(); leaf.video.removeAttribute('src'); leaf.video.load(); } catch (_) {}
-  }
+  stopVideoElement(leaf.video);
 }
 
 /**
@@ -1261,10 +1299,9 @@ function loadState() {
 
   render();
 
-  // Repopulate media for any leaf that had a folder assigned, and start playing
-  // it right away so the wall comes alive as soon as the program opens.
+  // Repopulate folders, then shuffle to a random clip on launch (not saved index).
   forEachLeaf(root, (leaf) => {
-    if (leaf.folder) loadFolder(leaf, leaf.folder, leaf.savedIndex || 0, true);
+    if (leaf.folder) loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf, true));
   });
 }
 
