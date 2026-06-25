@@ -1422,15 +1422,98 @@ function collectLeaves(node, out = []) {
   return out;
 }
 
-function tileToDisplays() {
+function groupLeavesByDisplay(leaves) {
+  const groups = new Map();
+  for (const leaf of leaves) {
+    const d = displayForLeaf(leaf);
+    if (!d) continue;
+    if (!groups.has(d.id)) groups.set(d.id, []);
+    groups.get(d.id).push(leaf);
+  }
+  return groups;
+}
+
+function pickRepresentativeLeaf(leaves) {
+  if (focusedLeaf && leaves.includes(focusedLeaf)) return focusedLeaf;
+  const withFolder = leaves.find((l) => l.folder);
+  if (withFolder) return withFolder;
+  let best = leaves[0];
+  let bestArea = 0;
+  for (const leaf of leaves) {
+    const r = getLeafUnionRect(leaf);
+    if (!r) continue;
+    const area = r.w * r.h;
+    if (area > bestArea) { bestArea = area; best = leaf; }
+  }
+  return best;
+}
+
+function captureMediaState(leaf) {
+  const playing = !!(leaf.video && leaf.files.length && !leaf.video.paused && !leaf.video.ended);
+  return {
+    folder: leaf.folder,
+    index: leaf.index,
+    loop: !!leaf.loop,
+    currentTime: (leaf.video && isFinite(leaf.video.currentTime)) ? leaf.video.currentTime : 0,
+    playing
+  };
+}
+
+async function restoreLeafMediaState(leaf, saved) {
+  if (!saved) return;
+  leaf.loop = saved.loop;
+  if (!saved.folder) {
+    updateLeaf(leaf);
+    return;
+  }
+  await loadFolder(leaf, saved.folder, saved.index || 0, false);
+  leaf.savedIndex = leaf.index;
+  applyLoop(leaf);
+  if (!leaf.video) return;
+  const seek = () => {
+    try {
+      if (saved.currentTime > 0) leaf.video.currentTime = saved.currentTime;
+    } catch (_) { /* ignore */ }
+    if (saved.playing) leaf.video.play().catch(() => {});
+    else leaf.video.pause();
+  };
+  if (leaf.video.readyState >= 1) seek();
+  else leaf.video.addEventListener('loadedmetadata', seek, { once: true });
+  updateLeaf(leaf);
+}
+
+/** True when there is already exactly one tile per connected display. */
+function isAlreadyTiledToDisplays() {
+  const displays = winState.displays || [];
+  if (displays.length < 2) return false;
+  const leaves = collectLeaves(root);
+  if (leaves.length !== displays.length) return false;
+  const seen = new Set();
+  for (const leaf of leaves) {
+    const d = displayForLeaf(leaf);
+    if (!d || seen.has(d.id)) return false;
+    seen.add(d.id);
+  }
+  return seen.size === displays.length;
+}
+
+async function tileToDisplays() {
   const displays = winState.displays || [];
   if (displays.length < 2) {
     flash('Tile to Displays needs 2+ connected displays');
     return;
   }
-  // Preserve current folder assignments in reading order.
+  if (isAlreadyTiledToDisplays()) {
+    flash('Layout already matches your displays');
+    spanLayoutInitialized = true;
+    return;
+  }
+
   const oldLeaves = collectLeaves(root);
-  const saved = oldLeaves.map((l) => ({ folder: l.folder, index: l.index }));
+  const savedByDisplay = new Map();
+  for (const [id, leaves] of groupLeavesByDisplay(oldLeaves)) {
+    savedByDisplay.set(id, captureMediaState(pickRepresentativeLeaf(leaves)));
+  }
 
   forEachLeaf(root, disposeLeaf);
   const rects = displays
@@ -1444,11 +1527,14 @@ function tileToDisplays() {
   spanLayoutInitialized = true;
   render();
 
-  const newLeaves = collectLeaves(root);
-  newLeaves.forEach((leaf, i) => {
-    const s = saved[i];
-    if (s && s.folder) loadFolder(leaf, s.folder, s.index || 0, false);
-  });
+  const restores = [];
+  for (const leaf of collectLeaves(root)) {
+    const d = displayForLeaf(leaf);
+    const saved = d && savedByDisplay.get(d.id);
+    if (saved) restores.push(restoreLeafMediaState(leaf, saved));
+  }
+  await Promise.all(restores);
+  saveState();
 
   flash(`Tiled layout to match ${displays.length} displays`);
   if (!settings.guideOn) setGuide(true);
