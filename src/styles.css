@@ -143,6 +143,16 @@ body.span-all .hintbox {
   border: 1px solid rgba(255,255,255,0.14);
 }
 .node-leaf.focused { box-shadow: inset 0 0 0 2px var(--accent); }
+.node-leaf.selected { box-shadow: inset 0 0 0 2px var(--accent-2); }
+.node-leaf.selected.focused { box-shadow: inset 0 0 0 2px var(--accent-2), 0 0 0 1px var(--accent); }
+
+/* Invisible padding tiles used to fit displays of different sizes into the union canvas. */
+.node-leaf.pad-spacer {
+  pointer-events: none;
+  visibility: hidden;
+  border-color: transparent;
+  background: transparent;
+}
 
 /* While editing, make every tile boundary pop so the current layout — and how a
    click will divide it — is unmistakable. */
@@ -340,12 +350,40 @@ body.idle:not(.editing) #display-guide { opacity: 0; }
 .guide-cell.primary .guide-label { color: #fff; background: var(--accent); }
 
 /* ------------------------------------------------- Projection / display wall */
+/* Clip each projection window to its physical display slice and keep the union
+   overflow so tiles never bleed past the physical screen edge. */
+body.projection {
+  overflow: hidden;
+}
+body.projection #stage,
+body.projection #grid-overlay {
+  overflow: hidden;
+}
+body.projection #stage > .node-split,
+body.projection #stage > .node-leaf {
+  width: 100%;
+  height: 100%;
+}
+
 /* Per-display windows are full editors: keep the cursor, grid, split preview and
    delete badges so every screen can be edited. Only hide the duplicate top
    control bar (controls live on the primary display) and the windowed-only guide. */
 body.mirror { background: #000; }
 body.mirror #topbar,
 body.mirror #display-guide { display: none !important; }
+
+/* Floating edit control on non-primary displays (no top bar there). */
+.edit-float {
+  display: none;
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 65;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.55);
+}
+body.mirror .edit-float { display: inline-block; }
+body.mirror .edit-float.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+body.mirror .reset-display-float { top: 52px; }
 
 /* --------------------------------------------------------- Split preview */
 #split-preview {

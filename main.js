@@ -78,7 +78,11 @@ function createWindow() {
   // Keep the renderer informed about fullscreen state for UI affordances.
   const emitState = () => sendWindowState();
   mainWindow.on('enter-full-screen', emitState);
-  mainWindow.on('leave-full-screen', emitState);
+  mainWindow.on('leave-full-screen', () => {
+    // Escape / OS fullscreen exit while spanning should fully leave span mode.
+    if (spanningAllDisplays) restoreFromSpan();
+    else sendWindowState();
+  });
   mainWindow.on('maximize', emitState);
   mainWindow.on('unmaximize', emitState);
 }
@@ -167,6 +171,7 @@ function createProjectionWindow(display, union) {
     win.setAlwaysOnTop(true, 'screen-saver');
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     setWindowFullscreen(win, true);
+    setTimeout(() => syncProjectionViewport(win, 'mirror', union, null, b), 80);
   });
   win.on('closed', () => {
     projectionWindows = projectionWindows.filter((w) => w !== win);
@@ -209,6 +214,7 @@ function spanAllDisplays() {
     union,
     displayCount: displays.length
   });
+  setTimeout(() => syncProjectionViewport(mainWindow, 'controller', union, displays.length, primary.bounds), 80);
 
   // Every other display gets its own fullscreen mirror window.
   closeProjectionWindows();
@@ -239,6 +245,23 @@ function restoreFromSpan() {
 
 function sendProjection(win, config) {
   if (win && !win.isDestroyed()) win.webContents.send('projection:set', config);
+}
+
+/** Re-send viewport using display.bounds (not win.getBounds, which is 0,0 on secondary fullscreen). */
+function syncProjectionViewport(win, role, union, displayCount, displayBounds) {
+  if (!win || win.isDestroyed() || !displayBounds) return;
+  sendProjection(win, {
+    active: true,
+    role,
+    viewport: {
+      x: displayBounds.x,
+      y: displayBounds.y,
+      width: displayBounds.width,
+      height: displayBounds.height
+    },
+    union,
+    displayCount
+  });
 }
 
 function toggleSpanAllDisplays() {

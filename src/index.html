@@ -23,7 +23,9 @@
         <span id="grid-size-val">80</span>
       </label>
       <span class="sep"></span>
-      <button id="btn-reset" class="tool" title="Reset layout to a single tile">Reset</button>
+      <button id="btn-assign" class="tool" type="button" disabled title="Ctrl+click tiles to select, then assign a shared folder">📁 Folder</button>
+      <button id="btn-reset-display" class="tool" type="button" disabled title="Reset the focused tile's display to one empty tile (R)">Reset Display</button>
+      <button id="btn-reset" class="tool" title="Reset entire layout to a single tile">Reset All</button>
       <button id="btn-fs" class="tool" title="Fullscreen on current display (F)">Fullscreen</button>
       <button id="btn-fs-all" class="tool" title="Span / fullscreen across ALL displays (A)">All Displays</button>
       <button id="btn-guide" class="tool" title="Toggle the screen-split guide showing each display (D)">Guide</button>
@@ -59,11 +61,15 @@
   <!-- Transient hint shown when entering edit mode -->
   <div id="edit-hint" class="hintbox" aria-hidden="true">
     <strong>Edit mode</strong>
-    <span>Click a tile to split it vertically · Hold <kbd>Shift</kbd> to split horizontally · Drag dividers to resize · <kbd>🗑</kbd> or <kbd>Del</kbd> removes a tile</span>
+    <span>Click a tile to split it vertically · Hold <kbd>Shift</kbd> to split horizontally · <kbd>Ctrl</kbd>+click to select tiles · Drag dividers to resize · <kbd>🗑</kbd> or <kbd>Del</kbd> removes a tile · While spanning all displays, Edit auto-lays out one tile per monitor</span>
   </div>
 
   <!-- Transient toast (e.g. when spanning all displays) -->
   <div id="toast" class="hintbox" aria-hidden="true"></div>
+
+  <!-- Edit toggle on mirror displays (the top bar lives on the primary screen only). -->
+  <button id="btn-edit-float" class="tool edit-float" type="button" title="Toggle edit mode (E)">Edit</button>
+  <button id="btn-reset-display-float" class="tool edit-float reset-display-float" type="button" title="Reset this display to one empty tile (R)">Reset Display</button>
 
   <script src="renderer.js"></script>
 </body>
