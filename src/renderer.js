@@ -32,6 +32,8 @@ const btnEditFloat = document.getElementById('btn-edit-float');
 const btnGrid = document.getElementById('btn-grid');
 const btnSnap = document.getElementById('btn-snap');
 const btnReset = document.getElementById('btn-reset');
+const btnResetDisplay = document.getElementById('btn-reset-display');
+const btnResetDisplayFloat = document.getElementById('btn-reset-display-float');
 const btnFs = document.getElementById('btn-fs');
 const btnFsAll = document.getElementById('btn-fs-all');
 const btnGuide = document.getElementById('btn-guide');
@@ -766,6 +768,193 @@ function deleteActiveTile() {
 }
 
 // ============================================================================
+// Per-display reset — collapse one monitor's tiles to a single empty tile
+// ============================================================================
+function unionBoundsFromWinDisplays() {
+  const displays = winState.displays || [];
+  if (!displays.length) return null;
+  return unionBounds(displays);
+}
+
+/** Map a tile's on-screen rect into the shared multi-monitor canvas coordinates. */
+function getLeafUnionRect(leaf) {
+  if (!leaf.el) return null;
+  const r = leaf.el.getBoundingClientRect();
+  if (projection.active && projection.union) {
+    return { x: r.left + projOffX(), y: r.top + projOffY(), w: r.width, h: r.height };
+  }
+  const stageR = stage.getBoundingClientRect();
+  const u = unionBoundsFromWinDisplays();
+  if (!u || stageR.width < 1 || stageR.height < 1) {
+    return { x: r.left - stageR.left, y: r.top - stageR.top, w: r.width, h: r.height };
+  }
+  const relX = (r.left - stageR.left) / stageR.width;
+  const relY = (r.top - stageR.top) / stageR.height;
+  return {
+    x: u.x + relX * u.width,
+    y: u.y + relY * u.height,
+    w: (r.width / stageR.width) * u.width,
+    h: (r.height / stageR.height) * u.height
+  };
+}
+
+function displayForLeaf(leaf) {
+  const r = getLeafUnionRect(leaf);
+  if (!r) return null;
+  const cx = r.x + r.w / 2;
+  const cy = r.y + r.h / 2;
+  for (const d of winState.displays || []) {
+    const b = d.bounds;
+    if (cx >= b.x && cx < b.x + b.width && cy >= b.y && cy < b.y + b.height) return d;
+  }
+  return null;
+}
+
+function leavesOnDisplay(display) {
+  const out = [];
+  const b = display.bounds;
+  forEachLeaf(root, (leaf) => {
+    const r = getLeafUnionRect(leaf);
+    if (!r) return;
+    const cx = r.x + r.w / 2;
+    const cy = r.y + r.h / 2;
+    if (cx >= b.x && cx < b.x + b.width && cy >= b.y && cy < b.y + b.height) out.push(leaf);
+  });
+  return out;
+}
+
+function pathFromRoot(target) {
+  const path = [];
+  function walk(node, acc) {
+    if (node === target) { path.push(...acc, node); return true; }
+    if (node.kind === 'split') {
+      for (const c of node.children) {
+        if (walk(c, [...acc, node])) return true;
+      }
+    }
+    return false;
+  }
+  walk(root, []);
+  return path;
+}
+
+function lcaOfNodes(nodes) {
+  if (!nodes.length) return null;
+  if (nodes.length === 1) return nodes[0];
+  const paths = nodes.map((n) => pathFromRoot(n)).filter((p) => p.length);
+  if (!paths.length) return null;
+  let lca = paths[0][0];
+  for (let i = 0; paths.every((p) => i < p.length && p[i] === paths[0][i]); i++) lca = paths[0][i];
+  return lca;
+}
+
+function resetLeafInPlace(leaf) {
+  disposeLeaf(leaf);
+  leaf.folder = null;
+  leaf.files = [];
+  leaf.index = 0;
+  leaf.savedIndex = 0;
+  leaf.loop = false;
+}
+
+function replaceNodeInTree(node, replacement) {
+  if (node === root) {
+    root = replacement;
+    return;
+  }
+  const parent = findParent(root, node);
+  if (parent && parent.kind === 'split') {
+    const i = parent.children.indexOf(node);
+    parent.children[i] = replacement;
+  }
+}
+
+function resetDisplay(display) {
+  let onDisplay = leavesOnDisplay(display);
+  if (!onDisplay.length) return;
+
+  let node = onDisplay.length === 1 ? onDisplay[0] : lcaOfNodes(onDisplay);
+  if (!node) return;
+
+  // Walk up while the subtree also contains tiles from other monitors.
+  while (node && node !== root) {
+    const sub = [];
+    forEachLeaf(node, (l) => sub.push(l));
+    const foreign = sub.some((l) => !onDisplay.includes(l));
+    if (!foreign) break;
+    const parent = findParent(root, node);
+    if (!parent) break;
+    node = parent;
+    onDisplay = leavesOnDisplay(display);
+  }
+
+  for (const l of onDisplay) selectedLeaves.delete(l);
+
+  if (node.kind === 'leaf') {
+    resetLeafInPlace(node);
+    if (focusedLeaf && onDisplay.includes(focusedLeaf)) focusedLeaf = node;
+    render();
+    flash(`Display ${display.index} reset`);
+    return;
+  }
+
+  const newLeaf = makeLeaf();
+  forEachLeaf(node, disposeLeaf);
+  replaceNodeInTree(node, newLeaf);
+  if (!focusedLeaf || onDisplay.includes(focusedLeaf)) focusedLeaf = newLeaf;
+  render();
+  flash(`Display ${display.index} reset`);
+}
+
+function leafForResetTarget() {
+  if (focusedLeaf) return focusedLeaf;
+  if (settings.editMode) {
+    const el = document.elementFromPoint(lastMouse.x, lastMouse.y);
+    const tile = el && el.closest && el.closest('.node-leaf');
+    if (tile) return leafById(tile.dataset.id);
+  }
+  return null;
+}
+
+function displayForThisWindow() {
+  const displays = winState.displays || [];
+  if (!(projection.active && projection.viewport)) return null;
+  const v = projection.viewport;
+  for (const d of displays) {
+    const b = d.bounds;
+    if (b.x === v.x && b.y === v.y && b.width === v.width && b.height === v.height) return d;
+  }
+  return null;
+}
+
+function resetActiveDisplay() {
+  const displays = winState.displays || [];
+  if (displays.length < 2) {
+    flash('Reset Display needs 2+ connected monitors');
+    return;
+  }
+  const leaf = leafForResetTarget();
+  let display = leaf ? displayForLeaf(leaf) : null;
+  if (!display) display = displayForThisWindow();
+  if (!display) {
+    flash('Click or focus a tile on the display you want to reset');
+    return;
+  }
+  resetDisplay(display);
+}
+
+function updateResetDisplayButton() {
+  const on = (winState.displays || []).length >= 2;
+  if (btnResetDisplay) {
+    btnResetDisplay.disabled = !on;
+    btnResetDisplay.title = on
+      ? 'Reset the focused tile\'s display to one empty tile (R)'
+      : 'Reset Display needs 2+ connected monitors';
+  }
+  if (btnResetDisplayFloat) btnResetDisplayFloat.style.display = on ? '' : 'none';
+}
+
+// ============================================================================
 // Divider resizing
 // ============================================================================
 function startDividerDrag(e, node, container) {
@@ -1102,6 +1291,7 @@ async function refreshDisplays() {
       .map((d) => `${d.isPrimary ? '★ ' : ''}${d.bounds.width}×${d.bounds.height}`)
       .join('  ·  ');
     btnTileDisplays.disabled = info.count < 2;
+    updateResetDisplayButton();
   } catch (_) {}
 }
 
@@ -1294,6 +1484,7 @@ document.addEventListener('keydown', (e) => {
     case 'a': window.api.toggleSpanAll(); break;
     case 'd': setGuide(!settings.guideOn); break;
     case 't': tileToDisplays(); break;
+    case 'r': resetActiveDisplay(); break;
     case 'delete':
     case 'backspace':
       e.preventDefault();
@@ -1328,6 +1519,8 @@ btnReset.addEventListener('click', () => {
   selectedLeaves.clear();
   render();
 });
+if (btnResetDisplay) btnResetDisplay.addEventListener('click', () => resetActiveDisplay());
+if (btnResetDisplayFloat) btnResetDisplayFloat.addEventListener('click', () => resetActiveDisplay());
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
@@ -1360,6 +1553,7 @@ function applyWindowState(state) {
 
   renderDisplayGuide();
   positionTileBadges();
+  updateResetDisplayButton();
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -1415,6 +1609,7 @@ if (IS_MIRROR) {
   window.api.onProvideLayout(() => { lastSyncJSON = ''; broadcastLayout(); });
   loadState();
   refreshDisplays();
+  updateResetDisplayButton();
   window.api.requestWindowState();
   wake();
 }

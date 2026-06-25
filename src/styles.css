@@ -360,6 +360,7 @@ body.mirror #display-guide { display: none !important; }
 }
 body.mirror .edit-float { display: inline-block; }
 body.mirror .edit-float.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+body.mirror .reset-display-float { top: 52px; }
 
 /* --------------------------------------------------------- Split preview */
 #split-preview {
