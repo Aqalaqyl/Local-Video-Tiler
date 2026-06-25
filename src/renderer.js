@@ -137,13 +137,34 @@ function applyProjection() {
       el.style.clipPath = '';
     }
   }
-  reconcileProjectionPlayback();
+  scheduleProjectionPlayback();
+}
+
+let projectionPlaybackRaf = 0;
+/** Defer playback reconciliation until after projection layout has settled. */
+function scheduleProjectionPlayback() {
+  cancelAnimationFrame(projectionPlaybackRaf);
+  projectionPlaybackRaf = requestAnimationFrame(() => {
+    projectionPlaybackRaf = requestAnimationFrame(reconcileProjectionPlayback);
+  });
 }
 
 function isLeafVisible(leaf) {
   if (!leaf.el) return false;
   const r = leaf.el.getBoundingClientRect();
   return r.right > 1 && r.bottom > 1 && r.left < window.innerWidth - 1 && r.top < window.innerHeight - 1;
+}
+
+function videoSourceUrl(video) {
+  if (!video) return '';
+  return video.currentSrc || video.getAttribute('src') || '';
+}
+
+function sourcesMatch(video, url) {
+  if (!url) return !videoSourceUrl(video);
+  const loaded = videoSourceUrl(video);
+  if (!loaded) return false;
+  try { return loaded === new URL(url, window.location.href).href; } catch (_) { return loaded === url; }
 }
 
 /**
@@ -155,20 +176,30 @@ function reconcileProjectionPlayback() {
   if (!projection.active) return;
   forEachLeaf(root, (leaf) => {
     if (leaf.spacer || !leaf.video) return;
-    const visible = isLeafVisible(leaf) && leaf.files.length > 0;
+    if (!leaf.files.length) return;
+
+    const visible = isLeafVisible(leaf);
+    const cur = leaf.files[leaf.index];
+    const wasPlaying = !leaf.video.paused && !leaf.video.ended;
+
     if (visible) {
-      const cur = leaf.files[leaf.index];
-      const src = leaf.video.getAttribute('src');
-      if (cur && src !== cur.url) loadCurrent(leaf, true);
-      else {
+      if (cur && !sourcesMatch(leaf.video, cur.url)) {
+        loadCurrent(leaf, wasPlaying);
+      } else {
         leaf.video.muted = projection.role === 'mirror';
         leaf.video.loop = !!leaf.loop;
-        leaf.video.play().catch(() => {});
+        if (wasPlaying) leaf.video.play().catch(() => {});
+        else leaf.video.pause();
       }
     } else {
-      stopVideoElement(leaf.video);
+      pauseVideoElement(leaf.video);
     }
   });
+}
+
+function pauseVideoElement(video) {
+  if (!video) return;
+  try { video.pause(); } catch (_) { /* ignore */ }
 }
 
 function stopVideoElement(video) {
@@ -263,6 +294,17 @@ function applyIncomingLayout(payload) {
 }
 
 // Receive projection config from the main process (controller window).
+function projectionViewportKey(config) {
+  if (!config || !config.active) return '';
+  const v = config.viewport || {};
+  const u = config.union || {};
+  return [
+    config.role || '',
+    v.x, v.y, v.width, v.height,
+    u.x, u.y, u.width, u.height
+  ].join('|');
+}
+
 function setProjection(config) {
   if (!config || !config.active) {
     projection.active = false;
@@ -275,14 +317,18 @@ function setProjection(config) {
     flushSaveState();
     return;
   }
+  const prevKey = projectionViewportKey({ active: true, role: projection.role, viewport: projection.viewport, union: projection.union });
   projection.active = true;
   projection.role = config.role || 'controller';
   projection.viewport = config.viewport;
   projection.union = config.union;
   applyProjection();
   renderDisplayGuide();
-  lastSyncJSON = '';
-  broadcastLayout();
+  const nextKey = projectionViewportKey(config);
+  if (nextKey !== prevKey) {
+    lastSyncJSON = '';
+    broadcastLayout();
+  }
 }
 
 function bootMirror() {
@@ -632,44 +678,60 @@ async function assignFolderToSelection() {
   flash(`Assigned folder to ${targets.length} tile${targets.length === 1 ? '' : 's'}`);
 }
 
-async function loadFolder(leaf, folder, index = 0, autoplay = false) {
+async function loadFolder(leaf, folder, index = 0, autoplay = false, opts = {}) {
   const res = await window.api.readFolder(folder);
   leaf.folder = res.folder;
   leaf.files = res.files || [];
   leaf.index = clamp(index, 0, Math.max(0, leaf.files.length - 1));
-  if (leaf.files.length > 0) loadCurrent(leaf, autoplay);
+  if (leaf.files.length > 0) loadCurrent(leaf, autoplay, opts);
   else stopVideoElement(leaf.video);
   updateLeaf(leaf);
-  saveState();
+  if (!opts.skipSave) saveState();
 }
 
-function loadCurrent(leaf, autoplay) {
+function loadCurrent(leaf, autoplay, opts = {}) {
   const { video } = leaf;
   if (!video) return;
   leaf._loadGen = (leaf._loadGen || 0) + 1;
   const gen = leaf._loadGen;
   const current = leaf.files[leaf.index];
-  const visible = !projection.active || isLeafVisible(leaf);
-
-  stopVideoElement(video);
+  const visible = opts.force || !projection.active || isLeafVisible(leaf);
+  const resumeTime = (opts.preserveTime && isFinite(video.currentTime)) ? video.currentTime : 0;
+  const sameSource = current && sourcesMatch(video, current.url);
 
   if (!current || !visible) {
+    if (!visible && current && !opts.force) pauseVideoElement(video);
+    else stopVideoElement(video);
     updateLeaf(leaf);
     return;
   }
+
+  if (sameSource) {
+    video.muted = projection.active && projection.role === 'mirror';
+    video.loop = !!leaf.loop;
+    if (autoplay) video.play().catch(() => {});
+    else video.pause();
+    updateLeaf(leaf);
+    return;
+  }
+
+  stopVideoElement(video);
 
   const wantPlay = !!autoplay;
   video.src = current.url;
   video.load();
   video.loop = !!leaf.loop;
-  if (projection.role === 'mirror') video.muted = true;
+  if (projection.active && projection.role === 'mirror') video.muted = true;
 
   const tryPlay = () => {
     if (leaf._loadGen !== gen) return;
+    if (resumeTime > 0) {
+      try { video.currentTime = resumeTime; } catch (_) { /* ignore */ }
+    }
     if (wantPlay) video.play().catch(() => {});
   };
 
-  if (wantPlay) {
+  if (wantPlay || resumeTime > 0) {
     if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) tryPlay();
     else video.addEventListener('canplay', tryPlay, { once: true });
   }
@@ -1622,7 +1684,7 @@ async function restoreLeafMediaState(leaf, saved) {
     updateLeaf(leaf);
     return;
   }
-  await loadFolder(leaf, saved.folder, saved.index || 0, false);
+  await loadFolder(leaf, saved.folder, saved.index || 0, false, { force: true, skipSave: true });
   leaf.savedIndex = leaf.index;
   applyLoop(leaf);
   if (!leaf.video) return;
@@ -1670,8 +1732,9 @@ async function tileToDisplays() {
   for (const [id, leaves] of groupLeavesByDisplay(oldLeaves)) {
     savedByDisplay.set(id, captureMediaState(pickRepresentativeLeaf(leaves)));
   }
+  for (const leaf of oldLeaves) disposeLeaf(leaf);
 
-  forEachLeaf(root, disposeLeaf);
+  // Rebuild the tree, then restore saved playback per physical display.
   const union = unionBounds(displays);
   const rects = displays
     .slice()
@@ -1692,6 +1755,7 @@ async function tileToDisplays() {
     if (saved) restores.push(restoreLeafMediaState(leaf, saved));
   }
   await Promise.all(restores);
+  if (projection.active) reconcileProjectionPlayback();
   saveState();
 
   flash(`Tiled layout to match ${displays.length} displays`);
