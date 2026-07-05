@@ -1,0 +1,17 @@
+{
+  "posts": [
+    {
+      "title": "Example post",
+      "url": "https://www.reddit.com/r/example/comments/abc123/",
+      "media": "https://preview.redd.it/abc123-image.jpg?width=1080"
+    },
+    {
+      "title": "Another post",
+      "links": [
+        "https://www.redgifs.com/watch/exampleclip",
+        "https://example.com/not-included.mp4"
+      ]
+    }
+  ],
+  "notes": "Also found inline: https://preview.redd.it/xyz789-video.mp4 and duplicate https://www.redgifs.com/watch/exampleclip"
+}
