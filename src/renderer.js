@@ -131,13 +131,34 @@ function applyProjection() {
       el.style.clipPath = '';
     }
   }
-  reconcileProjectionPlayback();
+  scheduleProjectionPlayback();
+}
+
+let projectionPlaybackRaf = 0;
+/** Defer playback reconciliation until after projection layout has settled. */
+function scheduleProjectionPlayback() {
+  cancelAnimationFrame(projectionPlaybackRaf);
+  projectionPlaybackRaf = requestAnimationFrame(() => {
+    projectionPlaybackRaf = requestAnimationFrame(reconcileProjectionPlayback);
+  });
 }
 
 function isLeafVisible(leaf) {
   if (!leaf.el) return false;
   const r = leaf.el.getBoundingClientRect();
   return r.right > 1 && r.bottom > 1 && r.left < window.innerWidth - 1 && r.top < window.innerHeight - 1;
+}
+
+function videoSourceUrl(video) {
+  if (!video) return '';
+  return video.currentSrc || video.getAttribute('src') || '';
+}
+
+function sourcesMatch(video, url) {
+  if (!url) return !videoSourceUrl(video);
+  const loaded = videoSourceUrl(video);
+  if (!loaded) return false;
+  try { return loaded === new URL(url, window.location.href).href; } catch (_) { return loaded === url; }
 }
 
 /**
@@ -148,21 +169,69 @@ function isLeafVisible(leaf) {
 function reconcileProjectionPlayback() {
   if (!projection.active) return;
   forEachLeaf(root, (leaf) => {
-    if (!leaf.video) return;
-    const visible = isLeafVisible(leaf) && leaf.files.length > 0;
+    if (leaf.spacer || !leaf.video) return;
+    if (!leaf.files.length) return;
+
+    const visible = isLeafVisible(leaf);
+    const cur = leaf.files[leaf.index];
+    const wasPlaying = !leaf.video.paused && !leaf.video.ended;
+
     if (visible) {
-      const cur = leaf.files[leaf.index];
-      if (cur && leaf.video.getAttribute('src') !== cur.url) { leaf.video.src = cur.url; leaf.video.load(); }
-      leaf.video.muted = projection.role === 'mirror';
-      leaf.video.loop = !!leaf.loop;
-      leaf.video.play().catch(() => {});
+      if (cur && !sourcesMatch(leaf.video, cur.url)) {
+        loadCurrent(leaf, wasPlaying);
+      } else {
+        applyTileAudio(leaf);
+        leaf.video.loop = !!leaf.loop;
+        if (wasPlaying) leaf.video.play().catch(() => {});
+        else leaf.video.pause();
+      }
     } else {
-      try {
-        leaf.video.pause();
-        if (leaf.video.getAttribute('src')) { leaf.video.removeAttribute('src'); leaf.video.load(); }
-      } catch (_) { /* ignore */ }
+      pauseVideoElement(leaf.video);
     }
   });
+}
+
+function pauseVideoElement(video) {
+  if (!video) return;
+  try { video.pause(); } catch (_) { /* ignore */ }
+}
+
+function stopVideoElement(video) {
+  if (!video) return;
+  try {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  } catch (_) { /* ignore */ }
+}
+
+/** Apply per-tile volume/mute to the live <video>, respecting projection mirrors. */
+function applyTileAudio(leaf) {
+  if (!leaf.video) return;
+  const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, 1);
+  leaf.volume = vol;
+  if (projection.active && projection.role === 'mirror') {
+    leaf.video.muted = true;
+    return;
+  }
+  leaf.video.volume = vol;
+  leaf.video.muted = !!leaf.muted || vol === 0;
+  if (leaf.refs) {
+    leaf.refs.vol.value = String(vol);
+    leaf.refs.mute.textContent = leaf.video.muted ? '🔇' : '🔊';
+  }
+}
+
+function setTileVolume(leaf, volume, opts = {}) {
+  if (!leaf) return;
+  leaf.volume = clamp(volume, 0, 1);
+  if (leaf.volume > 0 && !opts.keepMuted) leaf.muted = false;
+  applyTileAudio(leaf);
+  if (!opts.skipSave) saveState();
+}
+
+function adjustTileVolume(leaf, delta) {
+  setTileVolume(leaf, (leaf.volume == null ? 1 : leaf.volume) + delta);
 }
 
 function snapshotSettings() {
@@ -221,7 +290,12 @@ function applyIncomingLayout(payload) {
         leaf.folder = folder;
         leaf.loop = node ? !!node.loop : false;
         leaf.spacer = spacer;
+        if (node) {
+          if (typeof node.volume === 'number') leaf.volume = clamp(node.volume, 0, 1);
+          if (node.muted != null) leaf.muted = !!node.muted;
+        }
         if (leaf.el) leaf.el.classList.toggle('pad-spacer', spacer);
+        applyTileAudio(leaf);
         return leaf;
       }
       return makeSplit(node.direction, build(node.children[0]), build(node.children[1]), node.ratio);
@@ -246,6 +320,17 @@ function applyIncomingLayout(payload) {
 }
 
 // Receive projection config from the main process (controller window).
+function projectionViewportKey(config) {
+  if (!config || !config.active) return '';
+  const v = config.viewport || {};
+  const u = config.union || {};
+  return [
+    config.role || '',
+    v.x, v.y, v.width, v.height,
+    u.x, u.y, u.width, u.height
+  ].join('|');
+}
+
 function setProjection(config) {
   if (!config || !config.active) {
     projection.active = false;
@@ -253,17 +338,26 @@ function setProjection(config) {
     projection.viewport = null;
     projection.union = null;
     applyProjection();
+    forEachLeaf(root, (leaf) => { if (!leaf.spacer) applyTileAudio(leaf); });
     renderDisplayGuide();
     return;
   }
+  const prevKey = projectionViewportKey({
+    active: true,
+    role: projection.role,
+    viewport: projection.viewport,
+    union: projection.union
+  });
   projection.active = true;
   projection.role = config.role || 'controller';
   projection.viewport = config.viewport;
   projection.union = config.union;
   applyProjection();
   renderDisplayGuide();
-  lastSyncJSON = '';
-  broadcastLayout();
+  if (projectionViewportKey(config) !== prevKey) {
+    lastSyncJSON = '';
+    broadcastLayout();
+  }
 }
 
 function bootMirror() {
@@ -299,6 +393,8 @@ function makeLeaf() {
     savedIndex: 0,
     loop: false,
     spacer: false,
+    volume: 1,
+    muted: false,
     el: null,
     refs: null,
     video: null
@@ -348,10 +444,7 @@ function render() {
   stage.textContent = '';
   stage.appendChild(renderNode(root));
   applyFocus();
-  if (projection.active) {
-    applyProjection();
-    reconcileProjectionPlayback();
-  }
+  if (projection.active) applyProjection();
   positionTileBadges();
   saveState();
 }
@@ -432,7 +525,7 @@ function ensureLeafEl(leaf) {
     <input class="seek" type="range" min="0" max="1000" value="0" title="Seek" />
     <span class="time">0:00 / 0:00</span>
     <button class="mute" title="Mute">🔊</button>
-    <input class="vol" type="range" min="0" max="1" step="0.05" value="1" title="Volume" />
+    <input class="vol" type="range" min="0" max="1" step="0.05" value="1" title="Volume (scroll wheel over tile)" />
     <span class="title"></span>
     <button class="close" title="Close tile">✕</button>`;
 
@@ -493,6 +586,7 @@ function updateLeaf(leaf) {
 
   const current = hasFiles ? leaf.files[leaf.index] : null;
   refs.title.textContent = current ? `${leaf.index + 1}/${leaf.files.length} · ${current.name}` : '';
+  applyTileAudio(leaf);
 }
 
 // ============================================================================
@@ -518,15 +612,22 @@ function wireLeafEvents(leaf) {
   });
   refs.vol.addEventListener('input', (e) => {
     e.stopPropagation();
-    video.volume = parseFloat(refs.vol.value);
-    video.muted = video.volume === 0;
-    refs.mute.textContent = video.muted ? '🔇' : '🔊';
+    setTileVolume(leaf, parseFloat(refs.vol.value));
   });
   refs.mute.addEventListener('click', (e) => {
     e.stopPropagation();
-    video.muted = !video.muted;
-    refs.mute.textContent = video.muted ? '🔇' : '🔊';
+    leaf.muted = !leaf.muted;
+    applyTileAudio(leaf);
+    saveState();
   });
+
+  el.addEventListener('wheel', (e) => {
+    if (leaf.spacer || !leaf.files.length) return;
+    if (e.target.closest('.tile-toolbar')) return;
+    e.preventDefault();
+    const step = e.shiftKey ? 0.01 : 0.05;
+    adjustTileVolume(leaf, e.deltaY < 0 ? step : -step);
+  }, { passive: false });
 
   // Prevent toolbar interactions from triggering a split.
   refs.toolbar.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -579,26 +680,39 @@ async function loadFolder(leaf, folder, index = 0, autoplay = false) {
   saveState();
 }
 
-function loadCurrent(leaf, autoplay) {
+function loadCurrent(leaf, autoplay, opts = {}) {
   const { video } = leaf;
+  if (!video) return;
   const current = leaf.files[leaf.index];
-  // While projecting, only load media for tiles on this window's slice so we
-  // don't decode (or hear) videos that belong on another display.
-  const visible = !projection.active || isLeafVisible(leaf);
+  const visible = opts.force || !projection.active || isLeafVisible(leaf);
+  const sameSource = current && sourcesMatch(video, current.url);
+
   if (!current || !visible) {
-    try {
-      video.pause();
-      if (video.getAttribute('src')) { video.removeAttribute('src'); video.load(); }
-    } catch (_) { /* ignore */ }
+    if (!visible && current && !opts.force) pauseVideoElement(video);
+    else {
+      try {
+        video.pause();
+        if (video.getAttribute('src')) { video.removeAttribute('src'); video.load(); }
+      } catch (_) { /* ignore */ }
+    }
     updateLeaf(leaf);
     return;
   }
-  // Pause before swapping src so a prior clip can't keep playing audio.
+
+  if (sameSource) {
+    applyTileAudio(leaf);
+    video.loop = !!leaf.loop;
+    if (autoplay) video.play().catch(() => {});
+    else video.pause();
+    updateLeaf(leaf);
+    return;
+  }
+
   try { video.pause(); } catch (_) { /* ignore */ }
   video.src = current.url;
   video.load();
   video.loop = !!leaf.loop;
-  if (projection.role === 'mirror') video.muted = true;
+  applyTileAudio(leaf);
   if (autoplay) video.play().catch(() => {});
   updateLeaf(leaf);
 }
@@ -935,6 +1049,8 @@ function serializeTree(node, withIndex) {
     const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop };
     if (node.spacer) o.spacer = true;
     if (withIndex) o.index = node.index;
+    if (node.volume != null && node.volume !== 1) o.volume = node.volume;
+    if (node.muted) o.muted = true;
     return o;
   }
   return {
@@ -954,6 +1070,8 @@ function deserialize(obj) {
     l.folder = obj.folder || null;
     l.index = l.savedIndex = obj.index || 0;
     l.loop = !!obj.loop;
+    l.volume = typeof obj.volume === 'number' ? clamp(obj.volume, 0, 1) : 1;
+    l.muted = !!obj.muted;
     return l;
   }
   return makeSplit(obj.direction, deserialize(obj.children[0]), deserialize(obj.children[1]), obj.ratio);
@@ -1396,10 +1514,7 @@ window.api.onDisplayChanged(() => refreshDisplays());
 window.addEventListener('resize', () => {
   if (settings.editMode) hidePreview();
   renderDisplayGuide();
-  if (projection.active) {
-    applyProjection();
-    reconcileProjectionPlayback();
-  }
+  if (projection.active) applyProjection();
   positionTileBadges();
 });
 
