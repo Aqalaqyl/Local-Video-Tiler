@@ -33,6 +33,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('projection:set', handler);
     return () => ipcRenderer.removeListener('projection:set', handler);
   },
+  onResumeAudio: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('projection:resumeAudio', handler);
+    return () => ipcRenderer.removeListener('projection:resumeAudio', handler);
+  },
   // Controller → mirrors: push the current layout (serialized tree).
   pushLayout: (payload) => ipcRenderer.send('projection:pushLayout', payload),
   // Mirror → controller: ask for the current layout once ready.

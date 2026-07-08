@@ -235,6 +235,16 @@ function spanAllDisplays() {
   mainWindow.moveTop();
   mainWindow.focus();
   sendWindowState();
+
+  // Mirror windows appear asynchronously; keep the controller focused so it keeps audio output.
+  const refocusController = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.moveTop();
+    mainWindow.focus();
+    mainWindow.webContents.send('projection:resumeAudio');
+  };
+  setTimeout(refocusController, 400);
+  setTimeout(refocusController, 1200);
 }
 
 function restoreFromSpan() {

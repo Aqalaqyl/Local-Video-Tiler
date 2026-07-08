@@ -77,6 +77,8 @@ const IS_MIRROR = new URLSearchParams(location.search).get('role') === 'mirror';
 // Guards against echo loops when applying a layout pushed from another window.
 let applyingRemote = false;
 let lastSyncJSON = '';
+/** Mirrors skip layout broadcast while bootstrapping from the controller. */
+let mirrorBootSyncing = false;
 
 function readProjectionQuery() {
   const p = new URLSearchParams(location.search);
@@ -182,6 +184,14 @@ function leafShouldPlay(leaf) {
   return !leaf.userPaused && leaf.files.length > 0;
 }
 
+/** Controller decodes every tile (audio comes from the primary window). Mirrors only decode their slice. */
+function leafMayDecode(leaf, opts = {}) {
+  if (opts.force) return true;
+  if (!projection.active) return true;
+  if (projection.role === 'controller') return true;
+  return isLeafInViewport(leaf);
+}
+
 function videoSourceUrl(video) {
   if (!video) return '';
   return video.currentSrc || video.getAttribute('src') || '';
@@ -195,21 +205,18 @@ function sourcesMatch(video, url) {
 }
 
 /**
- * While projecting across displays, each window only decodes/plays tiles that
- * fall on its own slice. Mirrors are always muted; the controller keeps audio
- * only for tiles visible on the primary display.
+ * While projecting across displays, mirrors only decode their slice (muted).
+ * The controller keeps every tile loaded and audible — it owns the audio output.
  */
 function reconcileProjectionPlayback() {
   if (!projection.active) return;
   forEachLeaf(root, (leaf) => {
-    if (leaf.spacer || !leaf.video) return;
-    if (!leaf.files.length) return;
+    if (leaf.spacer || !leaf.video || !leaf.files.length) return;
 
-    const visible = isLeafInViewport(leaf);
     const cur = leaf.files[leaf.index];
-    const shouldPlay = visible && leafShouldPlay(leaf);
+    const shouldPlay = leafShouldPlay(leaf);
 
-    if (visible) {
+    if (projection.role === 'controller') {
       if (cur && !sourcesMatch(leaf.video, cur.url)) {
         loadCurrent(leaf, shouldPlay);
       } else {
@@ -217,6 +224,18 @@ function reconcileProjectionPlayback() {
         leaf.video.loop = !!leaf.loop;
         if (shouldPlay) leaf.video.play().catch(() => {});
         else leaf.video.pause();
+      }
+      return;
+    }
+
+    const visible = isLeafInViewport(leaf);
+    if (visible) {
+      if (cur && !sourcesMatch(leaf.video, cur.url)) {
+        loadCurrent(leaf, true);
+      } else {
+        applyTileAudio(leaf);
+        leaf.video.loop = !!leaf.loop;
+        leaf.video.play().catch(() => {});
       }
     } else {
       pauseVideoElement(leaf.video);
@@ -282,6 +301,7 @@ function applySettingsFromPayload(s) {
 // Push the current layout + settings to peer windows (deduped to avoid echoes).
 function broadcastLayout() {
   if (!projection.active) return;
+  if (IS_MIRROR && mirrorBootSyncing) return;
   const payload = { tree: serializeForSync(root), settings: snapshotSettings() };
   const json = JSON.stringify(payload);
   if (json === lastSyncJSON) return;
@@ -347,6 +367,7 @@ function applyIncomingLayout(payload) {
       }
     });
     applyProjection();
+    if (projection.active && projection.role === 'controller') scheduleSpanPlaybackRecovery();
   } finally {
     applyingRemote = false;
   }
@@ -402,13 +423,13 @@ function scheduleSpanPlaybackRecovery() {
   const resume = () => {
     if (!projection.active || projection.role !== 'controller') return;
     forEachLeaf(root, (leaf) => {
-      if (leaf.spacer || !leaf.video || !leafShouldPlay(leaf) || !isLeafInViewport(leaf)) return;
+      if (leaf.spacer || !leaf.video || !leafShouldPlay(leaf)) return;
       applyTileAudio(leaf);
       leaf.video.loop = !!leaf.loop;
       if (leaf.video.paused) leaf.video.play().catch(() => {});
     });
   };
-  for (const ms of [0, 100, 300, 600]) {
+  for (const ms of [0, 100, 300, 600, 1200]) {
     spanPlaybackRecoveryTimers.push(setTimeout(resume, ms));
   }
 }
@@ -416,6 +437,7 @@ function scheduleSpanPlaybackRecovery() {
 function bootMirror() {
   readProjectionQuery();
   document.body.classList.add('mirror');
+  mirrorBootSyncing = true;
   applyProjection();
   window.api.onLayout(applyIncomingLayout);
   // The controller may re-broadcast this window's viewport (e.g. display change).
@@ -427,6 +449,7 @@ function bootMirror() {
     }
   });
   window.api.requestLayout();
+  setTimeout(() => { mirrorBootSyncing = false; }, 2500);
 }
 
 let uidCounter = 1;
@@ -738,11 +761,11 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   const { video } = leaf;
   if (!video) return;
   const current = leaf.files[leaf.index];
-  const visible = opts.force || !projection.active || isLeafInViewport(leaf);
+  const mayDecode = leafMayDecode(leaf, opts);
   const sameSource = current && sourcesMatch(video, current.url);
 
-  if (!current || !visible) {
-    if (!visible && current && !opts.force) pauseVideoElement(video);
+  if (!current || !mayDecode) {
+    if (!mayDecode && current && !opts.force) pauseVideoElement(video);
     else {
       try {
         video.pause();
@@ -1586,6 +1609,7 @@ if (IS_MIRROR) {
   // Controller (main) window: owns persistence + the control bar.
   window.api.onProjection(setProjection);
   window.api.onLayout(applyIncomingLayout);
+  window.api.onResumeAudio(() => scheduleSpanPlaybackRecovery());
   // A mirror asked for the current layout — force a fresh broadcast to it.
   window.api.onProvideLayout(() => { lastSyncJSON = ''; broadcastLayout(); });
   loadState();
