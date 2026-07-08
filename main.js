@@ -203,16 +203,27 @@ function spanAllDisplays() {
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
   mainWindow.setBounds(primary.bounds);
-  setWindowFullscreen(mainWindow, true);
-  sendProjection(mainWindow, {
-    active: true,
-    role: 'controller',
-    viewport: primary.bounds,
-    union,
-    displayCount: displays.length
-  });
-  // Re-sync after fullscreen using display.bounds (global coords), not getBounds().
-  setTimeout(() => syncProjectionViewport(mainWindow, 'controller', union, displays.length, primary.bounds), 80);
+
+  const applyControllerProjection = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    sendProjection(mainWindow, {
+      active: true,
+      role: 'controller',
+      viewport: primary.bounds,
+      union,
+      displayCount: displays.length
+    });
+    setTimeout(() => syncProjectionViewport(mainWindow, 'controller', union, displays.length, primary.bounds), 80);
+  };
+
+  if (isWindowFullscreen(mainWindow)) {
+    applyControllerProjection();
+  } else {
+    mainWindow.once('enter-full-screen', applyControllerProjection);
+    setWindowFullscreen(mainWindow, true);
+    // Fallback when enter-full-screen does not fire (e.g. some simple-fullscreen paths).
+    setTimeout(applyControllerProjection, 250);
+  }
 
   // Every other display gets its own fullscreen mirror window.
   closeProjectionWindows();

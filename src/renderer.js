@@ -149,6 +149,39 @@ function isLeafVisible(leaf) {
   return r.right > 1 && r.bottom > 1 && r.left < window.innerWidth - 1 && r.top < window.innerHeight - 1;
 }
 
+/** Map a tile's on-screen box into the shared multi-monitor canvas coordinates. */
+function getLeafUnionRect(leaf) {
+  if (!leaf.el) return null;
+  const leafR = leaf.el.getBoundingClientRect();
+  if (!projection.active || !projection.union) {
+    return { x: leafR.left, y: leafR.top, w: leafR.width, h: leafR.height };
+  }
+  const stageR = stage.getBoundingClientRect();
+  if (stageR.width < 1 || stageR.height < 1) return null;
+  const relX = (leafR.left - stageR.left) / stageR.width;
+  const relY = (leafR.top - stageR.top) / stageR.height;
+  return {
+    x: projection.union.x + relX * projection.union.width,
+    y: projection.union.y + relY * projection.union.height,
+    w: (leafR.width / stageR.width) * projection.union.width,
+    h: (leafR.height / stageR.height) * projection.union.height
+  };
+}
+
+/** Whether a tile overlaps this window's projection viewport (stable during fullscreen transitions). */
+function isLeafInViewport(leaf) {
+  if (!projection.active || !projection.viewport) return isLeafVisible(leaf);
+  const r = getLeafUnionRect(leaf);
+  if (!r || r.w < 1 || r.h < 1) return isLeafVisible(leaf);
+  const v = projection.viewport;
+  return r.x < v.x + v.width && r.x + r.w > v.x &&
+    r.y < v.y + v.height && r.y + r.h > v.y;
+}
+
+function leafShouldPlay(leaf) {
+  return !leaf.userPaused && leaf.files.length > 0;
+}
+
 function videoSourceUrl(video) {
   if (!video) return '';
   return video.currentSrc || video.getAttribute('src') || '';
@@ -172,17 +205,17 @@ function reconcileProjectionPlayback() {
     if (leaf.spacer || !leaf.video) return;
     if (!leaf.files.length) return;
 
-    const visible = isLeafVisible(leaf);
+    const visible = isLeafInViewport(leaf);
     const cur = leaf.files[leaf.index];
-    const wasPlaying = !leaf.video.paused && !leaf.video.ended;
+    const shouldPlay = visible && leafShouldPlay(leaf);
 
     if (visible) {
       if (cur && !sourcesMatch(leaf.video, cur.url)) {
-        loadCurrent(leaf, wasPlaying);
+        loadCurrent(leaf, shouldPlay);
       } else {
         applyTileAudio(leaf);
         leaf.video.loop = !!leaf.loop;
-        if (wasPlaying) leaf.video.play().catch(() => {});
+        if (shouldPlay) leaf.video.play().catch(() => {});
         else leaf.video.pause();
       }
     } else {
@@ -358,6 +391,26 @@ function setProjection(config) {
     lastSyncJSON = '';
     broadcastLayout();
   }
+  if (projection.role === 'controller') scheduleSpanPlaybackRecovery();
+}
+
+let spanPlaybackRecoveryTimers = [];
+/** Fullscreen transitions can pause media; retry audible playback on the controller. */
+function scheduleSpanPlaybackRecovery() {
+  for (const t of spanPlaybackRecoveryTimers) clearTimeout(t);
+  spanPlaybackRecoveryTimers = [];
+  const resume = () => {
+    if (!projection.active || projection.role !== 'controller') return;
+    forEachLeaf(root, (leaf) => {
+      if (leaf.spacer || !leaf.video || !leafShouldPlay(leaf) || !isLeafInViewport(leaf)) return;
+      applyTileAudio(leaf);
+      leaf.video.loop = !!leaf.loop;
+      if (leaf.video.paused) leaf.video.play().catch(() => {});
+    });
+  };
+  for (const ms of [0, 100, 300, 600]) {
+    spanPlaybackRecoveryTimers.push(setTimeout(resume, ms));
+  }
 }
 
 function bootMirror() {
@@ -395,6 +448,7 @@ function makeLeaf() {
     spacer: false,
     volume: 1,
     muted: false,
+    userPaused: false,
     el: null,
     refs: null,
     video: null
@@ -684,7 +738,7 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   const { video } = leaf;
   if (!video) return;
   const current = leaf.files[leaf.index];
-  const visible = opts.force || !projection.active || isLeafVisible(leaf);
+  const visible = opts.force || !projection.active || isLeafInViewport(leaf);
   const sameSource = current && sourcesMatch(video, current.url);
 
   if (!current || !visible) {
@@ -719,8 +773,13 @@ function loadCurrent(leaf, autoplay, opts = {}) {
 
 function togglePlay(leaf) {
   if (!leaf.files.length) { assignFolder(leaf); return; }
-  if (leaf.video.paused) leaf.video.play().catch(() => {});
-  else leaf.video.pause();
+  if (leaf.video.paused) {
+    leaf.userPaused = false;
+    leaf.video.play().catch(() => {});
+  } else {
+    leaf.userPaused = true;
+    leaf.video.pause();
+  }
 }
 
 function step(leaf, dir, autoplay = false) {
@@ -742,6 +801,7 @@ function pickRandomIndex(leaf) {
 /** Auto-advance to a random clip from the folder (the default shuffle playback). */
 function advanceRandom(leaf, initial = false) {
   if (!leaf.files.length) return;
+  leaf.userPaused = false;
   leaf.index = initial ? Math.floor(Math.random() * leaf.files.length) : pickRandomIndex(leaf);
   loadCurrent(leaf, true);
   saveState();
