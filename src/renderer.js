@@ -279,6 +279,47 @@ function isLeafVisible(leaf) {
   return r.right > 1 && r.bottom > 1 && r.left < window.innerWidth - 1 && r.top < window.innerHeight - 1;
 }
 
+/** Map a tile into the shared multi-monitor canvas coordinates. */
+function getLeafUnionRect(leaf) {
+  if (!leaf.el || !projection.active || !projection.union) return null;
+  const leafR = leaf.el.getBoundingClientRect();
+  const stageR = stage.getBoundingClientRect();
+  if (stageR.width < 1 || stageR.height < 1) return null;
+  const relX = (leafR.left - stageR.left) / stageR.width;
+  const relY = (leafR.top - stageR.top) / stageR.height;
+  return {
+    x: projection.union.x + relX * projection.union.width,
+    y: projection.union.y + relY * projection.union.height,
+    w: (leafR.width / stageR.width) * projection.union.width,
+    h: (leafR.height / stageR.height) * projection.union.height
+  };
+}
+
+/** Stable visibility check for projection (survives fullscreen layout glitches). */
+function isLeafInViewport(leaf) {
+  if (!projection.active || !projection.viewport) return isLeafVisible(leaf);
+  const r = getLeafUnionRect(leaf);
+  if (!r || r.w < 1 || r.h < 1) return isLeafVisible(leaf);
+  const v = projection.viewport;
+  return r.x < v.x + v.width && r.x + r.w > v.x &&
+    r.y < v.y + v.height && r.y + r.h > v.y;
+}
+
+function leafShouldPlay(leaf) {
+  return !leaf.userPaused && leaf.files.length > 0;
+}
+
+/**
+ * Controller keeps media loaded for every tile (it owns audible output).
+ * Mirrors only decode tiles on their own display slice.
+ */
+function leafMayDecode(leaf, opts = {}) {
+  if (opts.force) return true;
+  if (!projection.active) return true;
+  if (projection.role === 'controller') return true;
+  return isLeafInViewport(leaf) || isLeafVisible(leaf);
+}
+
 function videoSourceUrl(video) {
   if (!video) return '';
   return video.currentSrc || video.getAttribute('src') || '';
@@ -292,28 +333,40 @@ function sourcesMatch(video, url) {
 }
 
 /**
- * While projecting across displays, each window only decodes/plays tiles that
- * fall on its own slice. Mirrors are always muted; the controller keeps audio
- * only for tiles visible on the primary display.
+ * Projection playback:
+ * - Controller plays every non-paused tile (audio comes from the primary window).
+ * - Mirrors stay muted and only run tiles on their slice.
+ * Never trust video.paused during fullscreen — the OS briefly pauses media.
  */
 function reconcileProjectionPlayback() {
   if (!projection.active) return;
+  resumeAudioContext();
+
   forEachLeaf(root, (leaf) => {
-    if (leaf.spacer || !leaf.video) return;
-    if (!leaf.files.length) return;
-
-    const visible = isLeafVisible(leaf);
+    if (leaf.spacer || !leaf.video || !leaf.files.length) return;
     const cur = leaf.files[leaf.index];
-    const wasPlaying = !leaf.video.paused && !leaf.video.ended;
+    const shouldPlay = leafShouldPlay(leaf);
 
-    if (visible) {
+    if (projection.role === 'controller') {
       if (cur && !sourcesMatch(leaf.video, cur.url)) {
-        loadCurrent(leaf, wasPlaying);
+        loadCurrent(leaf, shouldPlay, { force: true });
       } else {
         applyTileAudio(leaf);
         leaf.video.loop = !!leaf.loop;
-        if (wasPlaying) leaf.video.play().catch(() => {});
+        if (shouldPlay) leaf.video.play().catch(() => {});
         else leaf.video.pause();
+      }
+      return;
+    }
+
+    const visible = isLeafInViewport(leaf) || isLeafVisible(leaf);
+    if (visible) {
+      if (cur && !sourcesMatch(leaf.video, cur.url)) {
+        loadCurrent(leaf, true);
+      } else {
+        applyTileAudio(leaf);
+        leaf.video.loop = !!leaf.loop;
+        leaf.video.play().catch(() => {});
       }
     } else {
       pauseVideoElement(leaf.video);
@@ -511,6 +564,7 @@ function applyIncomingLayout(payload) {
       }
     });
     applyProjection();
+    if (projection.active) scheduleSpanPlaybackRecovery();
   } finally {
     applyingRemote = false;
   }
@@ -535,7 +589,11 @@ function setProjection(config) {
     projection.viewport = null;
     projection.union = null;
     applyProjection();
-    forEachLeaf(root, (leaf) => { if (!leaf.spacer) applyTileAudio(leaf); });
+    forEachLeaf(root, (leaf) => {
+      if (leaf.spacer || !leaf.video) return;
+      applyTileAudio(leaf);
+      if (leafShouldPlay(leaf)) leaf.video.play().catch(() => {});
+    });
     renderDisplayGuide();
     return;
   }
@@ -549,11 +607,28 @@ function setProjection(config) {
   projection.role = config.role || 'controller';
   projection.viewport = config.viewport;
   projection.union = config.union;
+  resumeAudioContext();
   applyProjection();
   renderDisplayGuide();
   if (projectionViewportKey(config) !== prevKey) {
     lastSyncJSON = '';
     broadcastLayout();
+  }
+  scheduleSpanPlaybackRecovery();
+}
+
+let spanPlaybackRecoveryTimers = [];
+/** Fullscreen / Web Audio often drop playback when spanning — retry resume. */
+function scheduleSpanPlaybackRecovery() {
+  for (const t of spanPlaybackRecoveryTimers) clearTimeout(t);
+  spanPlaybackRecoveryTimers = [];
+  const resume = () => {
+    if (!projection.active) return;
+    resumeAudioContext();
+    reconcileProjectionPlayback();
+  };
+  for (const ms of [0, 80, 200, 500, 1000, 2000]) {
+    spanPlaybackRecoveryTimers.push(setTimeout(resume, ms));
   }
 }
 
@@ -594,6 +669,7 @@ function makeLeaf() {
     spacer: false,
     volume: 1,
     muted: false,
+    userPaused: false,
     el: null,
     refs: null,
     video: null
@@ -972,11 +1048,11 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   const { video } = leaf;
   if (!video) return;
   const current = leaf.files[leaf.index];
-  const visible = opts.force || !projection.active || isLeafVisible(leaf);
+  const mayDecode = leafMayDecode(leaf, opts);
   const sameSource = current && sourcesMatch(video, current.url);
 
-  if (!current || !visible) {
-    if (!visible && current && !opts.force) pauseVideoElement(video);
+  if (!current || !mayDecode) {
+    if (!mayDecode && current && !opts.force) pauseVideoElement(video);
     else {
       try {
         video.pause();
@@ -1007,14 +1083,21 @@ function loadCurrent(leaf, autoplay, opts = {}) {
 
 function togglePlay(leaf) {
   if (!leaf.files.length) { assignFolder(leaf); return; }
-  if (leaf.video.paused) leaf.video.play().catch(() => {});
-  else leaf.video.pause();
+  if (leaf.video.paused || leaf.userPaused) {
+    leaf.userPaused = false;
+    resumeAudioContext();
+    leaf.video.play().catch(() => {});
+  } else {
+    leaf.userPaused = true;
+    leaf.video.pause();
+  }
+  applyTileAudio(leaf);
 }
 
 function step(leaf, dir, autoplay = false) {
   if (!leaf.files.length) return;
   leaf.index = (leaf.index + dir + leaf.files.length) % leaf.files.length;
-  loadCurrent(leaf, autoplay || !leaf.video.paused);
+  loadCurrent(leaf, autoplay || !leaf.userPaused);
   saveState();
 }
 
@@ -1030,6 +1113,7 @@ function pickRandomIndex(leaf) {
 /** Auto-advance to a random clip from the folder (the default shuffle playback). */
 function advanceRandom(leaf, initial = false) {
   if (!leaf.files.length) return;
+  leaf.userPaused = false;
   leaf.index = initial ? Math.floor(Math.random() * leaf.files.length) : pickRandomIndex(leaf);
   loadCurrent(leaf, true);
   saveState();
@@ -2098,6 +2182,12 @@ if (IS_MIRROR) {
   // Controller (main) window: owns persistence + the control bar.
   window.api.onProjection(setProjection);
   window.api.onLayout(applyIncomingLayout);
+  if (window.api.onResumeAudio) {
+    window.api.onResumeAudio(() => {
+      resumeAudioContext();
+      scheduleSpanPlaybackRecovery();
+    });
+  }
   // A mirror asked for the current layout — force a fresh broadcast to it.
   window.api.onProvideLayout(() => { lastSyncJSON = ''; broadcastLayout(); });
   loadState();

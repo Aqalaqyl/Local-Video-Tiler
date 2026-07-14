@@ -224,6 +224,17 @@ function spanAllDisplays() {
   mainWindow.moveTop();
   mainWindow.focus();
   sendWindowState();
+
+  // Mirror windows steal focus; keep the controller focused and nudge audio resume.
+  const refocusController = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.moveTop();
+    mainWindow.focus();
+    try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
+  };
+  setTimeout(refocusController, 300);
+  setTimeout(refocusController, 900);
+  setTimeout(refocusController, 1800);
 }
 
 function restoreFromSpan() {
