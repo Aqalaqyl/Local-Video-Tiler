@@ -24,6 +24,7 @@
       </label>
       <span class="sep"></span>
       <button id="btn-assign" class="tool" type="button" disabled title="Ctrl+click tiles to select, then assign a shared folder">📁 Folder</button>
+      <button id="btn-presets" class="tool" type="button" title="Save and load layout presets">Presets</button>
       <button id="btn-reset" class="tool" title="Reset layout to a single tile">Reset</button>
       <button id="btn-fs" class="tool" title="Fullscreen on current display (F)">Fullscreen</button>
       <button id="btn-fs-all" class="tool" title="Span / fullscreen across ALL displays (A)">All Displays</button>
@@ -65,6 +66,20 @@
 
   <!-- Transient toast (e.g. when spanning all displays) -->
   <div id="toast" class="hintbox" aria-hidden="true"></div>
+
+  <!-- Layout presets: save/load tile structure + per-tile folder paths -->
+  <div id="presets-panel" class="presets-panel" hidden aria-hidden="true">
+    <div class="presets-head">
+      <strong>Layout presets</strong>
+      <button type="button" id="btn-presets-close" class="presets-close" title="Close">✕</button>
+    </div>
+    <p class="presets-hint">Saves tile layout and each tile’s folder path.</p>
+    <div class="presets-save-row">
+      <input id="preset-name" type="text" maxlength="64" placeholder="Preset name…" />
+      <button type="button" id="btn-preset-save" class="tool">Save</button>
+    </div>
+    <ul id="presets-list" class="presets-list"></ul>
+  </div>
 
   <script src="renderer.js"></script>
 </body>

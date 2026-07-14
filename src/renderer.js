@@ -16,6 +16,7 @@
 
 const VIDEO_EXTS_HINT = 'mp4, webm, mov, mkv, avi, …';
 const LS_KEY = 'lvt.state.v1';
+const PRESETS_KEY = 'lvt.presets.v1';
 
 // ---------------------------------------------------------------- DOM handles
 const stage = document.getElementById('stage');
@@ -36,6 +37,11 @@ const btnFsAll = document.getElementById('btn-fs-all');
 const btnGuide = document.getElementById('btn-guide');
 const btnTileDisplays = document.getElementById('btn-tile-displays');
 const btnAssign = document.getElementById('btn-assign');
+const btnPresets = document.getElementById('btn-presets');
+const presetsPanel = document.getElementById('presets-panel');
+const presetsList = document.getElementById('presets-list');
+const btnPresetSave = document.getElementById('btn-preset-save');
+const presetNameInput = document.getElementById('preset-name');
 const btnMin = document.getElementById('btn-min');
 const btnX = document.getElementById('btn-x');
 const gridSizeInput = document.getElementById('grid-size');
@@ -1244,6 +1250,213 @@ function loadState() {
 }
 
 // ============================================================================
+// Layout presets — named snapshots of tile layout + per-tile folder paths
+// ============================================================================
+function serializePresetTree(node) {
+  if (node.kind === 'leaf') {
+    const o = { kind: 'leaf', folder: node.folder || null, loop: !!node.loop };
+    if (node.spacer) o.spacer = true;
+    o.volume = clamp(node.volume == null ? 1 : node.volume, 0, 1);
+    if (node.muted) o.muted = true;
+    return o;
+  }
+  return {
+    kind: 'split',
+    direction: node.direction,
+    ratio: node.ratio,
+    children: [serializePresetTree(node.children[0]), serializePresetTree(node.children[1])]
+  };
+}
+
+function countPresetFolders(node, acc = { tiles: 0, folders: 0 }) {
+  if (node.kind === 'leaf') {
+    if (!node.spacer) {
+      acc.tiles += 1;
+      if (node.folder) acc.folders += 1;
+    }
+    return acc;
+  }
+  countPresetFolders(node.children[0], acc);
+  countPresetFolders(node.children[1], acc);
+  return acc;
+}
+
+function readPresets() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PRESETS_KEY) || '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function writePresets(list) {
+  try { localStorage.setItem(PRESETS_KEY, JSON.stringify(list)); } catch (_) { /* ignore */ }
+}
+
+function isPresetsPanelOpen() {
+  return !!(presetsPanel && !presetsPanel.hidden);
+}
+
+function setPresetsPanelOpen(open) {
+  if (!presetsPanel) return;
+  presetsPanel.hidden = !open;
+  presetsPanel.setAttribute('aria-hidden', open ? 'false' : 'true');
+  if (btnPresets) btnPresets.classList.toggle('active', open);
+  if (open) {
+    wake();
+    renderPresetsList();
+    if (presetNameInput) {
+      presetNameInput.value = '';
+      presetNameInput.focus();
+    }
+  }
+}
+
+function togglePresetsPanel() {
+  setPresetsPanelOpen(!isPresetsPanelOpen());
+}
+
+function renderPresetsList() {
+  if (!presetsList) return;
+  const list = readPresets().slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  presetsList.textContent = '';
+  for (const preset of list) {
+    const stats = countPresetFolders(preset.tree || { kind: 'leaf' });
+    const li = document.createElement('li');
+    li.className = 'preset-item';
+    li.dataset.id = preset.id;
+
+    const meta = document.createElement('div');
+    meta.className = 'preset-meta';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'preset-name';
+    nameEl.textContent = preset.name || 'Untitled';
+    nameEl.title = preset.name || 'Untitled';
+    const sub = document.createElement('div');
+    sub.className = 'preset-sub';
+    sub.textContent = `${stats.tiles} tile${stats.tiles === 1 ? '' : 's'} · ${stats.folders} folder${stats.folders === 1 ? '' : 's'}`;
+    meta.appendChild(nameEl);
+    meta.appendChild(sub);
+
+    const actions = document.createElement('div');
+    actions.className = 'preset-actions';
+    const loadBtn = document.createElement('button');
+    loadBtn.type = 'button';
+    loadBtn.className = 'tool';
+    loadBtn.textContent = 'Load';
+    loadBtn.title = 'Apply this preset';
+    loadBtn.addEventListener('click', () => applyPreset(preset.id));
+    const renBtn = document.createElement('button');
+    renBtn.type = 'button';
+    renBtn.className = 'tool';
+    renBtn.textContent = 'Rename';
+    renBtn.title = 'Rename preset';
+    renBtn.addEventListener('click', () => renamePreset(preset.id));
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'tool danger';
+    delBtn.textContent = 'Delete';
+    delBtn.title = 'Delete preset';
+    delBtn.addEventListener('click', () => deletePreset(preset.id));
+    actions.appendChild(loadBtn);
+    actions.appendChild(renBtn);
+    actions.appendChild(delBtn);
+
+    li.appendChild(meta);
+    li.appendChild(actions);
+    presetsList.appendChild(li);
+  }
+}
+
+function saveCurrentPreset() {
+  const name = ((presetNameInput && presetNameInput.value) || '').trim();
+  if (!name) {
+    flash('Enter a name for this preset');
+    if (presetNameInput) presetNameInput.focus();
+    return;
+  }
+  const tree = serializePresetTree(root);
+  const list = readPresets();
+  const existing = list.find((p) => p.name.toLowerCase() === name.toLowerCase());
+  const now = Date.now();
+  if (existing) {
+    existing.tree = tree;
+    existing.updatedAt = now;
+    writePresets(list);
+    flash('Updated preset “' + existing.name + '”');
+  } else {
+    list.push({
+      id: 'p' + now.toString(36) + Math.floor(Math.random() * 1e4).toString(36),
+      name,
+      createdAt: now,
+      updatedAt: now,
+      tree
+    });
+    writePresets(list);
+    flash('Saved preset “' + name + '”');
+  }
+  if (presetNameInput) presetNameInput.value = '';
+  renderPresetsList();
+}
+
+async function applyPreset(id) {
+  const preset = readPresets().find((p) => p.id === id);
+  if (!preset || !preset.tree) {
+    flash('Preset not found');
+    return;
+  }
+  forEachLeaf(root, disposeLeaf);
+  root = deserialize(preset.tree);
+  focusedLeaf = null;
+  selectedLeaves.clear();
+  render();
+
+  const loads = [];
+  forEachLeaf(root, (leaf) => {
+    if (leaf.folder) {
+      loads.push(loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf, true)));
+    }
+  });
+  await Promise.all(loads);
+  saveState();
+  setPresetsPanelOpen(false);
+  flash('Loaded preset “' + (preset.name || 'Untitled') + '”');
+}
+
+function renamePreset(id) {
+  const list = readPresets();
+  const preset = list.find((p) => p.id === id);
+  if (!preset) return;
+  const next = window.prompt('Rename preset', preset.name || '');
+  if (next == null) return;
+  const name = next.trim();
+  if (!name) {
+    flash('Preset name cannot be empty');
+    return;
+  }
+  if (list.some((p) => p.id !== id && p.name.toLowerCase() === name.toLowerCase())) {
+    flash('A preset with that name already exists');
+    return;
+  }
+  preset.name = name;
+  preset.updatedAt = Date.now();
+  writePresets(list);
+  renderPresetsList();
+  flash('Renamed preset to “' + name + '”');
+}
+
+function deletePreset(id) {
+  const list = readPresets();
+  const preset = list.find((p) => p.id === id);
+  if (!preset) return;
+  if (!window.confirm('Delete preset “' + (preset.name || 'Untitled') + '”?')) return;
+  writePresets(list.filter((p) => p.id !== id));
+  renderPresetsList();
+  flash('Deleted preset');
+}
+
+// ============================================================================
 // Idle / minimal-UI auto hide
 // ============================================================================
 let idleTimer = null;
@@ -1539,6 +1752,14 @@ function isTypingTarget(t) {
   return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
 }
 
+document.addEventListener('mousedown', (e) => {
+  if (!isPresetsPanelOpen()) return;
+  const t = e.target;
+  if (presetsPanel && presetsPanel.contains(t)) return;
+  if (btnPresets && (btnPresets === t || btnPresets.contains(t))) return;
+  setPresetsPanelOpen(false);
+});
+
 document.addEventListener('mousemove', onGlobalMouseMove);
 document.addEventListener('mousedown', wake);
 document.addEventListener('keydown', (e) => {
@@ -1562,7 +1783,11 @@ document.addEventListener('keydown', (e) => {
     case ' ':
       if (focusedLeaf) { e.preventDefault(); togglePlay(focusedLeaf); }
       break;
+    case 'p':
+      if (!e.ctrlKey && !e.metaKey) togglePresetsPanel();
+      break;
     case 'escape':
+      if (isPresetsPanelOpen()) { setPresetsPanelOpen(false); break; }
       if (selectedLeaves.size > 0) { clearSelection(); break; }
       if (settings.editMode) setEditMode(false);
       break;
@@ -1588,6 +1813,15 @@ btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
 btnTileDisplays.addEventListener('click', () => tileToDisplays());
 if (btnAssign) btnAssign.addEventListener('click', () => assignFolderToSelection());
+if (btnPresets) btnPresets.addEventListener('click', () => togglePresetsPanel());
+const btnPresetsClose = document.getElementById('btn-presets-close');
+if (btnPresetsClose) btnPresetsClose.addEventListener('click', () => setPresetsPanelOpen(false));
+if (btnPresetSave) btnPresetSave.addEventListener('click', () => saveCurrentPreset());
+if (presetNameInput) {
+  presetNameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveCurrentPreset(); }
+  });
+}
 btnMin.addEventListener('click', () => window.api.minimize());
 btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
