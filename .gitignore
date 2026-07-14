@@ -5,6 +5,8 @@ out/
 npm-debug.log*
 .DS_Store
 .cache/
+Launch.exe
+Local Video Tiler.exe
 
 # Local verification/screenshot artifacts
 smoke-shot.png

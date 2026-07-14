@@ -7,9 +7,42 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "lint": "node --check main.js && node --check preload.js && node --check src/renderer.js"
+    "lint": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check scripts/win-launcher.js",
+    "dist:win": "electron-builder --win portable --x64",
+    "pack:win": "electron-builder --win dir --x64",
+    "launcher:win": "npm install --no-save pkg@5.8.1 && npx pkg scripts/win-launcher.js --targets node18-win-x64 --output Launch.exe"
+  },
+  "build": {
+    "appId": "com.localvideotiler.app",
+    "productName": "Local Video Tiler",
+    "copyright": "Copyright © Local Video Tiler",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Local Video Tiler.${ext}",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "requestExecutionLevel": "user"
+    }
   },
   "devDependencies": {
-    "electron": "^31.0.0"
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
   }
 }

@@ -83,6 +83,36 @@ nothing is uploaded anywhere.
 
 ## Getting started
 
+### Windows (recommended)
+
+**Option A — run from this folder (simplest)**  
+Double-click:
+
+- **`Local Video Tiler.vbs`** — starts without a console window  
+- **`Launch.bat`** — same launch, with a console (handy on first install)
+
+The first launch runs `npm install` automatically. You need [Node.js](https://nodejs.org/) installed once.
+
+Optional helper `.exe` (same behavior as the `.bat`, still uses this project folder):
+
+```bash
+npm run launcher:win
+```
+
+That writes `Launch.exe` next to the project files.
+
+**Option B — standalone portable app (no Node.js on the PC)**  
+
+```bash
+npm install
+npm run dist:win
+```
+
+Copy `dist/Local Video Tiler.exe` anywhere and double-click it. Everything is
+bundled inside that portable executable.
+
+### From a terminal (any OS)
+
 ```bash
 npm install
 npm start
@@ -125,6 +155,11 @@ underlying codec is supported by your system's Chromium build.
 ```
 main.js        Electron main process: window, displays, fullscreen, IPC, folder reads
 preload.js     Secure contextBridge API exposed to the renderer
+Launch.bat     Windows double-click launcher (installs deps on first run)
+Local Video Tiler.vbs
+               Windows launcher without a console window
+scripts/win-launcher.js
+               Source for the optional Windows helper .exe (npm run launcher:win)
 src/index.html UI shell
 src/styles.css Styling, auto-hide chrome, grid + preview visuals
 src/renderer.js Tiling engine, edit mode, media playback, snap/grid, persistence
