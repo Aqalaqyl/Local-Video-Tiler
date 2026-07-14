@@ -17,6 +17,8 @@
 const VIDEO_EXTS_HINT = 'mp4, webm, mov, mkv, avi, …';
 const LS_KEY = 'lvt.state.v1';
 const PRESETS_KEY = 'lvt.presets.v1';
+/** Per-tile volume ceiling (2.0 = 200% boost, VLC-style). */
+const MAX_TILE_VOLUME = 2;
 
 // ---------------------------------------------------------------- DOM handles
 const stage = document.getElementById('stage');
@@ -333,26 +335,80 @@ function stopVideoElement(video) {
   } catch (_) { /* ignore */ }
 }
 
-/** Apply per-tile volume/mute to the live <video>, respecting projection mirrors. */
+/** Apply per-tile volume/mute. Values above 1.0 boost via Web Audio (up to 200%). */
 function applyTileAudio(leaf) {
   if (!leaf.video) return;
-  const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, 1);
+  const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
   leaf.volume = vol;
-  if (projection.active && projection.role === 'mirror') {
-    leaf.video.muted = true;
-    return;
+  const mirror = projection.active && projection.role === 'mirror';
+  const muted = mirror || !!leaf.muted || vol === 0;
+
+  const graph = ensureTileAudioGraph(leaf);
+  if (graph) {
+    resumeAudioContext();
+    // Element stays at unity; GainNode carries 0–200% (and mute).
+    try { leaf.video.volume = 1; } catch (_) { /* ignore */ }
+    leaf.video.muted = false;
+    try { graph.gain.gain.value = muted ? 0 : vol; } catch (_) { /* ignore */ }
+  } else {
+    // No Web Audio: native volume cannot exceed 100%.
+    leaf.video.volume = Math.min(vol, 1);
+    leaf.video.muted = muted;
   }
-  leaf.video.volume = vol;
-  leaf.video.muted = !!leaf.muted || vol === 0;
+
   if (leaf.refs) {
+    leaf.refs.vol.max = String(MAX_TILE_VOLUME);
     leaf.refs.vol.value = String(vol);
-    leaf.refs.mute.textContent = leaf.video.muted ? '🔇' : '🔊';
+    leaf.refs.vol.classList.toggle('boosted', vol > 1);
+    const pct = Math.round(vol * 100);
+    leaf.refs.vol.title =
+      `Volume ${pct}%` + (vol > 1 ? ' (boost)' : '') + ' — scroll wheel over tile (up to 200%)';
+    leaf.refs.mute.textContent = muted ? '🔇' : (vol > 1 ? '🔊+' : '🔊');
+    leaf.refs.mute.title = muted ? 'Unmute' : (vol > 1 ? `Boosted ${pct}%` : 'Mute');
+    if (leaf.refs.volPct) {
+      leaf.refs.volPct.textContent = pct + '%';
+      leaf.refs.volPct.classList.toggle('boosted', vol > 1);
+    }
+  }
+}
+
+let sharedAudioCtx = null;
+function getAudioContext() {
+  if (sharedAudioCtx) return sharedAudioCtx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  try { sharedAudioCtx = new AC(); } catch (_) { return null; }
+  return sharedAudioCtx;
+}
+
+function resumeAudioContext() {
+  const ctx = getAudioContext();
+  if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+}
+
+/** Wire a GainNode once per tile so volume can exceed the HTMLMediaElement 100% cap. */
+function ensureTileAudioGraph(leaf) {
+  if (!leaf || !leaf.video) return null;
+  if (leaf._audioGraph) return leaf._audioGraph;
+  const ctx = getAudioContext();
+  if (!ctx) return null;
+  try {
+    const source = ctx.createMediaElementSource(leaf.video);
+    const gain = ctx.createGain();
+    gain.gain.value = 1;
+    source.connect(gain);
+    gain.connect(ctx.destination);
+    leaf._audioGraph = { source, gain, ctx };
+    return leaf._audioGraph;
+  } catch (_) {
+    // Already connected or unsupported — fall back to element volume.
+    return null;
   }
 }
 
 function setTileVolume(leaf, volume, opts = {}) {
   if (!leaf) return;
-  leaf.volume = clamp(volume, 0, 1);
+  leaf.volume = clamp(volume, 0, MAX_TILE_VOLUME);
   if (leaf.volume > 0 && !opts.keepMuted) leaf.muted = false;
   applyTileAudio(leaf);
   if (!opts.skipSave) saveState();
@@ -360,6 +416,18 @@ function setTileVolume(leaf, volume, opts = {}) {
 
 function adjustTileVolume(leaf, delta) {
   setTileVolume(leaf, (leaf.volume == null ? 1 : leaf.volume) + delta);
+  showVolumeHint(leaf);
+}
+
+let volumeHintTimer = null;
+function showVolumeHint(leaf) {
+  if (!leaf) return;
+  const pct = Math.round((leaf.volume == null ? 1 : leaf.volume) * 100);
+  const boost = (leaf.volume || 0) > 1 ? ' · boost' : '';
+  toast.innerHTML = '<strong>Tile volume: ' + pct + '%' + boost + '</strong>';
+  toast.classList.add('show');
+  clearTimeout(volumeHintTimer);
+  volumeHintTimer = setTimeout(() => toast.classList.remove('show'), 900);
 }
 
 function snapshotSettings() {
@@ -419,7 +487,7 @@ function applyIncomingLayout(payload) {
         leaf.loop = node ? !!node.loop : false;
         leaf.spacer = spacer;
         if (node) {
-          if (typeof node.volume === 'number') leaf.volume = clamp(node.volume, 0, 1);
+          if (typeof node.volume === 'number') leaf.volume = clamp(node.volume, 0, MAX_TILE_VOLUME);
           if (node.muted != null) leaf.muted = !!node.muted;
         }
         if (leaf.el) leaf.el.classList.toggle('pad-spacer', spacer);
@@ -658,7 +726,8 @@ function ensureLeafEl(leaf) {
     <input class="seek" type="range" min="0" max="1000" value="0" title="Seek" />
     <span class="time">0:00 / 0:00</span>
     <button class="mute" title="Mute">🔊</button>
-    <input class="vol" type="range" min="0" max="1" step="0.05" value="1" title="Volume (scroll wheel over tile)" />
+    <input class="vol" type="range" min="0" max="2" step="0.05" value="1" title="Volume / boost up to 200% (scroll wheel over tile)" />
+    <span class="vol-pct">100%</span>
     <span class="title"></span>
     <button class="close" title="Close tile">✕</button>`;
 
@@ -689,6 +758,7 @@ function ensureLeafEl(leaf) {
     time: toolbar.querySelector('.time'),
     mute: toolbar.querySelector('.mute'),
     vol: toolbar.querySelector('.vol'),
+    volPct: toolbar.querySelector('.vol-pct'),
     title: toolbar.querySelector('.title'),
     close: toolbar.querySelector('.close'),
     del
@@ -749,6 +819,7 @@ function wireLeafEvents(leaf) {
   refs.vol.addEventListener('input', (e) => {
     e.stopPropagation();
     setTileVolume(leaf, parseFloat(refs.vol.value));
+    showVolumeHint(leaf);
   });
   refs.mute.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -761,7 +832,8 @@ function wireLeafEvents(leaf) {
     if (leaf.spacer || !leaf.files.length) return;
     if (e.target.closest('.tile-toolbar')) return;
     e.preventDefault();
-    const step = e.shiftKey ? 0.01 : 0.05;
+    resumeAudioContext();
+    const step = e.shiftKey ? 0.02 : 0.08;
     adjustTileVolume(leaf, e.deltaY < 0 ? step : -step);
   }, { passive: false });
 
@@ -1305,7 +1377,7 @@ function serializeTree(node, withIndex) {
     const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop };
     if (node.spacer) o.spacer = true;
     if (withIndex) o.index = node.index;
-    if (node.volume != null && node.volume !== 1) o.volume = node.volume;
+    o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
     if (node.muted) o.muted = true;
     return o;
   }
@@ -1326,7 +1398,7 @@ function deserialize(obj) {
     l.folder = obj.folder || null;
     l.index = l.savedIndex = obj.index || 0;
     l.loop = !!obj.loop;
-    l.volume = typeof obj.volume === 'number' ? clamp(obj.volume, 0, 1) : 1;
+    l.volume = typeof obj.volume === 'number' ? clamp(obj.volume, 0, MAX_TILE_VOLUME) : 1;
     l.muted = !!obj.muted;
     return l;
   }
@@ -1381,7 +1453,7 @@ function serializePresetTree(node) {
   if (node.kind === 'leaf') {
     const o = { kind: 'leaf', folder: node.folder || null, loop: !!node.loop };
     if (node.spacer) o.spacer = true;
-    o.volume = clamp(node.volume == null ? 1 : node.volume, 0, 1);
+    o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
     if (node.muted) o.muted = true;
     return o;
   }
@@ -1854,7 +1926,7 @@ function tileToDisplays(opts = {}) {
   newLeaves.forEach((leaf, i) => {
     const s = saved[i];
     if (!s) return;
-    if (typeof s.volume === 'number') leaf.volume = s.volume;
+    if (typeof s.volume === 'number') leaf.volume = clamp(s.volume, 0, MAX_TILE_VOLUME);
     if (s.muted != null) leaf.muted = !!s.muted;
     leaf.loop = !!s.loop;
     if (s.folder) loadFolder(leaf, s.folder, s.index || 0, false);
@@ -1890,6 +1962,7 @@ document.addEventListener('mousedown', (e) => {
 
 document.addEventListener('mousemove', onGlobalMouseMove);
 document.addEventListener('mousedown', wake);
+document.addEventListener('mousedown', () => resumeAudioContext());
 document.addEventListener('keydown', (e) => {
   wake();
   if (e.key === 'Shift' && settings.editMode) updatePreview(lastMouse.x, lastMouse.y, true);
