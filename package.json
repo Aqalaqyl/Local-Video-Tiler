@@ -7,10 +7,12 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "lint": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check scripts/win-launcher.js",
-    "dist:win": "electron-builder --win portable --x64",
+    "lint": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check scripts/win-launcher.js && node --check scripts/copy-win-launcher.js",
     "pack:win": "electron-builder --win dir --x64",
-    "launcher:win": "npm install --no-save pkg@5.8.1 && npx pkg scripts/win-launcher.js --targets node18-win-x64 --output Launch.exe"
+    "launcher:win": "npm install --no-save pkg@5.8.1 && npx pkg scripts/win-launcher.js --targets node18-win-x64 --output \"Local Video Tiler.exe\" && node scripts/copy-win-launcher.js",
+    "dist:win": "npm run pack:win && npm run launcher:win",
+    "dist:win:setup": "electron-builder --win nsis --x64",
+    "dist:win:portable": "electron-builder --win portable --x64"
   },
   "build": {
     "appId": "com.localvideotiler.app",
@@ -28,17 +30,31 @@
     "win": {
       "target": [
         {
-          "target": "portable",
+          "target": "dir",
           "arch": [
             "x64"
           ]
         }
       ],
-      "artifactName": "Local Video Tiler.${ext}",
+      "artifactName": "Local Video Tiler Setup.${ext}",
       "signAndEditExecutable": false
     },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Local Video Tiler",
+      "runAfterFinish": true,
+      "uninstallDisplayName": "Local Video Tiler",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Local Video Tiler Setup.${ext}"
+    },
     "portable": {
-      "requestExecutionLevel": "user"
+      "requestExecutionLevel": "user",
+      "artifactName": "Local Video Tiler Portable.${ext}"
     }
   },
   "devDependencies": {

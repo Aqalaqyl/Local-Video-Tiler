@@ -7,6 +7,8 @@ npm-debug.log*
 .cache/
 Launch.exe
 Local Video Tiler.exe
+Local Video Tiler Setup.exe
+Local Video Tiler Portable.exe
 
 # Local verification/screenshot artifacts
 smoke-shot.png

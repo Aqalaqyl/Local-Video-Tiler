@@ -85,31 +85,39 @@ nothing is uploaded anywhere.
 
 ### Windows (recommended)
 
-**Option A — run from this folder (simplest)**  
-Double-click:
+#### Installer + launcher (`Local Video Tiler.exe`)
 
-- **`Local Video Tiler.vbs`** — starts without a console window  
-- **`Launch.bat`** — same launch, with a console (handy on first install)
-
-The first launch runs `npm install` automatically. You need [Node.js](https://nodejs.org/) installed once.
-
-Optional helper `.exe` (same behavior as the `.bat`, still uses this project folder):
-
-```bash
-npm run launcher:win
-```
-
-That writes `Launch.exe` next to the project files.
-
-**Option B — standalone portable app (no Node.js on the PC)**  
+Build:
 
 ```bash
 npm install
 npm run dist:win
 ```
 
-Copy `dist/Local Video Tiler.exe` anywhere and double-click it. Everything is
-bundled inside that portable executable.
+This creates a ready-to-ship folder under `dist/`:
+
+1. **`dist/win-unpacked/`** — packaged app payload  
+2. **`dist/Local Video Tiler.exe`** — installer **and** launcher (also copied to the project root)
+
+**How `Local Video Tiler.exe` works**
+
+| Situation | What it does |
+| --- | --- |
+| App already installed | Launches immediately |
+| Not installed yet | Installs prerequisites + the program into `%LOCALAPPDATA%\Local Video Tiler\`, creates Desktop and Start Menu shortcuts, then launches |
+
+Ship the contents of **`dist/`** (the exe next to `win-unpacked/`). On first run the exe copies the unpacked app into the user install folder; later runs just launch.
+
+You can also double-click **`Local Video Tiler.vbs`** or **`Launch.bat`** — they use the same install-or-launch behavior.
+
+If you run the launcher from the source tree without `win-unpacked`, the first install needs [Node.js LTS](https://nodejs.org/) once so Electron can be downloaded.
+
+#### Optional: classic NSIS setup / portable (build on Windows)
+
+```bash
+npm run dist:win:setup      # → dist/Local Video Tiler Setup.exe
+npm run dist:win:portable   # → dist/Local Video Tiler Portable.exe
+```
 
 ### From a terminal (any OS)
 
@@ -155,11 +163,11 @@ underlying codec is supported by your system's Chromium build.
 ```
 main.js        Electron main process: window, displays, fullscreen, IPC, folder reads
 preload.js     Secure contextBridge API exposed to the renderer
-Launch.bat     Windows double-click launcher (installs deps on first run)
+Launch.bat     Windows install-or-launch script
 Local Video Tiler.vbs
-               Windows launcher without a console window
+               Quiet Windows install-or-launch entry point
 scripts/win-launcher.js
-               Source for the optional Windows helper .exe (npm run launcher:win)
+               Source for Local Video Tiler.exe (installer + launcher)
 src/index.html UI shell
 src/styles.css Styling, auto-hide chrome, grid + preview visuals
 src/renderer.js Tiling engine, edit mode, media playback, snap/grid, persistence
