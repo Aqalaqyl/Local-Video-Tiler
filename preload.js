@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   // Media / folders
   pickFolder: () => ipcRenderer.invoke('dialog:pickFolder'),
   readFolder: (folderPath) => ipcRenderer.invoke('media:readFolder', folderPath),
+  deleteFile: (filePath, folderPath) => ipcRenderer.invoke('media:deleteFile', filePath, folderPath),
 
   // Displays
   getDisplayInfo: () => ipcRenderer.invoke('display:getInfo'),

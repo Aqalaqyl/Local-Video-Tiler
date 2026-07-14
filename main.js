@@ -298,6 +298,37 @@ ipcMain.handle('media:readFolder', async (_event, folderPath) => {
   }
 });
 
+/** Permanently delete a video file that belongs to an assigned media folder. */
+ipcMain.handle('media:deleteFile', async (_event, filePath, folderPath) => {
+  if (!filePath || !folderPath) return { ok: false, error: 'Missing path' };
+  const resolvedFile = path.resolve(filePath);
+  const resolvedFolder = path.resolve(folderPath);
+  const rel = path.relative(resolvedFolder, resolvedFile);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return { ok: false, error: 'File is outside the assigned folder' };
+  }
+  if (!VIDEO_EXTENSIONS.has(path.extname(resolvedFile).toLowerCase())) {
+    return { ok: false, error: 'Not a supported video file' };
+  }
+  const parent = BrowserWindow.getFocusedWindow() || mainWindow;
+  const result = await dialog.showMessageBox(parent || undefined, {
+    type: 'warning',
+    buttons: ['Delete', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Delete video',
+    message: 'Delete this video permanently?',
+    detail: path.basename(resolvedFile) + '\n\nThis cannot be undone.'
+  });
+  if (result.response !== 0) return { ok: false, cancelled: true };
+  try {
+    await fs.promises.unlink(resolvedFile);
+    return { ok: true, path: resolvedFile };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
 ipcMain.handle('display:getInfo', () => {
   const displays = screen.getAllDisplays();
   const primaryId = screen.getPrimaryDisplay().id;

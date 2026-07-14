@@ -143,6 +143,8 @@ body.span-all .hintbox {
   border: 1px solid rgba(255,255,255,0.14);
 }
 .node-leaf.focused { box-shadow: inset 0 0 0 2px var(--accent); }
+.node-leaf.selected { box-shadow: inset 0 0 0 2px var(--accent-2); }
+.node-leaf.selected.focused { box-shadow: inset 0 0 0 2px var(--accent-2), 0 0 0 1px var(--accent); }
 
 /* Invisible padding tiles used to fit displays of different sizes into the union canvas. */
 .node-leaf.pad-spacer {
@@ -238,6 +240,11 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
 .tile-toolbar .vol { width: 70px; }
 .tile-toolbar .time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .tile-toolbar .close { color: var(--danger); border-color: rgba(255,91,110,0.4); }
+.tile-toolbar .trash {
+  color: var(--danger);
+  border-color: rgba(255,91,110,0.4);
+}
+.tile-toolbar .trash:hover { background: rgba(255,91,110,0.18); }
 
 /* Always-visible delete badge while editing (top-right of each tile). */
 .tile-del {
