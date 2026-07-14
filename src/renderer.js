@@ -38,6 +38,7 @@ const btnGuide = document.getElementById('btn-guide');
 const btnTileDisplays = document.getElementById('btn-tile-displays');
 const btnAssign = document.getElementById('btn-assign');
 const btnPresets = document.getElementById('btn-presets');
+const btnPreview = document.getElementById('btn-preview');
 const presetsPanel = document.getElementById('presets-panel');
 const presetsList = document.getElementById('presets-list');
 const btnPresetSave = document.getElementById('btn-preset-save');
@@ -53,7 +54,9 @@ const settings = {
   gridOn: false,
   snapOn: false,
   cellSize: 80,
-  guideOn: false
+  guideOn: false,
+  /** Scaled multi-monitor desk in the window for editing without fullscreen. */
+  desktopPreview: true
 };
 
 // Latest window/display geometry pushed from the main process. Used to draw the
@@ -113,6 +116,7 @@ function applyProjection() {
   // every display instead of restarting at each window's edge.
   const layers = [stage, gridOverlay];
   if (on) {
+    document.body.classList.remove('desktop-preview');
     const offX = projOffX();
     const offY = projOffY();
     const vw = projection.viewport.width;
@@ -128,17 +132,134 @@ function applyProjection() {
       el.style.clipPath = clip;
     }
   } else {
-    for (const el of layers) {
-      el.style.left = '';
-      el.style.top = '';
-      el.style.right = '';
-      el.style.bottom = '';
-      el.style.width = '';
-      el.style.height = '';
-      el.style.clipPath = '';
-    }
+    applyDesktopPreview();
   }
   scheduleProjectionPlayback();
+}
+
+function clearStageGeometry() {
+  for (const el of [stage, gridOverlay]) {
+    el.style.left = '';
+    el.style.top = '';
+    el.style.right = '';
+    el.style.bottom = '';
+    el.style.width = '';
+    el.style.height = '';
+    el.style.clipPath = '';
+  }
+}
+
+/**
+ * Whether the windowed miniature multi-monitor desk should drive stage geometry.
+ * Disabled while projecting / spanning; useful with 1+ displays so tiles match
+ * physical proportions before going fullscreen.
+ */
+function shouldUseDesktopPreview() {
+  if (projection.active || IS_MIRROR) return false;
+  if (winState.spanningAllDisplays) return false;
+  if (!settings.desktopPreview) return false;
+  // Miniature desk is for arranging multi-monitor layouts in a window.
+  return (winState.displays || []).length >= 2;
+}
+
+/**
+ * Scaled placement of the multi-monitor union inside the app window — shared by
+ * the stage miniature and the display-guide labels.
+ */
+function getDesktopPreviewLayout() {
+  const displays = winState.displays || [];
+  if (!displays.length) return null;
+  const u = unionBounds(displays);
+  if (!(u.width > 0 && u.height > 0)) return null;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const marginX = 28;
+  const marginBottom = 28;
+  const topPad = 56;
+  const availW = Math.max(120, vw - marginX * 2);
+  const availH = Math.max(120, vh - topPad - marginBottom);
+  const scale = Math.min(availW / u.width, availH / u.height, 1);
+  const width = u.width * scale;
+  const height = u.height * scale;
+  const left = (vw - width) / 2;
+  const top = topPad + Math.max(0, (availH - height) / 2);
+  return { union: u, scale, left, top, width, height, displays };
+}
+
+/** Size/position the stage as a miniature of the user's physical desk layout. */
+function applyDesktopPreview() {
+  if (projection.active) return;
+  const layout = shouldUseDesktopPreview() ? getDesktopPreviewLayout() : null;
+  document.body.classList.toggle('desktop-preview', !!layout);
+  if (btnPreview) {
+    btnPreview.classList.toggle('active', !!settings.desktopPreview && !projection.active && !winState.spanningAllDisplays);
+    btnPreview.disabled = projection.active || !!winState.spanningAllDisplays;
+  }
+  if (!layout) {
+    clearStageGeometry();
+    return;
+  }
+  for (const el of [stage, gridOverlay]) {
+    el.style.left = layout.left + 'px';
+    el.style.top = layout.top + 'px';
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+    el.style.width = layout.width + 'px';
+    el.style.height = layout.height + 'px';
+    el.style.clipPath = '';
+  }
+}
+
+function setDesktopPreview(on) {
+  settings.desktopPreview = !!on;
+  if (btnPreview) btnPreview.classList.toggle('active', !!settings.desktopPreview);
+  if (settings.desktopPreview && (winState.displays || []).length >= 2) {
+    settings.guideOn = true;
+    if (btnGuide) btnGuide.classList.toggle('active', true);
+  }
+  applyDesktopPreview();
+  renderDisplayGuide();
+  if (settings.desktopPreview) maybeTileForDesktopPreview();
+  saveState();
+  if (settings.desktopPreview) {
+    flash('Desktop preview — edit tiles in the miniature layout');
+  }
+}
+
+function countContentLeaves() {
+  let n = 0;
+  forEachLeaf(root, (l) => { if (!l.spacer) n++; });
+  return n;
+}
+
+/** If the layout is still coarser than the desk, carve one tile per display. */
+function maybeTileForDesktopPreview() {
+  const displays = winState.displays || [];
+  if (displays.length < 2 || !settings.desktopPreview) return false;
+  if (projection.active || winState.spanningAllDisplays) return false;
+  if (countContentLeaves() >= displays.length) {
+    applyDesktopPreview();
+    return false;
+  }
+  tileToDisplays({ quiet: true });
+  return true;
+}
+
+let desktopPreviewBootstrapped = false;
+/** On first display geometry, present the miniature desk for windowed editing. */
+function bootstrapDesktopPreview() {
+  if (IS_MIRROR || projection.active || desktopPreviewBootstrapped) return;
+  if (!(winState.displays || []).length) return;
+  desktopPreviewBootstrapped = true;
+  if (settings.desktopPreview == null) settings.desktopPreview = true;
+  if ((winState.displays || []).length >= 2 && settings.desktopPreview) {
+    if (!settings.guideOn) setGuide(true);
+    else applyDesktopPreview();
+    maybeTileForDesktopPreview();
+    flash('Desktop preview — edit tiles here, then Fullscreen or All Displays when ready');
+  } else {
+    applyDesktopPreview();
+  }
 }
 
 let projectionPlaybackRaf = 0;
@@ -455,6 +576,7 @@ function render() {
   stage.appendChild(renderNode(root));
   applySelection();
   if (projection.active) applyProjection();
+  else applyDesktopPreview();
   positionTileBadges();
   saveState();
 }
@@ -1239,8 +1361,11 @@ function loadState() {
   setSnap(!!settings.snapOn);
   setEditMode(!!settings.editMode);
   setGuide(!!settings.guideOn);
+  if (settings.desktopPreview == null) settings.desktopPreview = true;
+  if (btnPreview) btnPreview.classList.toggle('active', !!settings.desktopPreview);
 
   render();
+  applyDesktopPreview();
 
   // Repopulate media for any leaf that had a folder assigned, then shuffle to a
   // random clip so launch matches the documented random-start behaviour.
@@ -1503,6 +1628,7 @@ function setGuide(on) {
   btnGuide.classList.toggle('active', on);
   saveState();
   renderDisplayGuide();
+  applyDesktopPreview();
 }
 
 /**
@@ -1519,10 +1645,7 @@ function renderDisplayGuide() {
   displayGuide.classList.toggle('visible', show);
   if (!show) { displayGuide.textContent = ''; return; }
 
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
   const span = winState.spanningAllDisplays && winState.windowBounds;
-
   let map;
   if (span) {
     const win = winState.windowBounds;
@@ -1533,20 +1656,18 @@ function renderDisplayGuide() {
       height: b.height
     });
   } else {
-    const u = unionBounds(displays);
-    const margin = 36;
-    const scale = Math.min((vw - margin * 2) / u.width, (vh - margin * 2) / u.height, 1);
-    const offX = (vw - u.width * scale) / 2;
-    const offY = (vh - u.height * scale) / 2;
+    const layout = getDesktopPreviewLayout();
+    if (!layout) { displayGuide.textContent = ''; return; }
     map = (b) => ({
-      left: offX + (b.x - u.x) * scale,
-      top: offY + (b.y - u.y) * scale,
-      width: b.width * scale,
-      height: b.height * scale
+      left: layout.left + (b.x - layout.union.x) * layout.scale,
+      top: layout.top + (b.y - layout.union.y) * layout.scale,
+      width: b.width * layout.scale,
+      height: b.height * layout.scale
     });
   }
 
   displayGuide.classList.toggle('preview', !span);
+  displayGuide.classList.toggle('aligned', !span && !!settings.desktopPreview);
   displayGuide.textContent = '';
   for (const d of displays) {
     const r = map(d.bounds);
@@ -1705,15 +1826,15 @@ function collectLeaves(node, out = []) {
   return out;
 }
 
-function tileToDisplays() {
+function tileToDisplays(opts = {}) {
   const displays = winState.displays || [];
   if (displays.length < 2) {
-    flash('Tile to Displays needs 2+ connected displays');
+    if (!opts.quiet) flash('Tile to Displays needs 2+ connected displays');
     return;
   }
   // Preserve current folder assignments in reading order.
   const oldLeaves = collectLeaves(root);
-  const saved = oldLeaves.map((l) => ({ folder: l.folder, index: l.index }));
+  const saved = oldLeaves.map((l) => ({ folder: l.folder, index: l.index, volume: l.volume, muted: l.muted, loop: l.loop }));
 
   forEachLeaf(root, disposeLeaf);
   const union = unionBounds(displays);
@@ -1726,15 +1847,22 @@ function tileToDisplays() {
   focusedLeaf = null;
   selectedLeaves.clear();
   render();
+  applyDesktopPreview();
+  renderDisplayGuide();
 
-  const newLeaves = collectLeaves(root);
+  const newLeaves = collectLeaves(root).filter((l) => !l.spacer);
   newLeaves.forEach((leaf, i) => {
     const s = saved[i];
-    if (s && s.folder) loadFolder(leaf, s.folder, s.index || 0, false);
+    if (!s) return;
+    if (typeof s.volume === 'number') leaf.volume = s.volume;
+    if (s.muted != null) leaf.muted = !!s.muted;
+    leaf.loop = !!s.loop;
+    if (s.folder) loadFolder(leaf, s.folder, s.index || 0, false);
   });
 
-  flash(`Tiled layout to match ${displays.length} displays`);
+  if (!opts.quiet) flash(`Tiled layout to match ${displays.length} displays`);
   if (!settings.guideOn) setGuide(true);
+  else applyDesktopPreview();
 }
 
 let flashTimer = null;
@@ -1774,6 +1902,7 @@ document.addEventListener('keydown', (e) => {
     case 'f': window.api.toggleFullscreen(); break;
     case 'a': window.api.toggleSpanAll(); break;
     case 'd': setGuide(!settings.guideOn); break;
+    case 'v': setDesktopPreview(!settings.desktopPreview); break;
     case 't': tileToDisplays(); break;
     case 'delete':
     case 'backspace':
@@ -1811,6 +1940,7 @@ btnReset.addEventListener('click', () => {
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
+if (btnPreview) btnPreview.addEventListener('click', () => setDesktopPreview(!settings.desktopPreview));
 btnTileDisplays.addEventListener('click', () => tileToDisplays());
 if (btnAssign) btnAssign.addEventListener('click', () => assignFolderToSelection());
 if (btnPresets) btnPresets.addEventListener('click', () => togglePresetsPanel());
@@ -1839,8 +1969,10 @@ function applyWindowState(state) {
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
   void wasSpanningAll;
+  if (!projection.active) applyDesktopPreview();
   renderDisplayGuide();
   positionTileBadges();
+  bootstrapDesktopPreview();
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -1879,8 +2011,9 @@ window.api.onDisplayChanged(() => refreshDisplays());
 
 window.addEventListener('resize', () => {
   if (settings.editMode) hidePreview();
-  renderDisplayGuide();
   if (projection.active) applyProjection();
+  else applyDesktopPreview();
+  renderDisplayGuide();
   positionTileBadges();
 });
 
