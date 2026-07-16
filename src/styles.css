@@ -163,6 +163,9 @@ body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.8)
   display: block;
   background: #000;
   object-fit: contain;
+  /* Promote each video plane to its own compositor layer (GPU when available). */
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .tile-empty {

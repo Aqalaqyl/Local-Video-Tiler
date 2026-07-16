@@ -6,7 +6,9 @@ Carve the screen into as many panes as you like, point each pane at a folder of
 media, and let everything play side by side.
 
 Built with [Electron](https://www.electronjs.org/) — everything runs locally,
-nothing is uploaded anywhere.
+nothing is uploaded anywhere. Playback prefers **GPU** compositing and hardware
+video decode when available, and falls back to the **CPU** automatically. A
+background check keeps each tile on the correct clip with audio/video in sync.
 
 ## Features
 

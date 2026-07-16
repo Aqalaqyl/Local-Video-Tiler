@@ -182,11 +182,21 @@ function reconcileProjectionPlayback() {
       } else {
         applyTileAudio(leaf);
         leaf.video.loop = !!leaf.loop;
-        if (wasPlaying) leaf.video.play().catch(() => {});
-        else leaf.video.pause();
+        if (wasPlaying) {
+          leaf._wantPlaying = true;
+          leaf.video.play().catch(() => {});
+          armVideoFrameWatch(leaf);
+        } else {
+          leaf._wantPlaying = false;
+          leaf.video.pause();
+        }
+        resetLeafSyncClock(leaf);
       }
     } else {
+      leaf._wantPlaying = false;
       pauseVideoElement(leaf.video);
+      applyTileAudio(leaf);
+      resetLeafSyncClock(leaf);
     }
   });
 }
@@ -205,6 +215,195 @@ function stopVideoElement(video) {
   } catch (_) { /* ignore */ }
 }
 
+// ----------------------------------------------------------- A/V sync watchdog
+// Under heavy load the decoder can stall or drift from the audio clock. We
+// periodically verify each tile is on the right file with correct mute/volume,
+// and gently resync (seek-to-self + play) when wall-clock vs media-clock diverge.
+const PLAYBACK_AUDIT_MS = 2000;
+const SYNC_SAMPLE_SEC = 1.0;
+const STALL_RATIO = 0.45;
+const JUMP_SLACK_SEC = 0.75;
+const REPAIR_COOLDOWN_MS = 4000;
+const DROPPED_FRAME_BURST = 18;
+
+let playbackAuditTimer = 0;
+
+function resetLeafSyncClock(leaf) {
+  if (!leaf) return;
+  leaf._syncWall = performance.now();
+  leaf._syncMedia = leaf.video && isFinite(leaf.video.currentTime) ? leaf.video.currentTime : 0;
+}
+
+function configureVideoElement(video) {
+  if (!video) return;
+  video.playsInline = true;
+  video.setAttribute('playsinline', '');
+  video.setAttribute('webkit-playsinline', '');
+  video.preload = 'auto';
+  try { video.disablePictureInPicture = true; } catch (_) { /* ignore */ }
+  try { video.disableRemotePlayback = true; } catch (_) { /* ignore */ }
+}
+
+function armVideoFrameWatch(leaf) {
+  const video = leaf && leaf.video;
+  if (!video || typeof video.requestVideoFrameCallback !== 'function') return;
+  if (leaf._frameWatchArmed) return;
+  leaf._frameWatchArmed = true;
+  const tick = (_now, meta) => {
+    if (!leaf.video || leaf.video !== video) {
+      leaf._frameWatchArmed = false;
+      return;
+    }
+    leaf._lastFrameWall = performance.now();
+    leaf._lastFrameMedia = meta && typeof meta.mediaTime === 'number' ? meta.mediaTime : video.currentTime;
+    if (!video.paused && !video.ended) {
+      try { video.requestVideoFrameCallback(tick); }
+      catch (_) { leaf._frameWatchArmed = false; }
+    } else {
+      leaf._frameWatchArmed = false;
+    }
+  };
+  try { video.requestVideoFrameCallback(tick); }
+  catch (_) { leaf._frameWatchArmed = false; }
+}
+
+/**
+ * Soft A/V repair: re-apply mute/volume, optionally reload the correct source,
+ * otherwise seek to the current time to flush desynced decoder buffers.
+ */
+function repairLeafPlayback(leaf, reason) {
+  if (!leaf || !leaf.video || leaf.spacer) return;
+  const video = leaf.video;
+  const now = performance.now();
+  if (leaf._syncRepairAt && now - leaf._syncRepairAt < REPAIR_COOLDOWN_MS) return;
+  leaf._syncRepairAt = now;
+
+  const cur = leaf.files[leaf.index];
+  const shouldPlay = !video.paused && !video.ended;
+
+  if (cur && videoSourceUrl(video) && !sourcesMatch(video, cur.url)) {
+    loadCurrent(leaf, shouldPlay || !!leaf._wantPlaying);
+    resetLeafSyncClock(leaf);
+    return;
+  }
+
+  applyTileAudio(leaf);
+  video.loop = !!leaf.loop;
+
+  if (video.readyState >= 2 && isFinite(video.currentTime) && !video.seeking) {
+    const t = video.currentTime;
+    // Briefly mute during the seek so a desynced burst doesn't pile on.
+    try { video.muted = true; } catch (_) { /* ignore */ }
+    try { video.currentTime = t; } catch (_) { /* ignore */ }
+    applyTileAudio(leaf);
+  }
+
+  if (shouldPlay || leaf._wantPlaying) {
+    video.play().catch(() => {});
+  }
+  armVideoFrameWatch(leaf);
+  resetLeafSyncClock(leaf);
+  if (reason) {
+    // Quiet diagnostics for troubleshooting lag/desync without spamming the UI.
+    try { console.debug('[playback-sync] repaired', leaf.id, reason); } catch (_) { /* ignore */ }
+  }
+}
+
+function auditLeafPlayback(leaf) {
+  if (!leaf || leaf.spacer || !leaf.video || !leaf.files.length) return;
+  const video = leaf.video;
+  const cur = leaf.files[leaf.index];
+
+  // Off-slice tiles while projecting should stay paused and silent.
+  if (projection.active && !isLeafVisible(leaf)) {
+    if (!video.paused) pauseVideoElement(video);
+    applyTileAudio(leaf);
+    resetLeafSyncClock(leaf);
+    return;
+  }
+
+  // Wrong clip loaded for this tile's playlist index.
+  if (cur && videoSourceUrl(video) && !sourcesMatch(video, cur.url) && video.readyState > 0) {
+    repairLeafPlayback(leaf, 'wrong-source');
+    return;
+  }
+
+  // Enforce mute/volume (mirrors always silent; user mute respected elsewhere).
+  applyTileAudio(leaf);
+
+  if (video.paused || video.ended || video.seeking || video.readyState < 2) {
+    resetLeafSyncClock(leaf);
+    leaf._wantPlaying = !video.paused && !video.ended;
+    return;
+  }
+
+  leaf._wantPlaying = true;
+  armVideoFrameWatch(leaf);
+
+  const now = performance.now();
+  if (leaf._syncWall == null) {
+    resetLeafSyncClock(leaf);
+    return;
+  }
+
+  const wallDelta = (now - leaf._syncWall) / 1000;
+  if (wallDelta < SYNC_SAMPLE_SEC) return;
+
+  const mediaDelta = video.currentTime - (leaf._syncMedia || 0);
+
+  // Decoder stall / A/V drift: media clock lagged far behind wall clock.
+  if (mediaDelta >= 0 && mediaDelta < wallDelta * STALL_RATIO) {
+    repairLeafPlayback(leaf, 'stall');
+    return;
+  }
+  // Unexpected jump ahead of wall clock.
+  if (mediaDelta > wallDelta + JUMP_SLACK_SEC) {
+    repairLeafPlayback(leaf, 'jump');
+    return;
+  }
+
+  // Frames frozen while the media clock keeps advancing → classic lip-sync drift.
+  if (leaf._lastFrameWall != null && (now - leaf._lastFrameWall) > 900 && wallDelta >= SYNC_SAMPLE_SEC) {
+    repairLeafPlayback(leaf, 'frozen-frames');
+    return;
+  }
+
+  if (typeof video.getVideoPlaybackQuality === 'function') {
+    const q = video.getVideoPlaybackQuality();
+    const dropped = q.droppedVideoFrames || 0;
+    const total = q.totalVideoFrames || 0;
+    if (leaf._lastDropped != null && total > (leaf._lastTotal || 0) + 24) {
+      const burst = dropped - leaf._lastDropped;
+      if (burst >= DROPPED_FRAME_BURST) {
+        leaf._lastDropped = dropped;
+        leaf._lastTotal = total;
+        repairLeafPlayback(leaf, 'dropped-frames');
+        return;
+      }
+    }
+    leaf._lastDropped = dropped;
+    leaf._lastTotal = total;
+  }
+
+  leaf._syncWall = now;
+  leaf._syncMedia = video.currentTime;
+}
+
+function auditAllPlayback() {
+  forEachLeaf(root, auditLeafPlayback);
+}
+
+function startPlaybackAudit() {
+  if (playbackAuditTimer) return;
+  playbackAuditTimer = window.setInterval(auditAllPlayback, PLAYBACK_AUDIT_MS);
+}
+
+function stopPlaybackAudit() {
+  if (!playbackAuditTimer) return;
+  clearInterval(playbackAuditTimer);
+  playbackAuditTimer = 0;
+}
+
 /** Apply per-tile volume/mute to the live <video>, respecting projection mirrors. */
 function applyTileAudio(leaf) {
   if (!leaf.video) return;
@@ -212,13 +411,16 @@ function applyTileAudio(leaf) {
   leaf.volume = vol;
   if (projection.active && projection.role === 'mirror') {
     leaf.video.muted = true;
+    leaf.video.volume = 0;
     return;
   }
-  leaf.video.volume = vol;
-  leaf.video.muted = !!leaf.muted || vol === 0;
+  if (leaf.video.volume !== vol) leaf.video.volume = vol;
+  const wantMuted = !!leaf.muted || vol === 0;
+  if (leaf.video.muted !== wantMuted) leaf.video.muted = wantMuted;
   if (leaf.refs) {
-    leaf.refs.vol.value = String(vol);
-    leaf.refs.mute.textContent = leaf.video.muted ? '🔇' : '🔊';
+    if (leaf.refs.vol.value !== String(vol)) leaf.refs.vol.value = String(vol);
+    const icon = leaf.video.muted ? '🔇' : '🔊';
+    if (leaf.refs.mute.textContent !== icon) leaf.refs.mute.textContent = icon;
   }
 }
 
@@ -503,8 +705,7 @@ function ensureLeafEl(leaf) {
 
   const video = document.createElement('video');
   video.className = 'tile-video';
-  video.playsInline = true;
-  video.preload = 'metadata';
+  configureVideoElement(video);
 
   const empty = document.createElement('div');
   empty.className = 'tile-empty';
@@ -632,13 +833,34 @@ function wireLeafEvents(leaf) {
   // Prevent toolbar interactions from triggering a split.
   refs.toolbar.addEventListener('mousedown', (e) => e.stopPropagation());
 
-  video.addEventListener('play', () => { refs.play.textContent = '⏸'; });
-  video.addEventListener('pause', () => { refs.play.textContent = '▶'; });
+  video.addEventListener('play', () => {
+    refs.play.textContent = '⏸';
+    leaf._wantPlaying = true;
+    resetLeafSyncClock(leaf);
+    armVideoFrameWatch(leaf);
+  });
+  video.addEventListener('pause', () => {
+    refs.play.textContent = '▶';
+    leaf._wantPlaying = false;
+    resetLeafSyncClock(leaf);
+  });
+  // Throttle seek-bar UI updates so many tiles don't flood the main thread.
   video.addEventListener('timeupdate', () => {
-    if (video.duration) {
-      refs.seek.value = String(Math.round((video.currentTime / video.duration) * 1000));
-      refs.time.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
-    }
+    if (leaf._timeUiPending) return;
+    leaf._timeUiPending = true;
+    requestAnimationFrame(() => {
+      leaf._timeUiPending = false;
+      if (!leaf.video || !leaf.refs || leaf.video !== video) return;
+      if (video.duration) {
+        refs.seek.value = String(Math.round((video.currentTime / video.duration) * 1000));
+        refs.time.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
+      }
+    });
+  });
+  video.addEventListener('seeking', () => resetLeafSyncClock(leaf));
+  video.addEventListener('seeked', () => {
+    resetLeafSyncClock(leaf);
+    armVideoFrameWatch(leaf);
   });
   // When a clip ends (and the tile isn't looping), shuffle to a random clip.
   video.addEventListener('ended', () => advanceRandom(leaf));
@@ -702,8 +924,15 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   if (sameSource) {
     applyTileAudio(leaf);
     video.loop = !!leaf.loop;
-    if (autoplay) video.play().catch(() => {});
-    else video.pause();
+    if (autoplay) {
+      leaf._wantPlaying = true;
+      video.play().catch(() => {});
+      armVideoFrameWatch(leaf);
+    } else {
+      leaf._wantPlaying = false;
+      video.pause();
+    }
+    resetLeafSyncClock(leaf);
     updateLeaf(leaf);
     return;
   }
@@ -713,7 +942,18 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   video.load();
   video.loop = !!leaf.loop;
   applyTileAudio(leaf);
-  if (autoplay) video.play().catch(() => {});
+  leaf._lastDropped = null;
+  leaf._lastTotal = null;
+  leaf._frameWatchArmed = false;
+  leaf._lastFrameWall = null;
+  if (autoplay) {
+    leaf._wantPlaying = true;
+    video.play().catch(() => {});
+    armVideoFrameWatch(leaf);
+  } else {
+    leaf._wantPlaying = false;
+  }
+  resetLeafSyncClock(leaf);
   updateLeaf(leaf);
 }
 
@@ -839,6 +1079,10 @@ function disposeLeaf(leaf) {
   if (leaf.video) {
     try { leaf.video.pause(); leaf.video.removeAttribute('src'); leaf.video.load(); } catch (_) {}
   }
+  leaf._frameWatchArmed = false;
+  leaf._wantPlaying = false;
+  leaf._syncWall = null;
+  leaf._lastFrameWall = null;
 }
 
 /**
@@ -1533,3 +1777,9 @@ if (IS_MIRROR) {
   window.api.requestWindowState();
   wake();
 }
+
+// Keep every window (controller + mirrors) honest about sources, mute, and A/V sync.
+startPlaybackAudit();
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) auditAllPlayback();
+});
