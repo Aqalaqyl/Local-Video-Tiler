@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   // Media / folders
   pickFolder: () => ipcRenderer.invoke('dialog:pickFolder'),
   readFolder: (folderPath) => ipcRenderer.invoke('media:readFolder', folderPath),
+  deleteFile: (filePath, folderPath) => ipcRenderer.invoke('media:deleteFile', filePath, folderPath),
 
   // Displays
   getDisplayInfo: () => ipcRenderer.invoke('display:getInfo'),
@@ -32,6 +33,11 @@ contextBridge.exposeInMainWorld('api', {
     const handler = (_e, config) => cb(config);
     ipcRenderer.on('projection:set', handler);
     return () => ipcRenderer.removeListener('projection:set', handler);
+  },
+  onResumeAudio: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('projection:resumeAudio', handler);
+    return () => ipcRenderer.removeListener('projection:resumeAudio', handler);
   },
   // Controller → mirrors: push the current layout (serialized tree).
   pushLayout: (payload) => ipcRenderer.send('projection:pushLayout', payload),

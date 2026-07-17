@@ -16,6 +16,9 @@
 
 const VIDEO_EXTS_HINT = 'mp4, webm, mov, mkv, avi, …';
 const LS_KEY = 'lvt.state.v1';
+const PRESETS_KEY = 'lvt.presets.v1';
+/** Per-tile volume ceiling (2.0 = 200% boost, VLC-style). */
+const MAX_TILE_VOLUME = 2;
 
 // ---------------------------------------------------------------- DOM handles
 const stage = document.getElementById('stage');
@@ -35,6 +38,13 @@ const btnFs = document.getElementById('btn-fs');
 const btnFsAll = document.getElementById('btn-fs-all');
 const btnGuide = document.getElementById('btn-guide');
 const btnTileDisplays = document.getElementById('btn-tile-displays');
+const btnAssign = document.getElementById('btn-assign');
+const btnPresets = document.getElementById('btn-presets');
+const btnPreview = document.getElementById('btn-preview');
+const presetsPanel = document.getElementById('presets-panel');
+const presetsList = document.getElementById('presets-list');
+const btnPresetSave = document.getElementById('btn-preset-save');
+const presetNameInput = document.getElementById('preset-name');
 const btnMin = document.getElementById('btn-min');
 const btnX = document.getElementById('btn-x');
 const gridSizeInput = document.getElementById('grid-size');
@@ -46,7 +56,9 @@ const settings = {
   gridOn: false,
   snapOn: false,
   cellSize: 80,
-  guideOn: false
+  guideOn: false,
+  /** Scaled multi-monitor desk in the window for editing without fullscreen. */
+  desktopPreview: true
 };
 
 // Latest window/display geometry pushed from the main process. Used to draw the
@@ -106,6 +118,7 @@ function applyProjection() {
   // every display instead of restarting at each window's edge.
   const layers = [stage, gridOverlay];
   if (on) {
+    document.body.classList.remove('desktop-preview');
     const offX = projOffX();
     const offY = projOffY();
     const vw = projection.viewport.width;
@@ -121,17 +134,134 @@ function applyProjection() {
       el.style.clipPath = clip;
     }
   } else {
-    for (const el of layers) {
-      el.style.left = '';
-      el.style.top = '';
-      el.style.right = '';
-      el.style.bottom = '';
-      el.style.width = '';
-      el.style.height = '';
-      el.style.clipPath = '';
-    }
+    applyDesktopPreview();
   }
   scheduleProjectionPlayback();
+}
+
+function clearStageGeometry() {
+  for (const el of [stage, gridOverlay]) {
+    el.style.left = '';
+    el.style.top = '';
+    el.style.right = '';
+    el.style.bottom = '';
+    el.style.width = '';
+    el.style.height = '';
+    el.style.clipPath = '';
+  }
+}
+
+/**
+ * Whether the windowed miniature multi-monitor desk should drive stage geometry.
+ * Disabled while projecting / spanning; useful with 1+ displays so tiles match
+ * physical proportions before going fullscreen.
+ */
+function shouldUseDesktopPreview() {
+  if (projection.active || IS_MIRROR) return false;
+  if (winState.spanningAllDisplays) return false;
+  if (!settings.desktopPreview) return false;
+  // Miniature desk is for arranging multi-monitor layouts in a window.
+  return (winState.displays || []).length >= 2;
+}
+
+/**
+ * Scaled placement of the multi-monitor union inside the app window — shared by
+ * the stage miniature and the display-guide labels.
+ */
+function getDesktopPreviewLayout() {
+  const displays = winState.displays || [];
+  if (!displays.length) return null;
+  const u = unionBounds(displays);
+  if (!(u.width > 0 && u.height > 0)) return null;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const marginX = 28;
+  const marginBottom = 28;
+  const topPad = 56;
+  const availW = Math.max(120, vw - marginX * 2);
+  const availH = Math.max(120, vh - topPad - marginBottom);
+  const scale = Math.min(availW / u.width, availH / u.height, 1);
+  const width = u.width * scale;
+  const height = u.height * scale;
+  const left = (vw - width) / 2;
+  const top = topPad + Math.max(0, (availH - height) / 2);
+  return { union: u, scale, left, top, width, height, displays };
+}
+
+/** Size/position the stage as a miniature of the user's physical desk layout. */
+function applyDesktopPreview() {
+  if (projection.active) return;
+  const layout = shouldUseDesktopPreview() ? getDesktopPreviewLayout() : null;
+  document.body.classList.toggle('desktop-preview', !!layout);
+  if (btnPreview) {
+    btnPreview.classList.toggle('active', !!settings.desktopPreview && !projection.active && !winState.spanningAllDisplays);
+    btnPreview.disabled = projection.active || !!winState.spanningAllDisplays;
+  }
+  if (!layout) {
+    clearStageGeometry();
+    return;
+  }
+  for (const el of [stage, gridOverlay]) {
+    el.style.left = layout.left + 'px';
+    el.style.top = layout.top + 'px';
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+    el.style.width = layout.width + 'px';
+    el.style.height = layout.height + 'px';
+    el.style.clipPath = '';
+  }
+}
+
+function setDesktopPreview(on) {
+  settings.desktopPreview = !!on;
+  if (btnPreview) btnPreview.classList.toggle('active', !!settings.desktopPreview);
+  if (settings.desktopPreview && (winState.displays || []).length >= 2) {
+    settings.guideOn = true;
+    if (btnGuide) btnGuide.classList.toggle('active', true);
+  }
+  applyDesktopPreview();
+  renderDisplayGuide();
+  if (settings.desktopPreview) maybeTileForDesktopPreview();
+  saveState();
+  if (settings.desktopPreview) {
+    flash('Desktop preview — edit tiles in the miniature layout');
+  }
+}
+
+function countContentLeaves() {
+  let n = 0;
+  forEachLeaf(root, (l) => { if (!l.spacer) n++; });
+  return n;
+}
+
+/** If the layout is still coarser than the desk, carve one tile per display. */
+function maybeTileForDesktopPreview() {
+  const displays = winState.displays || [];
+  if (displays.length < 2 || !settings.desktopPreview) return false;
+  if (projection.active || winState.spanningAllDisplays) return false;
+  if (countContentLeaves() >= displays.length) {
+    applyDesktopPreview();
+    return false;
+  }
+  tileToDisplays({ quiet: true });
+  return true;
+}
+
+let desktopPreviewBootstrapped = false;
+/** On first display geometry, present the miniature desk for windowed editing. */
+function bootstrapDesktopPreview() {
+  if (IS_MIRROR || projection.active || desktopPreviewBootstrapped) return;
+  if (!(winState.displays || []).length) return;
+  desktopPreviewBootstrapped = true;
+  if (settings.desktopPreview == null) settings.desktopPreview = true;
+  if ((winState.displays || []).length >= 2 && settings.desktopPreview) {
+    if (!settings.guideOn) setGuide(true);
+    else applyDesktopPreview();
+    maybeTileForDesktopPreview();
+    flash('Desktop preview — edit tiles here, then Fullscreen or All Displays when ready');
+  } else {
+    applyDesktopPreview();
+  }
 }
 
 let projectionPlaybackRaf = 0;
@@ -149,6 +279,47 @@ function isLeafVisible(leaf) {
   return r.right > 1 && r.bottom > 1 && r.left < window.innerWidth - 1 && r.top < window.innerHeight - 1;
 }
 
+/** Map a tile into the shared multi-monitor canvas coordinates. */
+function getLeafUnionRect(leaf) {
+  if (!leaf.el || !projection.active || !projection.union) return null;
+  const leafR = leaf.el.getBoundingClientRect();
+  const stageR = stage.getBoundingClientRect();
+  if (stageR.width < 1 || stageR.height < 1) return null;
+  const relX = (leafR.left - stageR.left) / stageR.width;
+  const relY = (leafR.top - stageR.top) / stageR.height;
+  return {
+    x: projection.union.x + relX * projection.union.width,
+    y: projection.union.y + relY * projection.union.height,
+    w: (leafR.width / stageR.width) * projection.union.width,
+    h: (leafR.height / stageR.height) * projection.union.height
+  };
+}
+
+/** Stable visibility check for projection (survives fullscreen layout glitches). */
+function isLeafInViewport(leaf) {
+  if (!projection.active || !projection.viewport) return isLeafVisible(leaf);
+  const r = getLeafUnionRect(leaf);
+  if (!r || r.w < 1 || r.h < 1) return isLeafVisible(leaf);
+  const v = projection.viewport;
+  return r.x < v.x + v.width && r.x + r.w > v.x &&
+    r.y < v.y + v.height && r.y + r.h > v.y;
+}
+
+function leafShouldPlay(leaf) {
+  return !leaf.userPaused && leaf.files.length > 0;
+}
+
+/**
+ * Controller keeps media loaded for every tile (it owns audible output).
+ * Mirrors only decode tiles on their own display slice.
+ */
+function leafMayDecode(leaf, opts = {}) {
+  if (opts.force) return true;
+  if (!projection.active) return true;
+  if (projection.role === 'controller') return true;
+  return isLeafInViewport(leaf) || isLeafVisible(leaf);
+}
+
 function videoSourceUrl(video) {
   if (!video) return '';
   return video.currentSrc || video.getAttribute('src') || '';
@@ -162,27 +333,27 @@ function sourcesMatch(video, url) {
 }
 
 /**
- * While projecting across displays, each window only decodes/plays tiles that
- * fall on its own slice. Mirrors are always muted; the controller keeps audio
- * only for tiles visible on the primary display.
+ * Projection playback:
+ * - Controller plays every non-paused tile (audio comes from the primary window).
+ * - Mirrors stay muted and only run tiles on their slice.
+ * Never trust video.paused during fullscreen — the OS briefly pauses media.
  */
 function reconcileProjectionPlayback() {
   if (!projection.active) return;
+  resumeAudioContext();
+
   forEachLeaf(root, (leaf) => {
-    if (leaf.spacer || !leaf.video) return;
-    if (!leaf.files.length) return;
-
-    const visible = isLeafVisible(leaf);
+    if (leaf.spacer || !leaf.video || !leaf.files.length) return;
     const cur = leaf.files[leaf.index];
-    const wasPlaying = !leaf.video.paused && !leaf.video.ended;
+    const shouldPlay = leafShouldPlay(leaf);
 
-    if (visible) {
+    if (projection.role === 'controller') {
       if (cur && !sourcesMatch(leaf.video, cur.url)) {
-        loadCurrent(leaf, wasPlaying);
+        loadCurrent(leaf, shouldPlay, { force: true });
       } else {
         applyTileAudio(leaf);
         leaf.video.loop = !!leaf.loop;
-        if (wasPlaying) {
+        if (shouldPlay) {
           leaf._wantPlaying = true;
           leaf.video.play().catch(() => {});
           armVideoFrameWatch(leaf);
@@ -190,6 +361,21 @@ function reconcileProjectionPlayback() {
           leaf._wantPlaying = false;
           leaf.video.pause();
         }
+        resetLeafSyncClock(leaf);
+      }
+      return;
+    }
+
+    const visible = isLeafInViewport(leaf) || isLeafVisible(leaf);
+    if (visible) {
+      if (cur && !sourcesMatch(leaf.video, cur.url)) {
+        loadCurrent(leaf, true);
+      } else {
+        applyTileAudio(leaf);
+        leaf.video.loop = !!leaf.loop;
+        leaf._wantPlaying = true;
+        leaf.video.play().catch(() => {});
+        armVideoFrameWatch(leaf);
         resetLeafSyncClock(leaf);
       }
     } else {
@@ -279,7 +465,7 @@ function repairLeafPlayback(leaf, reason) {
   leaf._syncRepairAt = now;
 
   const cur = leaf.files[leaf.index];
-  const shouldPlay = !video.paused && !video.ended;
+  const shouldPlay = leafShouldPlay(leaf) || (!video.paused && !video.ended);
 
   if (cur && videoSourceUrl(video) && !sourcesMatch(video, cur.url)) {
     loadCurrent(leaf, shouldPlay || !!leaf._wantPlaying);
@@ -292,19 +478,25 @@ function repairLeafPlayback(leaf, reason) {
 
   if (video.readyState >= 2 && isFinite(video.currentTime) && !video.seeking) {
     const t = video.currentTime;
-    // Briefly mute during the seek so a desynced burst doesn't pile on.
-    try { video.muted = true; } catch (_) { /* ignore */ }
+    // Briefly silence during the seek so a desynced burst doesn't pile on.
+    // Prefer GainNode mute when boost graph is active (element.muted is forced off).
+    const graph = leaf._audioGraph;
+    if (graph) {
+      try { graph.gain.gain.value = 0; } catch (_) { /* ignore */ }
+    } else {
+      try { video.muted = true; } catch (_) { /* ignore */ }
+    }
     try { video.currentTime = t; } catch (_) { /* ignore */ }
     applyTileAudio(leaf);
   }
 
   if (shouldPlay || leaf._wantPlaying) {
+    resumeAudioContext();
     video.play().catch(() => {});
   }
   armVideoFrameWatch(leaf);
   resetLeafSyncClock(leaf);
   if (reason) {
-    // Quiet diagnostics for troubleshooting lag/desync without spamming the UI.
     try { console.debug('[playback-sync] repaired', leaf.id, reason); } catch (_) { /* ignore */ }
   }
 }
@@ -314,8 +506,8 @@ function auditLeafPlayback(leaf) {
   const video = leaf.video;
   const cur = leaf.files[leaf.index];
 
-  // Off-slice tiles while projecting should stay paused and silent.
-  if (projection.active && !isLeafVisible(leaf)) {
+  // Mirrors: off-slice tiles stay paused and silent. Controller owns all audio.
+  if (projection.active && projection.role === 'mirror' && !leafMayDecode(leaf)) {
     if (!video.paused) pauseVideoElement(video);
     applyTileAudio(leaf);
     resetLeafSyncClock(leaf);
@@ -328,16 +520,21 @@ function auditLeafPlayback(leaf) {
     return;
   }
 
-  // Enforce mute/volume (mirrors always silent; user mute respected elsewhere).
+  // Enforce mute/volume / boost (mirrors stay silent via GainNode = 0).
   applyTileAudio(leaf);
 
   if (video.paused || video.ended || video.seeking || video.readyState < 2) {
     resetLeafSyncClock(leaf);
-    leaf._wantPlaying = !video.paused && !video.ended;
+    leaf._wantPlaying = leafShouldPlay(leaf);
+    // Fullscreen transitions can leave tiles paused — resume intentional play.
+    if (leafShouldPlay(leaf) && video.paused && !video.ended && leafMayDecode(leaf)) {
+      resumeAudioContext();
+      video.play().catch(() => {});
+    }
     return;
   }
 
-  leaf._wantPlaying = true;
+  leaf._wantPlaying = leafShouldPlay(leaf);
   armVideoFrameWatch(leaf);
 
   const now = performance.now();
@@ -404,29 +601,80 @@ function stopPlaybackAudit() {
   playbackAuditTimer = 0;
 }
 
-/** Apply per-tile volume/mute to the live <video>, respecting projection mirrors. */
+/** Apply per-tile volume/mute. Values above 1.0 boost via Web Audio (up to 200%). */
 function applyTileAudio(leaf) {
   if (!leaf.video) return;
-  const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, 1);
+  const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
   leaf.volume = vol;
-  if (projection.active && projection.role === 'mirror') {
-    leaf.video.muted = true;
-    leaf.video.volume = 0;
-    return;
+  const mirror = projection.active && projection.role === 'mirror';
+  const muted = mirror || !!leaf.muted || vol === 0;
+
+  const graph = ensureTileAudioGraph(leaf);
+  if (graph) {
+    resumeAudioContext();
+    // Element stays at unity; GainNode carries 0–200% (and mute).
+    try { leaf.video.volume = 1; } catch (_) { /* ignore */ }
+    leaf.video.muted = false;
+    try { graph.gain.gain.value = muted ? 0 : vol; } catch (_) { /* ignore */ }
+  } else {
+    // No Web Audio: native volume cannot exceed 100%.
+    leaf.video.volume = Math.min(vol, 1);
+    leaf.video.muted = muted;
   }
-  if (leaf.video.volume !== vol) leaf.video.volume = vol;
-  const wantMuted = !!leaf.muted || vol === 0;
-  if (leaf.video.muted !== wantMuted) leaf.video.muted = wantMuted;
+
   if (leaf.refs) {
-    if (leaf.refs.vol.value !== String(vol)) leaf.refs.vol.value = String(vol);
-    const icon = leaf.video.muted ? '🔇' : '🔊';
-    if (leaf.refs.mute.textContent !== icon) leaf.refs.mute.textContent = icon;
+    leaf.refs.vol.max = String(MAX_TILE_VOLUME);
+    leaf.refs.vol.value = String(vol);
+    leaf.refs.vol.classList.toggle('boosted', vol > 1);
+    const pct = Math.round(vol * 100);
+    leaf.refs.vol.title =
+      `Volume ${pct}%` + (vol > 1 ? ' (boost)' : '') + ' — scroll wheel over tile (up to 200%)';
+    leaf.refs.mute.textContent = muted ? '🔇' : (vol > 1 ? '🔊+' : '🔊');
+    leaf.refs.mute.title = muted ? 'Unmute' : (vol > 1 ? `Boosted ${pct}%` : 'Mute');
+    if (leaf.refs.volPct) {
+      leaf.refs.volPct.textContent = pct + '%';
+      leaf.refs.volPct.classList.toggle('boosted', vol > 1);
+    }
+  }
+}
+
+let sharedAudioCtx = null;
+function getAudioContext() {
+  if (sharedAudioCtx) return sharedAudioCtx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  try { sharedAudioCtx = new AC(); } catch (_) { return null; }
+  return sharedAudioCtx;
+}
+
+function resumeAudioContext() {
+  const ctx = getAudioContext();
+  if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+}
+
+/** Wire a GainNode once per tile so volume can exceed the HTMLMediaElement 100% cap. */
+function ensureTileAudioGraph(leaf) {
+  if (!leaf || !leaf.video) return null;
+  if (leaf._audioGraph) return leaf._audioGraph;
+  const ctx = getAudioContext();
+  if (!ctx) return null;
+  try {
+    const source = ctx.createMediaElementSource(leaf.video);
+    const gain = ctx.createGain();
+    gain.gain.value = 1;
+    source.connect(gain);
+    gain.connect(ctx.destination);
+    leaf._audioGraph = { source, gain, ctx };
+    return leaf._audioGraph;
+  } catch (_) {
+    // Already connected or unsupported — fall back to element volume.
+    return null;
   }
 }
 
 function setTileVolume(leaf, volume, opts = {}) {
   if (!leaf) return;
-  leaf.volume = clamp(volume, 0, 1);
+  leaf.volume = clamp(volume, 0, MAX_TILE_VOLUME);
   if (leaf.volume > 0 && !opts.keepMuted) leaf.muted = false;
   applyTileAudio(leaf);
   if (!opts.skipSave) saveState();
@@ -434,6 +682,18 @@ function setTileVolume(leaf, volume, opts = {}) {
 
 function adjustTileVolume(leaf, delta) {
   setTileVolume(leaf, (leaf.volume == null ? 1 : leaf.volume) + delta);
+  showVolumeHint(leaf);
+}
+
+let volumeHintTimer = null;
+function showVolumeHint(leaf) {
+  if (!leaf) return;
+  const pct = Math.round((leaf.volume == null ? 1 : leaf.volume) * 100);
+  const boost = (leaf.volume || 0) > 1 ? ' · boost' : '';
+  toast.innerHTML = '<strong>Tile volume: ' + pct + '%' + boost + '</strong>';
+  toast.classList.add('show');
+  clearTimeout(volumeHintTimer);
+  volumeHintTimer = setTimeout(() => toast.classList.remove('show'), 900);
 }
 
 function snapshotSettings() {
@@ -493,7 +753,7 @@ function applyIncomingLayout(payload) {
         leaf.loop = node ? !!node.loop : false;
         leaf.spacer = spacer;
         if (node) {
-          if (typeof node.volume === 'number') leaf.volume = clamp(node.volume, 0, 1);
+          if (typeof node.volume === 'number') leaf.volume = clamp(node.volume, 0, MAX_TILE_VOLUME);
           if (node.muted != null) leaf.muted = !!node.muted;
         }
         if (leaf.el) leaf.el.classList.toggle('pad-spacer', spacer);
@@ -508,6 +768,7 @@ function applyIncomingLayout(payload) {
     for (const l of pool) { if (!used.has(l)) disposeLeaf(l); }
     root = newRoot;
     focusedLeaf = null;
+    selectedLeaves.clear();
     render();
     // Start media only for brand-new tiles; reused tiles are already playing.
     forEachLeaf(root, (leaf) => {
@@ -516,6 +777,7 @@ function applyIncomingLayout(payload) {
       }
     });
     applyProjection();
+    if (projection.active) scheduleSpanPlaybackRecovery();
   } finally {
     applyingRemote = false;
   }
@@ -540,7 +802,11 @@ function setProjection(config) {
     projection.viewport = null;
     projection.union = null;
     applyProjection();
-    forEachLeaf(root, (leaf) => { if (!leaf.spacer) applyTileAudio(leaf); });
+    forEachLeaf(root, (leaf) => {
+      if (leaf.spacer || !leaf.video) return;
+      applyTileAudio(leaf);
+      if (leafShouldPlay(leaf)) leaf.video.play().catch(() => {});
+    });
     renderDisplayGuide();
     return;
   }
@@ -554,11 +820,28 @@ function setProjection(config) {
   projection.role = config.role || 'controller';
   projection.viewport = config.viewport;
   projection.union = config.union;
+  resumeAudioContext();
   applyProjection();
   renderDisplayGuide();
   if (projectionViewportKey(config) !== prevKey) {
     lastSyncJSON = '';
     broadcastLayout();
+  }
+  scheduleSpanPlaybackRecovery();
+}
+
+let spanPlaybackRecoveryTimers = [];
+/** Fullscreen / Web Audio often drop playback when spanning — retry resume. */
+function scheduleSpanPlaybackRecovery() {
+  for (const t of spanPlaybackRecoveryTimers) clearTimeout(t);
+  spanPlaybackRecoveryTimers = [];
+  const resume = () => {
+    if (!projection.active) return;
+    resumeAudioContext();
+    reconcileProjectionPlayback();
+  };
+  for (const ms of [0, 80, 200, 500, 1000, 2000]) {
+    spanPlaybackRecoveryTimers.push(setTimeout(resume, ms));
   }
 }
 
@@ -583,6 +866,8 @@ function uid() { return 'n' + (uidCounter++); }
 
 let root = makeLeaf();
 let focusedLeaf = null;
+/** @type {Set<object>} Tiles chosen for batch folder assignment (Ctrl/Cmd+click). */
+const selectedLeaves = new Set();
 
 // --------------------------------------------------------------- Node helpers
 function makeLeaf() {
@@ -597,6 +882,7 @@ function makeLeaf() {
     spacer: false,
     volume: 1,
     muted: false,
+    userPaused: false,
     el: null,
     refs: null,
     video: null
@@ -645,8 +931,9 @@ function render() {
   forEachLeaf(root, (leaf) => { if (leaf.el && leaf.el.parentNode) leaf.el.parentNode.removeChild(leaf.el); });
   stage.textContent = '';
   stage.appendChild(renderNode(root));
-  applyFocus();
+  applySelection();
   if (projection.active) applyProjection();
+  else applyDesktopPreview();
   positionTileBadges();
   saveState();
 }
@@ -718,15 +1005,17 @@ function ensureLeafEl(leaf) {
   const toolbar = document.createElement('div');
   toolbar.className = 'tile-toolbar';
   toolbar.innerHTML = `
-    <button class="folder" title="Assign / change folder">📁</button>
+    <button class="folder" title="Assign / change folder — Ctrl+click tiles to select several first">📁</button>
     <button class="prev" title="Previous">⏮</button>
     <button class="play" title="Play / Pause">▶</button>
     <button class="next" title="Next">⏭</button>
     <button class="loop" title="Loop this video (per tile)">🔁</button>
+    <button class="trash" title="Delete current video from disk">🗑</button>
     <input class="seek" type="range" min="0" max="1000" value="0" title="Seek" />
     <span class="time">0:00 / 0:00</span>
     <button class="mute" title="Mute">🔊</button>
-    <input class="vol" type="range" min="0" max="1" step="0.05" value="1" title="Volume (scroll wheel over tile)" />
+    <input class="vol" type="range" min="0" max="2" step="0.05" value="1" title="Volume / boost up to 200% (scroll wheel over tile)" />
+    <span class="vol-pct">100%</span>
     <span class="title"></span>
     <button class="close" title="Close tile">✕</button>`;
 
@@ -752,10 +1041,12 @@ function ensureLeafEl(leaf) {
     play: toolbar.querySelector('.play'),
     next: toolbar.querySelector('.next'),
     loop: toolbar.querySelector('.loop'),
+    trash: toolbar.querySelector('.trash'),
     seek: toolbar.querySelector('.seek'),
     time: toolbar.querySelector('.time'),
     mute: toolbar.querySelector('.mute'),
     vol: toolbar.querySelector('.vol'),
+    volPct: toolbar.querySelector('.vol-pct'),
     title: toolbar.querySelector('.title'),
     close: toolbar.querySelector('.close'),
     del
@@ -783,6 +1074,7 @@ function updateLeaf(leaf) {
   }
 
   refs.close.style.display = settings.editMode ? 'inline-block' : 'none';
+  if (refs.trash) refs.trash.disabled = !hasFiles;
   applyLoop(leaf);
 
   const current = hasFiles ? leaf.files[leaf.index] : null;
@@ -803,6 +1095,7 @@ function wireLeafEvents(leaf) {
   refs.prev.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, -1); });
   refs.next.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, 1); });
   refs.loop.addEventListener('click', (e) => { e.stopPropagation(); toggleLoop(leaf); });
+  refs.trash.addEventListener('click', (e) => { e.stopPropagation(); deleteCurrentVideo(leaf); });
   refs.close.addEventListener('click', (e) => { e.stopPropagation(); closeLeaf(leaf); });
   refs.del.addEventListener('mousedown', (e) => e.stopPropagation());
   refs.del.addEventListener('click', (e) => { e.stopPropagation(); closeLeaf(leaf); flash('Tile deleted'); });
@@ -814,6 +1107,7 @@ function wireLeafEvents(leaf) {
   refs.vol.addEventListener('input', (e) => {
     e.stopPropagation();
     setTileVolume(leaf, parseFloat(refs.vol.value));
+    showVolumeHint(leaf);
   });
   refs.mute.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -826,7 +1120,8 @@ function wireLeafEvents(leaf) {
     if (leaf.spacer || !leaf.files.length) return;
     if (e.target.closest('.tile-toolbar')) return;
     e.preventDefault();
-    const step = e.shiftKey ? 0.01 : 0.05;
+    resumeAudioContext();
+    const step = e.shiftKey ? 0.02 : 0.08;
     adjustTileVolume(leaf, e.deltaY < 0 ? step : -step);
   }, { passive: false });
 
@@ -873,11 +1168,15 @@ function wireLeafEvents(leaf) {
   el.addEventListener('click', (e) => {
     if (leaf.spacer) return;
     if (e.target.closest('.tile-toolbar')) return;
+    if (isMultiSelectModifier(e)) {
+      toggleSelection(leaf);
+      return;
+    }
     if (settings.editMode) {
       const s = computeSplit(leaf, e.clientX, e.clientY, e.shiftKey);
       splitLeaf(leaf, s.orientation, s.ratio);
     } else {
-      setFocus(leaf);
+      setSelectionSingle(leaf);
     }
   });
 }
@@ -885,11 +1184,87 @@ function wireLeafEvents(leaf) {
 // ============================================================================
 // Media
 // ============================================================================
+function isMultiSelectModifier(e) {
+  return !!(e && (e.ctrlKey || e.metaKey));
+}
+
+function pruneSelection() {
+  const live = new Set();
+  forEachLeaf(root, (l) => live.add(l));
+  for (const l of selectedLeaves) {
+    if (!live.has(l)) selectedLeaves.delete(l);
+  }
+}
+
+function getAssignmentTargets(leaf) {
+  pruneSelection();
+  if (selectedLeaves.size > 0) return [...selectedLeaves];
+  return leaf ? [leaf] : [];
+}
+
 async function assignFolder(leaf) {
+  const targets = getAssignmentTargets(leaf);
+  if (!targets.length) return;
   const folder = await window.api.pickFolder();
   if (!folder) return;
-  await loadFolder(leaf, folder, 0, false);
-  advanceRandom(leaf, true);
+  for (const t of targets) {
+    await loadFolder(t, folder, 0, false);
+    advanceRandom(t, true);
+  }
+  if (targets.length > 1) {
+    flash(`Assigned folder to ${targets.length} tiles`);
+    clearSelection();
+  }
+}
+
+async function assignFolderToSelection() {
+  const targets = getAssignmentTargets(null);
+  if (!targets.length) {
+    flash('Ctrl+click tiles to select them, then assign a folder');
+    return;
+  }
+  const folder = await window.api.pickFolder();
+  if (!folder) return;
+  for (const t of targets) {
+    await loadFolder(t, folder, 0, false);
+    advanceRandom(t, true);
+  }
+  flash(`Assigned folder to ${targets.length} tile${targets.length === 1 ? '' : 's'}`);
+  clearSelection();
+}
+
+/** Permanently delete the currently playing video from disk and advance. */
+async function deleteCurrentVideo(leaf) {
+  if (!leaf || !leaf.files.length || !leaf.folder) {
+    flash('No video to delete');
+    return;
+  }
+  const current = leaf.files[leaf.index];
+  if (!current || !current.path) {
+    flash('No video to delete');
+    return;
+  }
+  const res = await window.api.deleteFile(current.path, leaf.folder);
+  if (!res || res.cancelled) return;
+  if (!res.ok) {
+    flash(res.error || 'Could not delete video');
+    return;
+  }
+
+  const removedPath = current.path;
+  leaf.files = leaf.files.filter((f) => f.path !== removedPath);
+  if (leaf.index >= leaf.files.length) leaf.index = Math.max(0, leaf.files.length - 1);
+
+  if (leaf.files.length > 0) {
+    leaf.userPaused = false;
+    loadCurrent(leaf, true);
+    flash('Deleted ' + current.name);
+  } else {
+    stopVideoElement(leaf.video);
+    updateLeaf(leaf);
+    flash('Deleted ' + current.name + ' — folder empty');
+  }
+  saveState();
 }
 
 async function loadFolder(leaf, folder, index = 0, autoplay = false) {
@@ -906,11 +1281,11 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   const { video } = leaf;
   if (!video) return;
   const current = leaf.files[leaf.index];
-  const visible = opts.force || !projection.active || isLeafVisible(leaf);
+  const mayDecode = leafMayDecode(leaf, opts);
   const sameSource = current && sourcesMatch(video, current.url);
 
-  if (!current || !visible) {
-    if (!visible && current && !opts.force) pauseVideoElement(video);
+  if (!current || !mayDecode) {
+    if (!mayDecode && current && !opts.force) pauseVideoElement(video);
     else {
       try {
         video.pause();
@@ -959,14 +1334,21 @@ function loadCurrent(leaf, autoplay, opts = {}) {
 
 function togglePlay(leaf) {
   if (!leaf.files.length) { assignFolder(leaf); return; }
-  if (leaf.video.paused) leaf.video.play().catch(() => {});
-  else leaf.video.pause();
+  if (leaf.video.paused || leaf.userPaused) {
+    leaf.userPaused = false;
+    resumeAudioContext();
+    leaf.video.play().catch(() => {});
+  } else {
+    leaf.userPaused = true;
+    leaf.video.pause();
+  }
+  applyTileAudio(leaf);
 }
 
 function step(leaf, dir, autoplay = false) {
   if (!leaf.files.length) return;
   leaf.index = (leaf.index + dir + leaf.files.length) % leaf.files.length;
-  loadCurrent(leaf, autoplay || !leaf.video.paused);
+  loadCurrent(leaf, autoplay || !leaf.userPaused);
   saveState();
 }
 
@@ -982,6 +1364,7 @@ function pickRandomIndex(leaf) {
 /** Auto-advance to a random clip from the folder (the default shuffle playback). */
 function advanceRandom(leaf, initial = false) {
   if (!leaf.files.length) return;
+  leaf.userPaused = false;
   leaf.index = initial ? Math.floor(Math.random() * leaf.files.length) : pickRandomIndex(leaf);
   loadCurrent(leaf, true);
   saveState();
@@ -1071,7 +1454,8 @@ function closeLeaf(leaf) {
       grand.children[i] = sibling;
     }
   }
-  if (focusedLeaf === leaf) focusedLeaf = null;
+  if (focusedLeaf === leaf) focusedLeaf = selectedLeaves.size ? [...selectedLeaves].pop() : null;
+  selectedLeaves.delete(leaf);
   render();
 }
 
@@ -1079,6 +1463,8 @@ function disposeLeaf(leaf) {
   if (leaf.video) {
     try { leaf.video.pause(); leaf.video.removeAttribute('src'); leaf.video.load(); } catch (_) {}
   }
+  // MediaElementSource can't be rebuilt on the same element; drop the handle.
+  leaf._audioGraph = null;
   leaf._frameWatchArmed = false;
   leaf._wantPlaying = false;
   leaf._syncWall = null;
@@ -1228,16 +1614,55 @@ function leafById(id) {
 }
 
 // ============================================================================
-// Focus
+// Focus / multi-select
 // ============================================================================
-function setFocus(leaf) {
+function setSelectionSingle(leaf) {
+  selectedLeaves.clear();
+  selectedLeaves.add(leaf);
   focusedLeaf = leaf;
-  applyFocus();
+  applySelection();
 }
-function applyFocus() {
+
+function toggleSelection(leaf) {
+  if (selectedLeaves.has(leaf)) selectedLeaves.delete(leaf);
+  else selectedLeaves.add(leaf);
+  focusedLeaf = leaf;
+  applySelection();
+}
+
+function clearSelection() {
+  selectedLeaves.clear();
+  applySelection();
+}
+
+function setFocus(leaf) {
+  setSelectionSingle(leaf);
+}
+
+function updateAssignButton() {
+  if (!btnAssign) return;
+  const n = selectedLeaves.size;
+  btnAssign.disabled = n === 0;
+  btnAssign.classList.toggle('active', n > 0);
+  btnAssign.title = n > 0
+    ? `Assign the same folder to ${n} selected tile(s)`
+    : 'Ctrl+click tiles to select, then assign a shared folder';
+  btnAssign.textContent = n > 0 ? `📁 Folder (${n})` : '📁 Folder';
+}
+
+function applySelection() {
+  pruneSelection();
   forEachLeaf(root, (l) => {
-    if (l.el) l.el.classList.toggle('focused', l === focusedLeaf);
+    if (!l.el) return;
+    const sel = selectedLeaves.has(l);
+    l.el.classList.toggle('selected', sel);
+    l.el.classList.toggle('focused', l === focusedLeaf);
   });
+  updateAssignButton();
+}
+
+function applyFocus() {
+  applySelection();
 }
 
 // ============================================================================
@@ -1293,7 +1718,7 @@ function serializeTree(node, withIndex) {
     const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop };
     if (node.spacer) o.spacer = true;
     if (withIndex) o.index = node.index;
-    if (node.volume != null && node.volume !== 1) o.volume = node.volume;
+    o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
     if (node.muted) o.muted = true;
     return o;
   }
@@ -1314,7 +1739,7 @@ function deserialize(obj) {
     l.folder = obj.folder || null;
     l.index = l.savedIndex = obj.index || 0;
     l.loop = !!obj.loop;
-    l.volume = typeof obj.volume === 'number' ? clamp(obj.volume, 0, 1) : 1;
+    l.volume = typeof obj.volume === 'number' ? clamp(obj.volume, 0, MAX_TILE_VOLUME) : 1;
     l.muted = !!obj.muted;
     return l;
   }
@@ -1349,14 +1774,224 @@ function loadState() {
   setSnap(!!settings.snapOn);
   setEditMode(!!settings.editMode);
   setGuide(!!settings.guideOn);
+  if (settings.desktopPreview == null) settings.desktopPreview = true;
+  if (btnPreview) btnPreview.classList.toggle('active', !!settings.desktopPreview);
 
   render();
+  applyDesktopPreview();
 
   // Repopulate media for any leaf that had a folder assigned, then shuffle to a
   // random clip so launch matches the documented random-start behaviour.
   forEachLeaf(root, (leaf) => {
     if (leaf.folder) loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf, true));
   });
+}
+
+// ============================================================================
+// Layout presets — named snapshots of tile layout + per-tile folder paths
+// ============================================================================
+function serializePresetTree(node) {
+  if (node.kind === 'leaf') {
+    const o = { kind: 'leaf', folder: node.folder || null, loop: !!node.loop };
+    if (node.spacer) o.spacer = true;
+    o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
+    if (node.muted) o.muted = true;
+    return o;
+  }
+  return {
+    kind: 'split',
+    direction: node.direction,
+    ratio: node.ratio,
+    children: [serializePresetTree(node.children[0]), serializePresetTree(node.children[1])]
+  };
+}
+
+function countPresetFolders(node, acc = { tiles: 0, folders: 0 }) {
+  if (node.kind === 'leaf') {
+    if (!node.spacer) {
+      acc.tiles += 1;
+      if (node.folder) acc.folders += 1;
+    }
+    return acc;
+  }
+  countPresetFolders(node.children[0], acc);
+  countPresetFolders(node.children[1], acc);
+  return acc;
+}
+
+function readPresets() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PRESETS_KEY) || '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function writePresets(list) {
+  try { localStorage.setItem(PRESETS_KEY, JSON.stringify(list)); } catch (_) { /* ignore */ }
+}
+
+function isPresetsPanelOpen() {
+  return !!(presetsPanel && !presetsPanel.hidden);
+}
+
+function setPresetsPanelOpen(open) {
+  if (!presetsPanel) return;
+  presetsPanel.hidden = !open;
+  presetsPanel.setAttribute('aria-hidden', open ? 'false' : 'true');
+  if (btnPresets) btnPresets.classList.toggle('active', open);
+  if (open) {
+    wake();
+    renderPresetsList();
+    if (presetNameInput) {
+      presetNameInput.value = '';
+      presetNameInput.focus();
+    }
+  }
+}
+
+function togglePresetsPanel() {
+  setPresetsPanelOpen(!isPresetsPanelOpen());
+}
+
+function renderPresetsList() {
+  if (!presetsList) return;
+  const list = readPresets().slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  presetsList.textContent = '';
+  for (const preset of list) {
+    const stats = countPresetFolders(preset.tree || { kind: 'leaf' });
+    const li = document.createElement('li');
+    li.className = 'preset-item';
+    li.dataset.id = preset.id;
+
+    const meta = document.createElement('div');
+    meta.className = 'preset-meta';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'preset-name';
+    nameEl.textContent = preset.name || 'Untitled';
+    nameEl.title = preset.name || 'Untitled';
+    const sub = document.createElement('div');
+    sub.className = 'preset-sub';
+    sub.textContent = `${stats.tiles} tile${stats.tiles === 1 ? '' : 's'} · ${stats.folders} folder${stats.folders === 1 ? '' : 's'}`;
+    meta.appendChild(nameEl);
+    meta.appendChild(sub);
+
+    const actions = document.createElement('div');
+    actions.className = 'preset-actions';
+    const loadBtn = document.createElement('button');
+    loadBtn.type = 'button';
+    loadBtn.className = 'tool';
+    loadBtn.textContent = 'Load';
+    loadBtn.title = 'Apply this preset';
+    loadBtn.addEventListener('click', () => applyPreset(preset.id));
+    const renBtn = document.createElement('button');
+    renBtn.type = 'button';
+    renBtn.className = 'tool';
+    renBtn.textContent = 'Rename';
+    renBtn.title = 'Rename preset';
+    renBtn.addEventListener('click', () => renamePreset(preset.id));
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'tool danger';
+    delBtn.textContent = 'Delete';
+    delBtn.title = 'Delete preset';
+    delBtn.addEventListener('click', () => deletePreset(preset.id));
+    actions.appendChild(loadBtn);
+    actions.appendChild(renBtn);
+    actions.appendChild(delBtn);
+
+    li.appendChild(meta);
+    li.appendChild(actions);
+    presetsList.appendChild(li);
+  }
+}
+
+function saveCurrentPreset() {
+  const name = ((presetNameInput && presetNameInput.value) || '').trim();
+  if (!name) {
+    flash('Enter a name for this preset');
+    if (presetNameInput) presetNameInput.focus();
+    return;
+  }
+  const tree = serializePresetTree(root);
+  const list = readPresets();
+  const existing = list.find((p) => p.name.toLowerCase() === name.toLowerCase());
+  const now = Date.now();
+  if (existing) {
+    existing.tree = tree;
+    existing.updatedAt = now;
+    writePresets(list);
+    flash('Updated preset “' + existing.name + '”');
+  } else {
+    list.push({
+      id: 'p' + now.toString(36) + Math.floor(Math.random() * 1e4).toString(36),
+      name,
+      createdAt: now,
+      updatedAt: now,
+      tree
+    });
+    writePresets(list);
+    flash('Saved preset “' + name + '”');
+  }
+  if (presetNameInput) presetNameInput.value = '';
+  renderPresetsList();
+}
+
+async function applyPreset(id) {
+  const preset = readPresets().find((p) => p.id === id);
+  if (!preset || !preset.tree) {
+    flash('Preset not found');
+    return;
+  }
+  forEachLeaf(root, disposeLeaf);
+  root = deserialize(preset.tree);
+  focusedLeaf = null;
+  selectedLeaves.clear();
+  render();
+
+  const loads = [];
+  forEachLeaf(root, (leaf) => {
+    if (leaf.folder) {
+      loads.push(loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf, true)));
+    }
+  });
+  await Promise.all(loads);
+  saveState();
+  setPresetsPanelOpen(false);
+  flash('Loaded preset “' + (preset.name || 'Untitled') + '”');
+}
+
+function renamePreset(id) {
+  const list = readPresets();
+  const preset = list.find((p) => p.id === id);
+  if (!preset) return;
+  const next = window.prompt('Rename preset', preset.name || '');
+  if (next == null) return;
+  const name = next.trim();
+  if (!name) {
+    flash('Preset name cannot be empty');
+    return;
+  }
+  if (list.some((p) => p.id !== id && p.name.toLowerCase() === name.toLowerCase())) {
+    flash('A preset with that name already exists');
+    return;
+  }
+  preset.name = name;
+  preset.updatedAt = Date.now();
+  writePresets(list);
+  renderPresetsList();
+  flash('Renamed preset to “' + name + '”');
+}
+
+function deletePreset(id) {
+  const list = readPresets();
+  const preset = list.find((p) => p.id === id);
+  if (!preset) return;
+  if (!window.confirm('Delete preset “' + (preset.name || 'Untitled') + '”?')) return;
+  writePresets(list.filter((p) => p.id !== id));
+  renderPresetsList();
+  flash('Deleted preset');
 }
 
 // ============================================================================
@@ -1406,6 +2041,7 @@ function setGuide(on) {
   btnGuide.classList.toggle('active', on);
   saveState();
   renderDisplayGuide();
+  applyDesktopPreview();
 }
 
 /**
@@ -1422,10 +2058,7 @@ function renderDisplayGuide() {
   displayGuide.classList.toggle('visible', show);
   if (!show) { displayGuide.textContent = ''; return; }
 
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
   const span = winState.spanningAllDisplays && winState.windowBounds;
-
   let map;
   if (span) {
     const win = winState.windowBounds;
@@ -1436,20 +2069,18 @@ function renderDisplayGuide() {
       height: b.height
     });
   } else {
-    const u = unionBounds(displays);
-    const margin = 36;
-    const scale = Math.min((vw - margin * 2) / u.width, (vh - margin * 2) / u.height, 1);
-    const offX = (vw - u.width * scale) / 2;
-    const offY = (vh - u.height * scale) / 2;
+    const layout = getDesktopPreviewLayout();
+    if (!layout) { displayGuide.textContent = ''; return; }
     map = (b) => ({
-      left: offX + (b.x - u.x) * scale,
-      top: offY + (b.y - u.y) * scale,
-      width: b.width * scale,
-      height: b.height * scale
+      left: layout.left + (b.x - layout.union.x) * layout.scale,
+      top: layout.top + (b.y - layout.union.y) * layout.scale,
+      width: b.width * layout.scale,
+      height: b.height * layout.scale
     });
   }
 
   displayGuide.classList.toggle('preview', !span);
+  displayGuide.classList.toggle('aligned', !span && !!settings.desktopPreview);
   displayGuide.textContent = '';
   for (const d of displays) {
     const r = map(d.bounds);
@@ -1608,15 +2239,15 @@ function collectLeaves(node, out = []) {
   return out;
 }
 
-function tileToDisplays() {
+function tileToDisplays(opts = {}) {
   const displays = winState.displays || [];
   if (displays.length < 2) {
-    flash('Tile to Displays needs 2+ connected displays');
+    if (!opts.quiet) flash('Tile to Displays needs 2+ connected displays');
     return;
   }
   // Preserve current folder assignments in reading order.
   const oldLeaves = collectLeaves(root);
-  const saved = oldLeaves.map((l) => ({ folder: l.folder, index: l.index }));
+  const saved = oldLeaves.map((l) => ({ folder: l.folder, index: l.index, volume: l.volume, muted: l.muted, loop: l.loop }));
 
   forEachLeaf(root, disposeLeaf);
   const union = unionBounds(displays);
@@ -1627,16 +2258,24 @@ function tileToDisplays() {
 
   root = buildTreeFromRects(rects, { x: union.x, y: union.y, w: union.width, h: union.height });
   focusedLeaf = null;
+  selectedLeaves.clear();
   render();
+  applyDesktopPreview();
+  renderDisplayGuide();
 
-  const newLeaves = collectLeaves(root);
+  const newLeaves = collectLeaves(root).filter((l) => !l.spacer);
   newLeaves.forEach((leaf, i) => {
     const s = saved[i];
-    if (s && s.folder) loadFolder(leaf, s.folder, s.index || 0, false);
+    if (!s) return;
+    if (typeof s.volume === 'number') leaf.volume = clamp(s.volume, 0, MAX_TILE_VOLUME);
+    if (s.muted != null) leaf.muted = !!s.muted;
+    leaf.loop = !!s.loop;
+    if (s.folder) loadFolder(leaf, s.folder, s.index || 0, false);
   });
 
-  flash(`Tiled layout to match ${displays.length} displays`);
+  if (!opts.quiet) flash(`Tiled layout to match ${displays.length} displays`);
   if (!settings.guideOn) setGuide(true);
+  else applyDesktopPreview();
 }
 
 let flashTimer = null;
@@ -1654,8 +2293,17 @@ function isTypingTarget(t) {
   return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
 }
 
+document.addEventListener('mousedown', (e) => {
+  if (!isPresetsPanelOpen()) return;
+  const t = e.target;
+  if (presetsPanel && presetsPanel.contains(t)) return;
+  if (btnPresets && (btnPresets === t || btnPresets.contains(t))) return;
+  setPresetsPanelOpen(false);
+});
+
 document.addEventListener('mousemove', onGlobalMouseMove);
 document.addEventListener('mousedown', wake);
+document.addEventListener('mousedown', () => resumeAudioContext());
 document.addEventListener('keydown', (e) => {
   wake();
   if (e.key === 'Shift' && settings.editMode) updatePreview(lastMouse.x, lastMouse.y, true);
@@ -1668,6 +2316,7 @@ document.addEventListener('keydown', (e) => {
     case 'f': window.api.toggleFullscreen(); break;
     case 'a': window.api.toggleSpanAll(); break;
     case 'd': setGuide(!settings.guideOn); break;
+    case 'v': setDesktopPreview(!settings.desktopPreview); break;
     case 't': tileToDisplays(); break;
     case 'delete':
     case 'backspace':
@@ -1677,7 +2326,12 @@ document.addEventListener('keydown', (e) => {
     case ' ':
       if (focusedLeaf) { e.preventDefault(); togglePlay(focusedLeaf); }
       break;
+    case 'p':
+      if (!e.ctrlKey && !e.metaKey) togglePresetsPanel();
+      break;
     case 'escape':
+      if (isPresetsPanelOpen()) { setPresetsPanelOpen(false); break; }
+      if (selectedLeaves.size > 0) { clearSelection(); break; }
       if (settings.editMode) setEditMode(false);
       break;
     default: break;
@@ -1694,12 +2348,24 @@ btnReset.addEventListener('click', () => {
   forEachLeaf(root, disposeLeaf);
   root = makeLeaf();
   focusedLeaf = null;
+  selectedLeaves.clear();
   render();
 });
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
+if (btnPreview) btnPreview.addEventListener('click', () => setDesktopPreview(!settings.desktopPreview));
 btnTileDisplays.addEventListener('click', () => tileToDisplays());
+if (btnAssign) btnAssign.addEventListener('click', () => assignFolderToSelection());
+if (btnPresets) btnPresets.addEventListener('click', () => togglePresetsPanel());
+const btnPresetsClose = document.getElementById('btn-presets-close');
+if (btnPresetsClose) btnPresetsClose.addEventListener('click', () => setPresetsPanelOpen(false));
+if (btnPresetSave) btnPresetSave.addEventListener('click', () => saveCurrentPreset());
+if (presetNameInput) {
+  presetNameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveCurrentPreset(); }
+  });
+}
 btnMin.addEventListener('click', () => window.api.minimize());
 btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
@@ -1717,8 +2383,10 @@ function applyWindowState(state) {
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
   void wasSpanningAll;
+  if (!projection.active) applyDesktopPreview();
   renderDisplayGuide();
   positionTileBadges();
+  bootstrapDesktopPreview();
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -1757,8 +2425,9 @@ window.api.onDisplayChanged(() => refreshDisplays());
 
 window.addEventListener('resize', () => {
   if (settings.editMode) hidePreview();
-  renderDisplayGuide();
   if (projection.active) applyProjection();
+  else applyDesktopPreview();
+  renderDisplayGuide();
   positionTileBadges();
 });
 
@@ -1770,6 +2439,12 @@ if (IS_MIRROR) {
   // Controller (main) window: owns persistence + the control bar.
   window.api.onProjection(setProjection);
   window.api.onLayout(applyIncomingLayout);
+  if (window.api.onResumeAudio) {
+    window.api.onResumeAudio(() => {
+      resumeAudioContext();
+      scheduleSpanPlaybackRecovery();
+    });
+  }
   // A mirror asked for the current layout — force a fresh broadcast to it.
   window.api.onProvideLayout(() => { lastSyncJSON = ''; broadcastLayout(); });
   loadState();
