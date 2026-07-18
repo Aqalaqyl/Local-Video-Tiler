@@ -5,6 +5,31 @@ const path = require('path');
 const fs = require('fs');
 const url = require('url');
 
+/**
+ * Prefer GPU compositing + hardware video decode. Chromium falls back to
+ * software (CPU) paths automatically when the GPU / decoder isn't available.
+ * These switches must be set before app.whenReady().
+ */
+function configureHardwareAcceleration() {
+  // Allow GPUs that Chromium would otherwise blocklist; still fails safe to CPU.
+  app.commandLine.appendSwitch('ignore-gpu-blocklist');
+  app.commandLine.appendSwitch('enable-gpu-rasterization');
+  app.commandLine.appendSwitch('enable-zero-copy');
+  // Legacy Chromium flags — ignored when unsupported, helpful on older builds.
+  app.commandLine.appendSwitch('enable-accelerated-video-decode');
+  app.commandLine.appendSwitch('enable-accelerated-mjpeg-decode');
+
+  const features = ['CanvasOopRasterization'];
+  if (process.platform === 'linux') {
+    features.push('VaapiVideoDecoder', 'VaapiVideoEncoder');
+  } else if (process.platform === 'win32') {
+    features.push('PlatformHEVCDecoderSupport');
+  }
+  app.commandLine.appendSwitch('enable-features', features.join(','));
+}
+
+configureHardwareAcceleration();
+
 const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.m4v', '.webm', '.ogv', '.ogg', '.mov', '.mkv', '.avi',
   '.wmv', '.flv', '.mpg', '.mpeg', '.3gp', '.ts', '.m2ts'
@@ -60,6 +85,8 @@ function createWindow() {
       sandbox: false,
       // Allow file:// media to load from the file:// page.
       webSecurity: true,
+      // Keep decoding/compositing alive when the window isn't focused (multi-tile).
+      backgroundThrottling: false,
       // Let assigned folders start playing on launch without a user gesture.
       autoplayPolicy: 'no-user-gesture-required'
     }
@@ -224,6 +251,17 @@ function spanAllDisplays() {
   mainWindow.moveTop();
   mainWindow.focus();
   sendWindowState();
+
+  // Mirror windows steal focus; keep the controller focused and nudge audio resume.
+  const refocusController = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.moveTop();
+    mainWindow.focus();
+    try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
+  };
+  setTimeout(refocusController, 300);
+  setTimeout(refocusController, 900);
+  setTimeout(refocusController, 1800);
 }
 
 function restoreFromSpan() {
@@ -298,6 +336,37 @@ ipcMain.handle('media:readFolder', async (_event, folderPath) => {
   }
 });
 
+/** Permanently delete a video file that belongs to an assigned media folder. */
+ipcMain.handle('media:deleteFile', async (_event, filePath, folderPath) => {
+  if (!filePath || !folderPath) return { ok: false, error: 'Missing path' };
+  const resolvedFile = path.resolve(filePath);
+  const resolvedFolder = path.resolve(folderPath);
+  const rel = path.relative(resolvedFolder, resolvedFile);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return { ok: false, error: 'File is outside the assigned folder' };
+  }
+  if (!VIDEO_EXTENSIONS.has(path.extname(resolvedFile).toLowerCase())) {
+    return { ok: false, error: 'Not a supported video file' };
+  }
+  const parent = BrowserWindow.getFocusedWindow() || mainWindow;
+  const result = await dialog.showMessageBox(parent || undefined, {
+    type: 'warning',
+    buttons: ['Delete', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Delete video',
+    message: 'Delete this video permanently?',
+    detail: path.basename(resolvedFile) + '\n\nThis cannot be undone.'
+  });
+  if (result.response !== 0) return { ok: false, cancelled: true };
+  try {
+    await fs.promises.unlink(resolvedFile);
+    return { ok: true, path: resolvedFile };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
 ipcMain.handle('display:getInfo', () => {
   const displays = screen.getAllDisplays();
   const primaryId = screen.getPrimaryDisplay().id;
@@ -352,6 +421,14 @@ ipcMain.on('projection:requestLayout', () => {
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(() => {
+  // Log GPU / video-decode status once; Chromium already chose GPU or CPU.
+  try {
+    const status = app.getGPUFeatureStatus();
+    const compositing = status.gpu_compositing || status.gpu_compositing_status || '?';
+    const videoDecode = status.video_decode || status.video_decode_status || '?';
+    console.log(`[Local Video Tiler] GPU compositing: ${compositing}; video decode: ${videoDecode}`);
+  } catch (_) { /* ignore */ }
+
   createWindow();
 
   // Re-broadcast display changes so the renderer can update its info pill.

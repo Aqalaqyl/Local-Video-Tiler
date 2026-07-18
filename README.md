@@ -6,7 +6,9 @@ Carve the screen into as many panes as you like, point each pane at a folder of
 media, and let everything play side by side.
 
 Built with [Electron](https://www.electronjs.org/) — everything runs locally,
-nothing is uploaded anywhere.
+nothing is uploaded anywhere. Playback prefers **GPU** compositing and hardware
+video decode when available, and falls back to the **CPU** automatically. A
+background check keeps each tile on the correct clip with audio/video in sync.
 
 ## Features
 
@@ -30,6 +32,12 @@ nothing is uploaded anywhere.
 - **Per-tile media folders** — assign any folder to a tile and it becomes a
   playlist of the video files inside it, with play/pause, next/previous, seek,
   volume and mute controls.
+  - **Audio boost up to 200%** — scroll-wheel or the volume slider can go past
+    100% via a Web Audio gain stage (falls back to 100% if Web Audio is unavailable).
+  - **Delete current video** (toolbar 🗑) — permanently removes the playing file
+    from disk (with confirmation), then advances the tile.
+  - **Ctrl/Cmd+click multi-select** — select several tiles, then assign one folder
+    to all of them.
   - **Random / shuffle playback** — a tile starts on a random clip and, when a
     clip finishes, automatically shuffles to another random clip from its folder.
     (Next / Previous still step through in order for manual control.)
