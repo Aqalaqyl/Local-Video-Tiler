@@ -26,6 +26,10 @@ function configureHardwareAcceleration() {
     features.push('PlatformHEVCDecoderSupport');
   }
   app.commandLine.appendSwitch('enable-features', features.join(','));
+  // Avoid Windows occlusion heuristics throttling background decoder windows.
+  if (process.platform === 'win32') {
+    app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+  }
 }
 
 configureHardwareAcceleration();

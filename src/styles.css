@@ -166,6 +166,8 @@ body.desktop-preview #stage > .node-leaf {
   /* A clearly visible boundary so the user can always see how the surface has
      been split, even over dark video. */
   border: 1px solid rgba(255,255,255,0.14);
+  /* Limit style/layout work to each tile's box (helps with many videos). */
+  contain: layout style paint;
 }
 .node-leaf.focused { box-shadow: inset 0 0 0 2px var(--accent); }
 .node-leaf.selected { box-shadow: inset 0 0 0 2px var(--accent-2); }
@@ -190,9 +192,11 @@ body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.8)
   display: block;
   background: #000;
   object-fit: contain;
-  /* Promote each video plane to its own compositor layer (GPU when available). */
-  transform: translateZ(0);
+  /* Promote playing video planes; paused tiles stay cheaper. */
   backface-visibility: hidden;
+}
+.node-leaf.playing .tile-video {
+  transform: translateZ(0);
 }
 
 .tile-empty {
