@@ -660,21 +660,41 @@ function stopPlaybackAudit() {
   playbackAuditTimer = 0;
 }
 
+/** True if the tile intersects at least one physical display in the wall. */
+function leafIntersectsAnyDisplay(leaf) {
+  if (!projection.active) return true;
+  const r = getLeafUnionRect(leaf);
+  if (!r || r.w < 1 || r.h < 1) return isLeafVisible(leaf);
+  const displays = winState.displays || [];
+  if (!displays.length) return true;
+  for (const d of displays) {
+    const b = d.bounds;
+    if (!b) continue;
+    if (r.x < b.x + b.width && r.x + r.w > b.x &&
+        r.y < b.y + b.height && r.y + r.h > b.y) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Apply per-tile volume/mute. Values above 1.0 boost via Web Audio (up to 200%). */
 function applyTileAudio(leaf) {
   if (!leaf.video) return;
   const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
   leaf.volume = vol;
   const mirror = projection.active && projection.role === 'mirror';
+  // Off-wall padding tiles must not contribute mystery audio on the controller.
+  const offWall = projection.active && projection.role === 'controller' && !leafIntersectsAnyDisplay(leaf);
   // Paused tiles must be silent even if the element hasn't finished pausing yet.
-  const muted = mirror || !!leaf.muted || vol === 0 || !!leaf.userPaused;
+  const muted = mirror || offWall || !!leaf.muted || vol === 0 || !!leaf.userPaused;
 
   const graph = ensureTileAudioGraph(leaf);
   if (graph) {
     resumeAudioContext();
-    // Element stays at unity; GainNode carries 0–200% (and mute).
+    // Element stays at unity for boost headroom; silence via gain AND element mute.
     try { leaf.video.volume = 1; } catch (_) { /* ignore */ }
-    leaf.video.muted = false;
+    leaf.video.muted = muted;
     try { graph.gain.gain.value = muted ? 0 : vol; } catch (_) { /* ignore */ }
   } else {
     // No Web Audio: native volume cannot exceed 100%.
@@ -773,11 +793,94 @@ function applySettingsFromPayload(s) {
 // Push the current layout + settings to peer windows (deduped to avoid echoes).
 function broadcastLayout() {
   if (!projection.active) return;
-  const payload = { tree: serializeForSync(root), settings: snapshotSettings() };
+  const payload = {
+    tree: serializeForSync(root),
+    settings: snapshotSettings(),
+    // Controller is the authority for which clip/time each tile is on.
+    from: projection.role || (IS_MIRROR ? 'mirror' : 'controller')
+  };
   const json = JSON.stringify(payload);
   if (json === lastSyncJSON) return;
   lastSyncJSON = json;
   try { window.api.pushLayout(payload); } catch (_) { /* ignore */ }
+}
+
+/** Compare tile/split structure only (ignore clip index, time, volume, pause). */
+function sameLayoutStructure(a, b) {
+  if (!a || !b || a.kind !== b.kind) return false;
+  if (a.kind === 'leaf') {
+    return (a.folder || null) === (b.folder || null) && !!a.spacer === !!b.spacer;
+  }
+  return a.direction === b.direction &&
+    Math.abs((a.ratio || 0.5) - (b.ratio || 0.5)) < 0.0005 &&
+    sameLayoutStructure(a.children[0], b.children[0]) &&
+    sameLayoutStructure(a.children[1], b.children[1]);
+}
+
+/**
+ * Apply synced playback fields onto an existing tree (no DOM rebuild).
+ * Clip index/time are only applied when `applyIdentity` is true (controller → mirrors).
+ */
+function applyIncomingPlayback(localNode, remoteNode, opts = {}) {
+  if (!localNode || !remoteNode || localNode.kind !== remoteNode.kind) return;
+  const applyIdentity = opts.applyIdentity !== false;
+
+  if (localNode.kind === 'leaf') {
+    if (localNode.spacer) return;
+    if (typeof remoteNode.volume === 'number') {
+      localNode.volume = clamp(remoteNode.volume, 0, MAX_TILE_VOLUME);
+    }
+    if (remoteNode.muted != null) localNode.muted = !!remoteNode.muted;
+    localNode.userPaused = !!remoteNode.userPaused;
+    localNode.loop = !!remoteNode.loop;
+
+    if (applyIdentity && typeof remoteNode.index === 'number' && localNode.files.length) {
+      const idx = clamp(remoteNode.index, 0, localNode.files.length - 1);
+      const cur = localNode.files[idx];
+      if (idx !== localNode.index || (cur && !sourcesMatch(localNode.video, cur.url))) {
+        localNode.index = idx;
+        loadCurrent(localNode, leafShouldPlay(localNode), { force: true });
+      }
+    }
+
+    if (applyIdentity && typeof remoteNode.currentTime === 'number' &&
+        localNode.video && leafShouldPlay(localNode) && !localNode.video.seeking &&
+        localNode.video.readyState >= 2) {
+      const drift = Math.abs((localNode.video.currentTime || 0) - remoteNode.currentTime);
+      if (drift > 0.45) {
+        try { localNode.video.currentTime = remoteNode.currentTime; } catch (_) { /* ignore */ }
+        resetLeafSyncClock(localNode);
+      }
+    }
+
+    applyPlaybackIntent(localNode);
+    return;
+  }
+
+  applyIncomingPlayback(localNode.children[0], remoteNode.children[0], opts);
+  applyIncomingPlayback(localNode.children[1], remoteNode.children[1], opts);
+}
+
+function applyPendingSyncIdentity(leaf) {
+  if (!leaf || leaf.spacer) return;
+  const hasIndex = typeof leaf._pendingSyncIndex === 'number';
+  const hasTime = typeof leaf._pendingSyncTime === 'number';
+  if (!hasIndex && !hasTime) return;
+
+  if (hasIndex && leaf.files.length) {
+    leaf.index = clamp(leaf._pendingSyncIndex, 0, leaf.files.length - 1);
+  }
+  const idx = leaf.index;
+  const cur = leaf.files[idx];
+  if (cur && !sourcesMatch(leaf.video, cur.url)) {
+    loadCurrent(leaf, leafShouldPlay(leaf), { force: true });
+  }
+  if (hasTime && leaf.video && leafShouldPlay(leaf)) {
+    try { leaf.video.currentTime = leaf._pendingSyncTime; } catch (_) { /* ignore */ }
+    resetLeafSyncClock(leaf);
+  }
+  delete leaf._pendingSyncIndex;
+  delete leaf._pendingSyncTime;
 }
 
 // Apply a layout pushed from another window onto this display's slice.
@@ -786,12 +889,20 @@ function broadcastLayout() {
 // (split / delete / resize) doesn't restart the videos already playing here.
 function applyIncomingLayout(payload) {
   if (!payload) return;
-  const json = JSON.stringify({ tree: payload.tree, settings: payload.settings });
+  const json = JSON.stringify({ tree: payload.tree, settings: payload.settings, from: payload.from });
   if (json === lastSyncJSON) return;
   lastSyncJSON = json;
   applyingRemote = true;
   try {
     applySettingsFromPayload(payload.settings);
+
+    // Fast path: same tile structure → just realign clip identity / pause / volume.
+    // Mirrors no longer auto-shuffle on ended, so index/time from any peer is safe.
+    if (sameLayoutStructure(root, payload.tree)) {
+      applyIncomingPlayback(root, payload.tree, { applyIdentity: true });
+      if (projection.active) scheduleSpanPlaybackRecovery();
+      return;
+    }
 
     const pool = [];
     forEachLeaf(root, (l) => pool.push(l));
@@ -819,6 +930,8 @@ function applyIncomingLayout(payload) {
           if (node.muted != null) leaf.muted = !!node.muted;
           // Always apply — omitting false left peers stuck paused after unpause.
           leaf.userPaused = !!node.userPaused;
+          if (typeof node.index === 'number') leaf._pendingSyncIndex = node.index;
+          if (typeof node.currentTime === 'number') leaf._pendingSyncTime = node.currentTime;
         }
         if (leaf.el) leaf.el.classList.toggle('pad-spacer', spacer);
         applyTileAudio(leaf);
@@ -834,14 +947,23 @@ function applyIncomingLayout(payload) {
     focusedLeaf = null;
     selectedLeaves.clear();
     render();
-    // Start media only for brand-new tiles; reused tiles honor synced pause.
+    // Start media for brand-new tiles; honor synced clip identity when present.
     forEachLeaf(root, (leaf) => {
       if (leaf.folder && leaf.files.length === 0) {
-        loadFolder(leaf, leaf.folder, 0, false).then(() => {
-          if (!leaf.userPaused) advanceRandom(leaf);
-          else applyPlaybackIntent(leaf);
+        const startIndex = typeof leaf._pendingSyncIndex === 'number' ? leaf._pendingSyncIndex : 0;
+        loadFolder(leaf, leaf.folder, startIndex, false).then(() => {
+          if (typeof leaf._pendingSyncIndex === 'number' || typeof leaf._pendingSyncTime === 'number') {
+            applyPendingSyncIdentity(leaf);
+            applyPlaybackIntent(leaf);
+          } else if (!leaf.userPaused && !(projection.active && projection.role === 'mirror')) {
+            // Controller (or non-projection) picks the clip; mirrors wait for identity sync.
+            advanceRandom(leaf);
+          } else {
+            applyPlaybackIntent(leaf);
+          }
         });
       } else {
+        applyPendingSyncIdentity(leaf);
         applyPlaybackIntent(leaf);
       }
     });
@@ -850,6 +972,22 @@ function applyIncomingLayout(payload) {
   } finally {
     applyingRemote = false;
   }
+}
+
+let projectionIdentityTimer = 0;
+/** Controller periodically rebroadcasts clip index + time so mirrors cannot drift. */
+function startProjectionIdentitySync() {
+  if (projectionIdentityTimer || IS_MIRROR) return;
+  projectionIdentityTimer = window.setInterval(() => {
+    if (!projection.active || projection.role !== 'controller' || applyingRemote) return;
+    lastSyncJSON = '';
+    broadcastLayout();
+  }, 2000);
+}
+function stopProjectionIdentitySync() {
+  if (!projectionIdentityTimer) return;
+  clearInterval(projectionIdentityTimer);
+  projectionIdentityTimer = 0;
 }
 
 // Receive projection config from the main process (controller window).
@@ -870,6 +1008,7 @@ function setProjection(config) {
     projection.role = 'controller';
     projection.viewport = null;
     projection.union = null;
+    stopProjectionIdentitySync();
     applyProjection();
     forEachLeaf(root, (leaf) => {
       if (leaf.spacer || !leaf.video) return;
@@ -892,6 +1031,8 @@ function setProjection(config) {
   resumeAudioContext();
   applyProjection();
   renderDisplayGuide();
+  if (projection.role === 'controller') startProjectionIdentitySync();
+  else stopProjectionIdentitySync();
   if (projectionViewportKey(config) !== prevKey) {
     lastSyncJSON = '';
     broadcastLayout();
@@ -1227,8 +1368,11 @@ function wireLeafEvents(leaf) {
     armVideoFrameWatch(leaf);
   });
   // When a clip ends (and the tile isn't looping), shuffle to a random clip.
+  // While spanning, only the controller advances — mirrors follow synced index
+  // so on-screen video and controller audio never drift onto different clips.
   video.addEventListener('ended', () => {
     if (leaf.userPaused) return;
+    if (projection.active && projection.role === 'mirror') return;
     advanceRandom(leaf);
   });
 
@@ -1788,14 +1932,17 @@ function setCellSize(px) {
 // ============================================================================
 // Persistence
 // ============================================================================
-// `withIndex` keeps the per-tile playback position for local persistence. Cross-
-// window sync omits it so each display can shuffle independently without forcing
-// every other screen to rebuild whenever a single tile advances.
-function serializeTree(node, withIndex) {
+// Local persistence and projection sync both carry per-tile clip index. Projection
+// sync also includes currentTime so mirrors show the same frame the controller
+// is voicing (independent shuffle across displays caused unattributable audio).
+function serializeTree(node, withIndex, withTime) {
   if (node.kind === 'leaf') {
     const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop };
     if (node.spacer) o.spacer = true;
-    if (withIndex) o.index = node.index;
+    if (withIndex) o.index = node.index || 0;
+    if (withTime && node.video && isFinite(node.video.currentTime)) {
+      o.currentTime = Math.round(node.video.currentTime * 20) / 20;
+    }
     o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
     if (node.muted) o.muted = true;
     // Always include so unpause (false) clears peers — omitting it left them stuck.
@@ -1806,11 +1953,14 @@ function serializeTree(node, withIndex) {
     kind: 'split',
     direction: node.direction,
     ratio: node.ratio,
-    children: [serializeTree(node.children[0], withIndex), serializeTree(node.children[1], withIndex)]
+    children: [
+      serializeTree(node.children[0], withIndex, withTime),
+      serializeTree(node.children[1], withIndex, withTime)
+    ]
   };
 }
-function serialize(node) { return serializeTree(node, true); }
-function serializeForSync(node) { return serializeTree(node, false); }
+function serialize(node) { return serializeTree(node, true, false); }
+function serializeForSync(node) { return serializeTree(node, true, true); }
 
 function deserialize(obj) {
   if (!obj) return makeLeaf();

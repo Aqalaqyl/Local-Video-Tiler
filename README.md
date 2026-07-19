@@ -7,8 +7,10 @@ media, and let everything play side by side.
 
 Built with [Electron](https://www.electronjs.org/) — everything runs locally,
 nothing is uploaded anywhere. Playback prefers **GPU** compositing and hardware
-video decode when available, and falls back to the **CPU** automatically. A
-background check keeps each tile on the correct clip with audio/video in sync.
+video decode when available, and falls back to the **CPU** automatically. When
+spanning all displays, the primary window is the audio authority and keeps every
+other screen on the **same clip and timeline**, so sound always matches the
+picture you see.
 
 ## Features
 
