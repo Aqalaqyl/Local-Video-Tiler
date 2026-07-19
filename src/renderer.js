@@ -34,6 +34,14 @@ const btnEdit = document.getElementById('btn-edit');
 const btnGrid = document.getElementById('btn-grid');
 const btnSnap = document.getElementById('btn-snap');
 const btnReset = document.getElementById('btn-reset');
+const btnResetDisplay = document.getElementById('btn-reset-display');
+const btnPauseAll = document.getElementById('btn-pause-all');
+const btnPauseDisplay = document.getElementById('btn-pause-display');
+const btnPauseAllMirror = document.getElementById('btn-pause-all-mirror');
+const btnPauseDisplayMirror = document.getElementById('btn-pause-display-mirror');
+const btnResetDisplayMirror = document.getElementById('btn-reset-display-mirror');
+const btnEditMirror = document.getElementById('btn-edit-mirror');
+const mirrorPlaybackDock = document.getElementById('mirror-playback-dock');
 const btnFs = document.getElementById('btn-fs');
 const btnFsAll = document.getElementById('btn-fs-all');
 const btnGuide = document.getElementById('btn-guide');
@@ -279,19 +287,31 @@ function isLeafVisible(leaf) {
   return r.right > 1 && r.bottom > 1 && r.left < window.innerWidth - 1 && r.top < window.innerHeight - 1;
 }
 
+function unionBoundsFromWinDisplays() {
+  const displays = winState.displays || [];
+  if (!displays.length) return null;
+  return unionBounds(displays);
+}
+
 /** Map a tile into the shared multi-monitor canvas coordinates. */
 function getLeafUnionRect(leaf) {
-  if (!leaf.el || !projection.active || !projection.union) return null;
-  const leafR = leaf.el.getBoundingClientRect();
+  if (!leaf.el) return null;
+  const r = leaf.el.getBoundingClientRect();
+  if (projection.active && projection.union) {
+    return { x: r.left + projOffX(), y: r.top + projOffY(), w: r.width, h: r.height };
+  }
   const stageR = stage.getBoundingClientRect();
-  if (stageR.width < 1 || stageR.height < 1) return null;
-  const relX = (leafR.left - stageR.left) / stageR.width;
-  const relY = (leafR.top - stageR.top) / stageR.height;
+  const u = unionBoundsFromWinDisplays();
+  if (!u || stageR.width < 1 || stageR.height < 1) {
+    return { x: r.left - stageR.left, y: r.top - stageR.top, w: r.width, h: r.height };
+  }
+  const relX = (r.left - stageR.left) / stageR.width;
+  const relY = (r.top - stageR.top) / stageR.height;
   return {
-    x: projection.union.x + relX * projection.union.width,
-    y: projection.union.y + relY * projection.union.height,
-    w: (leafR.width / stageR.width) * projection.union.width,
-    h: (leafR.height / stageR.height) * projection.union.height
+    x: u.x + relX * u.width,
+    y: u.y + relY * u.height,
+    w: (r.width / stageR.width) * u.width,
+    h: (r.height / stageR.height) * u.height
   };
 }
 
@@ -347,6 +367,9 @@ function applyPlaybackIntent(leaf, opts = {}) {
 
 /** Persist + sync pause/play immediately (do not wait for the saveState debounce). */
 function syncPlaybackNow() {
+  // Cancel any pending debounced save so an older pause snapshot can't overwrite
+  // a newer unpause (that race left tiles stuck paused).
+  clearTimeout(saveTimer);
   if (!IS_MIRROR) {
     try {
       localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) }));
@@ -355,8 +378,6 @@ function syncPlaybackNow() {
   if (projection.active) {
     lastSyncJSON = '';
     broadcastLayout();
-  } else {
-    saveState();
   }
 }
 
@@ -660,21 +681,41 @@ function stopPlaybackAudit() {
   playbackAuditTimer = 0;
 }
 
+/** True if the tile intersects at least one physical display in the wall. */
+function leafIntersectsAnyDisplay(leaf) {
+  if (!projection.active) return true;
+  const r = getLeafUnionRect(leaf);
+  if (!r || r.w < 1 || r.h < 1) return isLeafVisible(leaf);
+  const displays = winState.displays || [];
+  if (!displays.length) return true;
+  for (const d of displays) {
+    const b = d.bounds;
+    if (!b) continue;
+    if (r.x < b.x + b.width && r.x + r.w > b.x &&
+        r.y < b.y + b.height && r.y + r.h > b.y) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Apply per-tile volume/mute. Values above 1.0 boost via Web Audio (up to 200%). */
 function applyTileAudio(leaf) {
   if (!leaf.video) return;
   const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
   leaf.volume = vol;
   const mirror = projection.active && projection.role === 'mirror';
+  // Off-wall padding tiles must not contribute mystery audio on the controller.
+  const offWall = projection.active && projection.role === 'controller' && !leafIntersectsAnyDisplay(leaf);
   // Paused tiles must be silent even if the element hasn't finished pausing yet.
-  const muted = mirror || !!leaf.muted || vol === 0 || !!leaf.userPaused;
+  const muted = mirror || offWall || !!leaf.muted || vol === 0 || !!leaf.userPaused;
 
   const graph = ensureTileAudioGraph(leaf);
   if (graph) {
     resumeAudioContext();
-    // Element stays at unity; GainNode carries 0–200% (and mute).
+    // Element stays at unity for boost headroom; silence via gain AND element mute.
     try { leaf.video.volume = 1; } catch (_) { /* ignore */ }
-    leaf.video.muted = false;
+    leaf.video.muted = muted;
     try { graph.gain.gain.value = muted ? 0 : vol; } catch (_) { /* ignore */ }
   } else {
     // No Web Audio: native volume cannot exceed 100%.
@@ -773,11 +814,94 @@ function applySettingsFromPayload(s) {
 // Push the current layout + settings to peer windows (deduped to avoid echoes).
 function broadcastLayout() {
   if (!projection.active) return;
-  const payload = { tree: serializeForSync(root), settings: snapshotSettings() };
+  const payload = {
+    tree: serializeForSync(root),
+    settings: snapshotSettings(),
+    // Controller is the authority for which clip/time each tile is on.
+    from: projection.role || (IS_MIRROR ? 'mirror' : 'controller')
+  };
   const json = JSON.stringify(payload);
   if (json === lastSyncJSON) return;
   lastSyncJSON = json;
   try { window.api.pushLayout(payload); } catch (_) { /* ignore */ }
+}
+
+/** Compare tile/split structure only (ignore clip index, time, volume, pause). */
+function sameLayoutStructure(a, b) {
+  if (!a || !b || a.kind !== b.kind) return false;
+  if (a.kind === 'leaf') {
+    return (a.folder || null) === (b.folder || null) && !!a.spacer === !!b.spacer;
+  }
+  return a.direction === b.direction &&
+    Math.abs((a.ratio || 0.5) - (b.ratio || 0.5)) < 0.0005 &&
+    sameLayoutStructure(a.children[0], b.children[0]) &&
+    sameLayoutStructure(a.children[1], b.children[1]);
+}
+
+/**
+ * Apply synced playback fields onto an existing tree (no DOM rebuild).
+ * Clip index/time are only applied when `applyIdentity` is true (controller → mirrors).
+ */
+function applyIncomingPlayback(localNode, remoteNode, opts = {}) {
+  if (!localNode || !remoteNode || localNode.kind !== remoteNode.kind) return;
+  const applyIdentity = opts.applyIdentity !== false;
+
+  if (localNode.kind === 'leaf') {
+    if (localNode.spacer) return;
+    if (typeof remoteNode.volume === 'number') {
+      localNode.volume = clamp(remoteNode.volume, 0, MAX_TILE_VOLUME);
+    }
+    if (remoteNode.muted != null) localNode.muted = !!remoteNode.muted;
+    localNode.userPaused = !!remoteNode.userPaused;
+    localNode.loop = !!remoteNode.loop;
+
+    if (applyIdentity && typeof remoteNode.index === 'number' && localNode.files.length) {
+      const idx = clamp(remoteNode.index, 0, localNode.files.length - 1);
+      const cur = localNode.files[idx];
+      if (idx !== localNode.index || (cur && !sourcesMatch(localNode.video, cur.url))) {
+        localNode.index = idx;
+        loadCurrent(localNode, leafShouldPlay(localNode), { force: true });
+      }
+    }
+
+    if (applyIdentity && typeof remoteNode.currentTime === 'number' &&
+        localNode.video && leafShouldPlay(localNode) && !localNode.video.seeking &&
+        localNode.video.readyState >= 2) {
+      const drift = Math.abs((localNode.video.currentTime || 0) - remoteNode.currentTime);
+      if (drift > 0.45) {
+        try { localNode.video.currentTime = remoteNode.currentTime; } catch (_) { /* ignore */ }
+        resetLeafSyncClock(localNode);
+      }
+    }
+
+    applyPlaybackIntent(localNode);
+    return;
+  }
+
+  applyIncomingPlayback(localNode.children[0], remoteNode.children[0], opts);
+  applyIncomingPlayback(localNode.children[1], remoteNode.children[1], opts);
+}
+
+function applyPendingSyncIdentity(leaf) {
+  if (!leaf || leaf.spacer) return;
+  const hasIndex = typeof leaf._pendingSyncIndex === 'number';
+  const hasTime = typeof leaf._pendingSyncTime === 'number';
+  if (!hasIndex && !hasTime) return;
+
+  if (hasIndex && leaf.files.length) {
+    leaf.index = clamp(leaf._pendingSyncIndex, 0, leaf.files.length - 1);
+  }
+  const idx = leaf.index;
+  const cur = leaf.files[idx];
+  if (cur && !sourcesMatch(leaf.video, cur.url)) {
+    loadCurrent(leaf, leafShouldPlay(leaf), { force: true });
+  }
+  if (hasTime && leaf.video && leafShouldPlay(leaf)) {
+    try { leaf.video.currentTime = leaf._pendingSyncTime; } catch (_) { /* ignore */ }
+    resetLeafSyncClock(leaf);
+  }
+  delete leaf._pendingSyncIndex;
+  delete leaf._pendingSyncTime;
 }
 
 // Apply a layout pushed from another window onto this display's slice.
@@ -786,12 +910,20 @@ function broadcastLayout() {
 // (split / delete / resize) doesn't restart the videos already playing here.
 function applyIncomingLayout(payload) {
   if (!payload) return;
-  const json = JSON.stringify({ tree: payload.tree, settings: payload.settings });
+  const json = JSON.stringify({ tree: payload.tree, settings: payload.settings, from: payload.from });
   if (json === lastSyncJSON) return;
   lastSyncJSON = json;
   applyingRemote = true;
   try {
     applySettingsFromPayload(payload.settings);
+
+    // Fast path: same tile structure → just realign clip identity / pause / volume.
+    // Mirrors no longer auto-shuffle on ended, so index/time from any peer is safe.
+    if (sameLayoutStructure(root, payload.tree)) {
+      applyIncomingPlayback(root, payload.tree, { applyIdentity: true });
+      if (projection.active) scheduleSpanPlaybackRecovery();
+      return;
+    }
 
     const pool = [];
     forEachLeaf(root, (l) => pool.push(l));
@@ -819,6 +951,8 @@ function applyIncomingLayout(payload) {
           if (node.muted != null) leaf.muted = !!node.muted;
           // Always apply — omitting false left peers stuck paused after unpause.
           leaf.userPaused = !!node.userPaused;
+          if (typeof node.index === 'number') leaf._pendingSyncIndex = node.index;
+          if (typeof node.currentTime === 'number') leaf._pendingSyncTime = node.currentTime;
         }
         if (leaf.el) leaf.el.classList.toggle('pad-spacer', spacer);
         applyTileAudio(leaf);
@@ -834,22 +968,48 @@ function applyIncomingLayout(payload) {
     focusedLeaf = null;
     selectedLeaves.clear();
     render();
-    // Start media only for brand-new tiles; reused tiles honor synced pause.
+    // Start media for brand-new tiles; honor synced clip identity when present.
     forEachLeaf(root, (leaf) => {
       if (leaf.folder && leaf.files.length === 0) {
-        loadFolder(leaf, leaf.folder, 0, false).then(() => {
-          if (!leaf.userPaused) advanceRandom(leaf);
-          else applyPlaybackIntent(leaf);
+        const startIndex = typeof leaf._pendingSyncIndex === 'number' ? leaf._pendingSyncIndex : 0;
+        loadFolder(leaf, leaf.folder, startIndex, false).then(() => {
+          if (typeof leaf._pendingSyncIndex === 'number' || typeof leaf._pendingSyncTime === 'number') {
+            applyPendingSyncIdentity(leaf);
+            applyPlaybackIntent(leaf);
+          } else if (!leaf.userPaused && !(projection.active && projection.role === 'mirror')) {
+            // Controller (or non-projection) picks the clip; mirrors wait for identity sync.
+            advanceRandom(leaf);
+          } else {
+            applyPlaybackIntent(leaf);
+          }
         });
       } else {
+        applyPendingSyncIdentity(leaf);
         applyPlaybackIntent(leaf);
       }
     });
     applyProjection();
     if (projection.active) scheduleSpanPlaybackRecovery();
+    updatePauseButtons();
   } finally {
     applyingRemote = false;
   }
+}
+
+let projectionIdentityTimer = 0;
+/** Controller periodically rebroadcasts clip index + time so mirrors cannot drift. */
+function startProjectionIdentitySync() {
+  if (projectionIdentityTimer || IS_MIRROR) return;
+  projectionIdentityTimer = window.setInterval(() => {
+    if (!projection.active || projection.role !== 'controller' || applyingRemote) return;
+    lastSyncJSON = '';
+    broadcastLayout();
+  }, 2000);
+}
+function stopProjectionIdentitySync() {
+  if (!projectionIdentityTimer) return;
+  clearInterval(projectionIdentityTimer);
+  projectionIdentityTimer = 0;
 }
 
 // Receive projection config from the main process (controller window).
@@ -870,6 +1030,7 @@ function setProjection(config) {
     projection.role = 'controller';
     projection.viewport = null;
     projection.union = null;
+    stopProjectionIdentitySync();
     applyProjection();
     forEachLeaf(root, (leaf) => {
       if (leaf.spacer || !leaf.video) return;
@@ -892,6 +1053,8 @@ function setProjection(config) {
   resumeAudioContext();
   applyProjection();
   renderDisplayGuide();
+  if (projection.role === 'controller') startProjectionIdentitySync();
+  else stopProjectionIdentitySync();
   if (projectionViewportKey(config) !== prevKey) {
     lastSyncJSON = '';
     broadcastLayout();
@@ -1227,8 +1390,11 @@ function wireLeafEvents(leaf) {
     armVideoFrameWatch(leaf);
   });
   // When a clip ends (and the tile isn't looping), shuffle to a random clip.
+  // While spanning, only the controller advances — mirrors follow synced index
+  // so on-screen video and controller audio never drift onto different clips.
   video.addEventListener('ended', () => {
     if (leaf.userPaused) return;
+    if (projection.active && projection.role === 'mirror') return;
     advanceRandom(leaf);
   });
 
@@ -1415,6 +1581,73 @@ function togglePlay(leaf) {
   // Sync pause/play to every projection window immediately so controller audio
   // cannot keep a playlist alive after the user pauses on another display.
   syncPlaybackNow();
+  updatePauseButtons();
+}
+
+function collectMediaLeaves() {
+  const out = [];
+  forEachLeaf(root, (leaf) => {
+    if (!leaf.spacer && leaf.files.length > 0) out.push(leaf);
+  });
+  return out;
+}
+
+/** Tiles that fall on this window's display (or the visible viewport). */
+function leafOnThisDisplay(leaf) {
+  if (!leaf || leaf.spacer) return false;
+  if (projection.active) return isLeafInViewport(leaf) || isLeafVisible(leaf);
+  return isLeafVisible(leaf);
+}
+
+function anyLeafPlaying(leaves) {
+  return leaves.some((leaf) => leafShouldPlay(leaf));
+}
+
+function setLeavesPaused(leaves, paused) {
+  for (const leaf of leaves) {
+    leaf.userPaused = !!paused;
+    applyPlaybackIntent(leaf, paused ? {} : { force: true });
+  }
+  updatePauseButtons();
+  syncPlaybackNow();
+}
+
+/** Pause or play every tile with media. */
+function togglePauseAll() {
+  const leaves = collectMediaLeaves();
+  if (!leaves.length) { flash('No videos to pause'); return; }
+  const pausing = anyLeafPlaying(leaves);
+  setLeavesPaused(leaves, pausing);
+  flash(pausing ? 'Paused all videos' : 'Playing all videos');
+}
+
+/** Pause or play only the tiles on this display. */
+function togglePauseDisplay() {
+  const leaves = collectMediaLeaves().filter(leafOnThisDisplay);
+  if (!leaves.length) { flash('No videos on this display'); return; }
+  const pausing = anyLeafPlaying(leaves);
+  setLeavesPaused(leaves, pausing);
+  flash(pausing ? 'Paused this display' : 'Playing this display');
+}
+
+function paintPauseButton(btn, playing, scopeLabel) {
+  if (!btn) return;
+  btn.textContent = playing ? ('⏸ ' + scopeLabel) : ('▶ ' + scopeLabel);
+  btn.classList.toggle('active', !playing);
+  btn.title = playing
+    ? ('Pause ' + (scopeLabel === 'All' ? 'every video' : 'videos on this display'))
+    : ('Play ' + (scopeLabel === 'All' ? 'every video' : 'videos on this display'));
+}
+
+function updatePauseButtons() {
+  const all = collectMediaLeaves();
+  const onDisplay = all.filter(leafOnThisDisplay);
+  const allPlaying = anyLeafPlaying(all);
+  const displayPlaying = anyLeafPlaying(onDisplay);
+  paintPauseButton(btnPauseAll, allPlaying, 'All');
+  paintPauseButton(btnPauseDisplay, displayPlaying, 'Display');
+  paintPauseButton(btnPauseAllMirror, allPlaying, 'All');
+  paintPauseButton(btnPauseDisplayMirror, displayPlaying, 'Display');
 }
 
 function step(leaf, dir, autoplay = false) {
@@ -1565,6 +1798,176 @@ function deleteActiveTile() {
   if (!target) { flash('Hover or click a tile, then press Delete'); return; }
   closeLeaf(target);
   flash('Tile deleted');
+}
+
+// ============================================================================
+// Per-display reset (collapse one monitor's tiles without wiping the wall)
+// ============================================================================
+function displayForLeaf(leaf) {
+  const r = getLeafUnionRect(leaf);
+  if (!r) return null;
+  const cx = r.x + r.w / 2;
+  const cy = r.y + r.h / 2;
+  for (const d of winState.displays || []) {
+    const b = d.bounds;
+    if (cx >= b.x && cx < b.x + b.width && cy >= b.y && cy < b.y + b.height) return d;
+  }
+  return null;
+}
+
+function leavesOnDisplay(display) {
+  const out = [];
+  if (!display || !display.bounds) return out;
+  const b = display.bounds;
+  forEachLeaf(root, (leaf) => {
+    if (leaf.spacer) return;
+    const r = getLeafUnionRect(leaf);
+    if (!r) return;
+    const cx = r.x + r.w / 2;
+    const cy = r.y + r.h / 2;
+    if (cx >= b.x && cx < b.x + b.width && cy >= b.y && cy < b.y + b.height) out.push(leaf);
+  });
+  return out;
+}
+
+function pathFromRoot(target) {
+  const path = [];
+  function walk(node, acc) {
+    if (node === target) { path.push(...acc, node); return true; }
+    if (node.kind === 'split') {
+      for (const c of node.children) {
+        if (walk(c, acc.concat(node))) return true;
+      }
+    }
+    return false;
+  }
+  walk(root, []);
+  return path;
+}
+
+function lcaOfNodes(nodes) {
+  if (!nodes.length) return null;
+  if (nodes.length === 1) return nodes[0];
+  const paths = nodes.map((n) => pathFromRoot(n)).filter((p) => p.length);
+  if (!paths.length) return null;
+  let lca = paths[0][0];
+  for (let i = 0; paths.every((p) => i < p.length && p[i] === paths[0][i]); i++) {
+    lca = paths[0][i];
+  }
+  return lca;
+}
+
+function resetLeafInPlace(leaf) {
+  disposeLeaf(leaf);
+  leaf.folder = null;
+  leaf.files = [];
+  leaf.index = 0;
+  leaf.savedIndex = 0;
+  leaf.loop = false;
+  leaf.userPaused = false;
+  leaf.volume = 1;
+  leaf.muted = false;
+  updateLeaf(leaf);
+}
+
+function replaceNodeInTree(node, replacement) {
+  if (node === root) {
+    root = replacement;
+    return;
+  }
+  const parent = findParent(root, node);
+  if (parent && parent.kind === 'split') {
+    const i = parent.children.indexOf(node);
+    if (i >= 0) parent.children[i] = replacement;
+  }
+}
+
+function resetDisplay(display) {
+  let onDisplay = leavesOnDisplay(display);
+  if (!onDisplay.length) return;
+
+  let node = onDisplay.length === 1 ? onDisplay[0] : lcaOfNodes(onDisplay);
+  if (!node) return;
+
+  // Walk up while the subtree also contains tiles from other monitors.
+  while (node && node !== root) {
+    const sub = [];
+    forEachLeaf(node, (l) => sub.push(l));
+    const foreign = sub.some((l) => !onDisplay.includes(l));
+    if (!foreign) break;
+    const parent = findParent(root, node);
+    if (!parent) break;
+    node = parent;
+    onDisplay = leavesOnDisplay(display);
+  }
+
+  for (const l of onDisplay) selectedLeaves.delete(l);
+
+  if (node.kind === 'leaf') {
+    resetLeafInPlace(node);
+    if (focusedLeaf && onDisplay.includes(focusedLeaf)) focusedLeaf = node;
+    render();
+    flash('Display ' + (display.index || '') + ' reset');
+    return;
+  }
+
+  const newLeaf = makeLeaf();
+  forEachLeaf(node, disposeLeaf);
+  replaceNodeInTree(node, newLeaf);
+  if (!focusedLeaf || onDisplay.includes(focusedLeaf)) focusedLeaf = newLeaf;
+  render();
+  flash('Display ' + (display.index || '') + ' reset');
+}
+
+function leafForResetTarget() {
+  if (focusedLeaf) return focusedLeaf;
+  if (settings.editMode) {
+    const el = document.elementFromPoint(lastMouse.x, lastMouse.y);
+    const tile = el && el.closest && el.closest('.node-leaf');
+    if (tile) return leafById(tile.dataset.id);
+  }
+  return null;
+}
+
+function displayForThisWindow() {
+  const displays = winState.displays || [];
+  if (!(projection.active && projection.viewport)) return null;
+  const v = projection.viewport;
+  for (const d of displays) {
+    const b = d.bounds;
+    if (b.x === v.x && b.y === v.y && b.width === v.width && b.height === v.height) return d;
+  }
+  return null;
+}
+
+function resetActiveDisplay() {
+  const displays = winState.displays || [];
+  if (displays.length < 2) {
+    flash('Reset Display needs 2+ connected monitors');
+    return;
+  }
+  const leaf = leafForResetTarget();
+  let display = leaf ? displayForLeaf(leaf) : null;
+  if (!display) display = displayForThisWindow();
+  if (!display) {
+    flash('Click or focus a tile on the display you want to reset');
+    return;
+  }
+  resetDisplay(display);
+}
+
+function updateResetDisplayButton() {
+  const on = (winState.displays || []).length >= 2;
+  if (btnResetDisplay) {
+    btnResetDisplay.disabled = !on;
+    btnResetDisplay.title = on
+      ? "Reset the focused tile's display to one empty tile (R)"
+      : 'Reset Display needs 2+ connected monitors';
+  }
+  if (btnResetDisplayMirror) {
+    btnResetDisplayMirror.disabled = !on;
+    btnResetDisplayMirror.style.display = on ? '' : 'none';
+  }
 }
 
 // ============================================================================
@@ -1750,6 +2153,7 @@ function setEditMode(on) {
   settings.editMode = on;
   document.body.classList.toggle('editing', on);
   btnEdit.classList.toggle('active', on);
+  if (btnEditMirror) btnEditMirror.classList.toggle('active', on);
   if (!on) hidePreview();
   forEachLeaf(root, updateLeaf);
   positionTileBadges();
@@ -1788,14 +2192,17 @@ function setCellSize(px) {
 // ============================================================================
 // Persistence
 // ============================================================================
-// `withIndex` keeps the per-tile playback position for local persistence. Cross-
-// window sync omits it so each display can shuffle independently without forcing
-// every other screen to rebuild whenever a single tile advances.
-function serializeTree(node, withIndex) {
+// Local persistence and projection sync both carry per-tile clip index. Projection
+// sync also includes currentTime so mirrors show the same frame the controller
+// is voicing (independent shuffle across displays caused unattributable audio).
+function serializeTree(node, withIndex, withTime) {
   if (node.kind === 'leaf') {
     const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop };
     if (node.spacer) o.spacer = true;
-    if (withIndex) o.index = node.index;
+    if (withIndex) o.index = node.index || 0;
+    if (withTime && node.video && isFinite(node.video.currentTime)) {
+      o.currentTime = Math.round(node.video.currentTime * 20) / 20;
+    }
     o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
     if (node.muted) o.muted = true;
     // Always include so unpause (false) clears peers — omitting it left them stuck.
@@ -1806,11 +2213,14 @@ function serializeTree(node, withIndex) {
     kind: 'split',
     direction: node.direction,
     ratio: node.ratio,
-    children: [serializeTree(node.children[0], withIndex), serializeTree(node.children[1], withIndex)]
+    children: [
+      serializeTree(node.children[0], withIndex, withTime),
+      serializeTree(node.children[1], withIndex, withTime)
+    ]
   };
 }
-function serialize(node) { return serializeTree(node, true); }
-function serializeForSync(node) { return serializeTree(node, false); }
+function serialize(node) { return serializeTree(node, true, false); }
+function serializeForSync(node) { return serializeTree(node, true, true); }
 
 function deserialize(obj) {
   if (!obj) return makeLeaf();
@@ -2098,6 +2508,7 @@ async function refreshDisplays() {
       .map((d) => `${d.isPrimary ? '★ ' : ''}${d.bounds.width}×${d.bounds.height}`)
       .join('  ·  ');
     btnTileDisplays.disabled = info.count < 2;
+    updateResetDisplayButton();
   } catch (_) {}
 }
 
@@ -2326,16 +2737,41 @@ function tileToDisplays(opts = {}) {
     if (!opts.quiet) flash('Tile to Displays needs 2+ connected displays');
     return;
   }
-  // Preserve current folder assignments in reading order.
-  const oldLeaves = collectLeaves(root);
-  const saved = oldLeaves.map((l) => ({ folder: l.folder, index: l.index, volume: l.volume, muted: l.muted, loop: l.loop }));
+
+  // Preserve media per physical display (folder, index, time, play state).
+  const savedByDisplay = new Map();
+  for (const d of displays) {
+    const leaves = leavesOnDisplay(d).filter((l) => l.folder);
+    const src = leaves[0];
+    if (!src) continue;
+    savedByDisplay.set(d.id, {
+      folder: src.folder,
+      index: src.index,
+      volume: src.volume,
+      muted: src.muted,
+      loop: src.loop,
+      userPaused: !!src.userPaused,
+      currentTime: src.video && isFinite(src.video.currentTime) ? src.video.currentTime : 0
+    });
+  }
+  // Fallback: reading-order save if geometry mapping found nothing yet.
+  const oldLeaves = collectLeaves(root).filter((l) => !l.spacer);
+  const savedOrder = oldLeaves.map((l) => ({
+    folder: l.folder,
+    index: l.index,
+    volume: l.volume,
+    muted: l.muted,
+    loop: l.loop,
+    userPaused: !!l.userPaused,
+    currentTime: l.video && isFinite(l.video.currentTime) ? l.video.currentTime : 0
+  }));
 
   forEachLeaf(root, disposeLeaf);
   const union = unionBounds(displays);
-  const rects = displays
+  const sorted = displays
     .slice()
-    .sort((a, b) => a.bounds.y - b.bounds.y || a.bounds.x - b.bounds.x)
-    .map((d) => ({ x: d.bounds.x, y: d.bounds.y, w: d.bounds.width, h: d.bounds.height }));
+    .sort((a, b) => a.bounds.y - b.bounds.y || a.bounds.x - b.bounds.x);
+  const rects = sorted.map((d) => ({ x: d.bounds.x, y: d.bounds.y, w: d.bounds.width, h: d.bounds.height }));
 
   root = buildTreeFromRects(rects, { x: union.x, y: union.y, w: union.width, h: union.height });
   focusedLeaf = null;
@@ -2346,12 +2782,21 @@ function tileToDisplays(opts = {}) {
 
   const newLeaves = collectLeaves(root).filter((l) => !l.spacer);
   newLeaves.forEach((leaf, i) => {
-    const s = saved[i];
+    const display = sorted[i];
+    const s = (display && savedByDisplay.get(display.id)) || savedOrder[i];
     if (!s) return;
     if (typeof s.volume === 'number') leaf.volume = clamp(s.volume, 0, MAX_TILE_VOLUME);
     if (s.muted != null) leaf.muted = !!s.muted;
     leaf.loop = !!s.loop;
-    if (s.folder) loadFolder(leaf, s.folder, s.index || 0, false);
+    leaf.userPaused = !!s.userPaused;
+    if (s.folder) {
+      loadFolder(leaf, s.folder, s.index || 0, false).then(() => {
+        if (typeof s.currentTime === 'number' && leaf.video && s.currentTime > 0) {
+          try { leaf.video.currentTime = s.currentTime; } catch (_) { /* ignore */ }
+        }
+        applyPlaybackIntent(leaf, leaf.userPaused ? {} : { force: true });
+      });
+    }
   });
 
   if (!opts.quiet) flash(`Tiled layout to match ${displays.length} displays`);
@@ -2399,13 +2844,17 @@ document.addEventListener('keydown', (e) => {
     case 'd': setGuide(!settings.guideOn); break;
     case 'v': setDesktopPreview(!settings.desktopPreview); break;
     case 't': tileToDisplays(); break;
+    case 'r': resetActiveDisplay(); break;
     case 'delete':
     case 'backspace':
       e.preventDefault();
       deleteActiveTile();
       break;
     case ' ':
-      if (focusedLeaf) { e.preventDefault(); togglePlay(focusedLeaf); }
+      e.preventDefault();
+      if (e.shiftKey) togglePauseAll();
+      else if (focusedLeaf) togglePlay(focusedLeaf);
+      else togglePauseDisplay();
       break;
     case 'p':
       if (!e.ctrlKey && !e.metaKey) togglePresetsPanel();
@@ -2423,6 +2872,7 @@ document.addEventListener('keyup', (e) => {
 });
 
 btnEdit.addEventListener('click', () => setEditMode(!settings.editMode));
+if (btnEditMirror) btnEditMirror.addEventListener('click', () => setEditMode(!settings.editMode));
 btnGrid.addEventListener('click', () => setGrid(!settings.gridOn));
 btnSnap.addEventListener('click', () => setSnap(!settings.snapOn));
 btnReset.addEventListener('click', () => {
@@ -2432,6 +2882,12 @@ btnReset.addEventListener('click', () => {
   selectedLeaves.clear();
   render();
 });
+if (btnResetDisplay) btnResetDisplay.addEventListener('click', () => resetActiveDisplay());
+if (btnResetDisplayMirror) btnResetDisplayMirror.addEventListener('click', () => resetActiveDisplay());
+if (btnPauseAll) btnPauseAll.addEventListener('click', () => togglePauseAll());
+if (btnPauseDisplay) btnPauseDisplay.addEventListener('click', () => togglePauseDisplay());
+if (btnPauseAllMirror) btnPauseAllMirror.addEventListener('click', () => togglePauseAll());
+if (btnPauseDisplayMirror) btnPauseDisplayMirror.addEventListener('click', () => togglePauseDisplay());
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
@@ -2468,6 +2924,7 @@ function applyWindowState(state) {
   renderDisplayGuide();
   positionTileBadges();
   bootstrapDesktopPreview();
+  updateResetDisplayButton();
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
@@ -2515,6 +2972,7 @@ window.addEventListener('resize', () => {
 // ----------------------------------------------------------------- Boot
 if (IS_MIRROR) {
   // Per-display editor window: render this monitor's slice and stay in sync.
+  if (mirrorPlaybackDock) mirrorPlaybackDock.hidden = false;
   bootMirror();
 } else {
   // Controller (main) window: owns persistence + the control bar.
@@ -2533,6 +2991,8 @@ if (IS_MIRROR) {
   window.api.requestWindowState();
   wake();
 }
+updatePauseButtons();
+updateResetDisplayButton();
 
 // Keep every window (controller + mirrors) honest about sources, mute, and A/V sync.
 startPlaybackAudit();

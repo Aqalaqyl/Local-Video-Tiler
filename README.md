@@ -7,8 +7,10 @@ media, and let everything play side by side.
 
 Built with [Electron](https://www.electronjs.org/) — everything runs locally,
 nothing is uploaded anywhere. Playback prefers **GPU** compositing and hardware
-video decode when available, and falls back to the **CPU** automatically. A
-background check keeps each tile on the correct clip with audio/video in sync.
+video decode when available, and falls back to the **CPU** automatically. When
+spanning all displays, the primary window is the audio authority and keeps every
+other screen on the **same clip and timeline**, so sound always matches the
+picture you see.
 
 ## Features
 
@@ -91,6 +93,44 @@ background check keeps each tile on the correct clip with audio/video in sync.
 
 ## Getting started
 
+### Windows (recommended)
+
+#### Installer + launcher (`Local Video Tiler.exe`)
+
+Build:
+
+```bash
+npm install
+npm run dist:win
+```
+
+This creates a ready-to-ship folder under `dist/`:
+
+1. **`dist/win-unpacked/`** — packaged app payload  
+2. **`dist/Local Video Tiler.exe`** — installer **and** launcher (also copied to the project root)
+
+**How `Local Video Tiler.exe` works**
+
+| Situation | What it does |
+| --- | --- |
+| App already installed | Launches immediately |
+| Not installed yet | Installs prerequisites + the program into `%LOCALAPPDATA%\Local Video Tiler\`, creates Desktop and Start Menu shortcuts, then launches |
+
+Ship the contents of **`dist/`** (the exe next to `win-unpacked/`). On first run the exe copies the unpacked app into the user install folder; later runs just launch.
+
+You can also double-click **`Local Video Tiler.vbs`** or **`Launch.bat`** — they use the same install-or-launch behavior.
+
+If you run the launcher from the source tree without `win-unpacked`, the first install needs [Node.js LTS](https://nodejs.org/) once so Electron can be downloaded.
+
+#### Optional: classic NSIS setup / portable (build on Windows)
+
+```bash
+npm run dist:win:setup      # → dist/Local Video Tiler Setup.exe
+npm run dist:win:portable   # → dist/Local Video Tiler Portable.exe
+```
+
+### From a terminal (any OS)
+
 ```bash
 npm install
 npm start
@@ -110,11 +150,15 @@ npm start
 | Delete / merge a tile | The **🗑** badge on the tile (in edit mode), the toolbar **✕**, or `Delete` / `Backspace` on the hovered/focused tile |
 | Assign a folder | The **📁** button on a tile, or the *Choose media folder…* button |
 | Play / pause focused tile | `Space` |
+| Pause / play all videos | **⏸ All** / **▶ All**, or `Shift`+`Space` |
+| Pause / play videos on this display | **⏸ Display** / **▶ Display** (also on secondary displays when spanning) |
+| Reset one display’s tiles | **Reset Display** or `R` (needs 2+ monitors) |
+| Reset entire layout | **Reset All** |
 | Loop the current video (per tile) | The **🔁** button on the tile |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |
 | Adjust grid cell size | The **Cell** slider |
-| Reset layout | The **Reset** button |
+| Reset entire layout | **Reset All** |
 | Fullscreen (current display) | `F` or the **Fullscreen** button |
 | Fullscreen across ALL displays | `A` or the **All Displays** button |
 | Toggle the screen-split guide | `D` or the **Guide** button |
@@ -133,6 +177,11 @@ underlying codec is supported by your system's Chromium build.
 ```
 main.js        Electron main process: window, displays, fullscreen, IPC, folder reads
 preload.js     Secure contextBridge API exposed to the renderer
+Launch.bat     Windows install-or-launch script
+Local Video Tiler.vbs
+               Quiet Windows install-or-launch entry point
+scripts/win-launcher.js
+               Source for Local Video Tiler.exe (installer + launcher)
 src/index.html UI shell
 src/styles.css Styling, auto-hide chrome, grid + preview visuals
 src/renderer.js Tiling engine, edit mode, media playback, snap/grid, persistence

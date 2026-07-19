@@ -26,7 +26,12 @@
       <button id="btn-assign" class="tool" type="button" disabled title="Ctrl+click tiles to select, then assign a shared folder">📁 Folder</button>
       <button id="btn-presets" class="tool" type="button" title="Save and load layout presets">Presets</button>
       <button id="btn-preview" class="tool" type="button" title="Miniature multi-monitor layout for editing (V)">Preview</button>
-      <button id="btn-reset" class="tool" title="Reset layout to a single tile">Reset</button>
+      <button id="btn-reset-display" class="tool" type="button" disabled title="Reset the focused tile's display to one empty tile (R)">Reset Display</button>
+      <button id="btn-reset" class="tool" title="Reset entire layout to a single tile">Reset All</button>
+      <span class="sep"></span>
+      <button id="btn-pause-all" class="tool" type="button" title="Pause or play every video (Shift+Space)">⏸ All</button>
+      <button id="btn-pause-display" class="tool" type="button" title="Pause or play videos on this display only">⏸ Display</button>
+      <span class="sep"></span>
       <button id="btn-fs" class="tool" title="Fullscreen on current display (F)">Fullscreen</button>
       <button id="btn-fs-all" class="tool" title="Span / fullscreen across ALL displays (A)">All Displays</button>
       <button id="btn-guide" class="tool" title="Toggle the screen-split guide showing each display (D)">Guide</button>
@@ -67,6 +72,14 @@
 
   <!-- Transient toast (e.g. when spanning all displays) -->
   <div id="toast" class="hintbox" aria-hidden="true"></div>
+
+  <!-- Compact playback controls on mirror displays (main topbar is hidden there). -->
+  <div id="mirror-playback-dock" class="mirror-playback-dock" aria-label="Playback" hidden>
+    <button id="btn-pause-all-mirror" class="tool" type="button" title="Pause or play every video">⏸ All</button>
+    <button id="btn-pause-display-mirror" class="tool" type="button" title="Pause or play videos on this display only">⏸ Display</button>
+    <button id="btn-reset-display-mirror" class="tool" type="button" title="Reset this display to one empty tile (R)">Reset Display</button>
+    <button id="btn-edit-mirror" class="tool" type="button" title="Toggle edit mode (E)">Edit</button>
+  </div>
 
   <!-- Layout presets: save/load tile structure + per-tile folder paths -->
   <div id="presets-panel" class="presets-panel" hidden aria-hidden="true">
