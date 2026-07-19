@@ -34,6 +34,11 @@ const btnEdit = document.getElementById('btn-edit');
 const btnGrid = document.getElementById('btn-grid');
 const btnSnap = document.getElementById('btn-snap');
 const btnReset = document.getElementById('btn-reset');
+const btnPauseAll = document.getElementById('btn-pause-all');
+const btnPauseDisplay = document.getElementById('btn-pause-display');
+const btnPauseAllMirror = document.getElementById('btn-pause-all-mirror');
+const btnPauseDisplayMirror = document.getElementById('btn-pause-display-mirror');
+const mirrorPlaybackDock = document.getElementById('mirror-playback-dock');
 const btnFs = document.getElementById('btn-fs');
 const btnFsAll = document.getElementById('btn-fs-all');
 const btnGuide = document.getElementById('btn-guide');
@@ -347,6 +352,9 @@ function applyPlaybackIntent(leaf, opts = {}) {
 
 /** Persist + sync pause/play immediately (do not wait for the saveState debounce). */
 function syncPlaybackNow() {
+  // Cancel any pending debounced save so an older pause snapshot can't overwrite
+  // a newer unpause (that race left tiles stuck paused).
+  clearTimeout(saveTimer);
   if (!IS_MIRROR) {
     try {
       localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) }));
@@ -355,8 +363,6 @@ function syncPlaybackNow() {
   if (projection.active) {
     lastSyncJSON = '';
     broadcastLayout();
-  } else {
-    saveState();
   }
 }
 
@@ -847,6 +853,7 @@ function applyIncomingLayout(payload) {
     });
     applyProjection();
     if (projection.active) scheduleSpanPlaybackRecovery();
+    updatePauseButtons();
   } finally {
     applyingRemote = false;
   }
@@ -1415,6 +1422,73 @@ function togglePlay(leaf) {
   // Sync pause/play to every projection window immediately so controller audio
   // cannot keep a playlist alive after the user pauses on another display.
   syncPlaybackNow();
+  updatePauseButtons();
+}
+
+function collectMediaLeaves() {
+  const out = [];
+  forEachLeaf(root, (leaf) => {
+    if (!leaf.spacer && leaf.files.length > 0) out.push(leaf);
+  });
+  return out;
+}
+
+/** Tiles that fall on this window's display (or the visible viewport). */
+function leafOnThisDisplay(leaf) {
+  if (!leaf || leaf.spacer) return false;
+  if (projection.active) return isLeafInViewport(leaf) || isLeafVisible(leaf);
+  return isLeafVisible(leaf);
+}
+
+function anyLeafPlaying(leaves) {
+  return leaves.some((leaf) => leafShouldPlay(leaf));
+}
+
+function setLeavesPaused(leaves, paused) {
+  for (const leaf of leaves) {
+    leaf.userPaused = !!paused;
+    applyPlaybackIntent(leaf, paused ? {} : { force: true });
+  }
+  updatePauseButtons();
+  syncPlaybackNow();
+}
+
+/** Pause or play every tile with media. */
+function togglePauseAll() {
+  const leaves = collectMediaLeaves();
+  if (!leaves.length) { flash('No videos to pause'); return; }
+  const pausing = anyLeafPlaying(leaves);
+  setLeavesPaused(leaves, pausing);
+  flash(pausing ? 'Paused all videos' : 'Playing all videos');
+}
+
+/** Pause or play only the tiles on this display. */
+function togglePauseDisplay() {
+  const leaves = collectMediaLeaves().filter(leafOnThisDisplay);
+  if (!leaves.length) { flash('No videos on this display'); return; }
+  const pausing = anyLeafPlaying(leaves);
+  setLeavesPaused(leaves, pausing);
+  flash(pausing ? 'Paused this display' : 'Playing this display');
+}
+
+function paintPauseButton(btn, playing, scopeLabel) {
+  if (!btn) return;
+  btn.textContent = playing ? ('⏸ ' + scopeLabel) : ('▶ ' + scopeLabel);
+  btn.classList.toggle('active', !playing);
+  btn.title = playing
+    ? ('Pause ' + (scopeLabel === 'All' ? 'every video' : 'videos on this display'))
+    : ('Play ' + (scopeLabel === 'All' ? 'every video' : 'videos on this display'));
+}
+
+function updatePauseButtons() {
+  const all = collectMediaLeaves();
+  const onDisplay = all.filter(leafOnThisDisplay);
+  const allPlaying = anyLeafPlaying(all);
+  const displayPlaying = anyLeafPlaying(onDisplay);
+  paintPauseButton(btnPauseAll, allPlaying, 'All');
+  paintPauseButton(btnPauseDisplay, displayPlaying, 'Display');
+  paintPauseButton(btnPauseAllMirror, allPlaying, 'All');
+  paintPauseButton(btnPauseDisplayMirror, displayPlaying, 'Display');
 }
 
 function step(leaf, dir, autoplay = false) {
@@ -2405,7 +2479,10 @@ document.addEventListener('keydown', (e) => {
       deleteActiveTile();
       break;
     case ' ':
-      if (focusedLeaf) { e.preventDefault(); togglePlay(focusedLeaf); }
+      e.preventDefault();
+      if (e.shiftKey) togglePauseAll();
+      else if (focusedLeaf) togglePlay(focusedLeaf);
+      else togglePauseDisplay();
       break;
     case 'p':
       if (!e.ctrlKey && !e.metaKey) togglePresetsPanel();
@@ -2432,6 +2509,10 @@ btnReset.addEventListener('click', () => {
   selectedLeaves.clear();
   render();
 });
+if (btnPauseAll) btnPauseAll.addEventListener('click', () => togglePauseAll());
+if (btnPauseDisplay) btnPauseDisplay.addEventListener('click', () => togglePauseDisplay());
+if (btnPauseAllMirror) btnPauseAllMirror.addEventListener('click', () => togglePauseAll());
+if (btnPauseDisplayMirror) btnPauseDisplayMirror.addEventListener('click', () => togglePauseDisplay());
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
@@ -2515,6 +2596,7 @@ window.addEventListener('resize', () => {
 // ----------------------------------------------------------------- Boot
 if (IS_MIRROR) {
   // Per-display editor window: render this monitor's slice and stay in sync.
+  if (mirrorPlaybackDock) mirrorPlaybackDock.hidden = false;
   bootMirror();
 } else {
   // Controller (main) window: owns persistence + the control bar.
@@ -2533,6 +2615,7 @@ if (IS_MIRROR) {
   window.api.requestWindowState();
   wake();
 }
+updatePauseButtons();
 
 // Keep every window (controller + mirrors) honest about sources, mute, and A/V sync.
 startPlaybackAudit();

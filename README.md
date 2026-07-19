@@ -148,6 +148,8 @@ npm start
 | Delete / merge a tile | The **🗑** badge on the tile (in edit mode), the toolbar **✕**, or `Delete` / `Backspace` on the hovered/focused tile |
 | Assign a folder | The **📁** button on a tile, or the *Choose media folder…* button |
 | Play / pause focused tile | `Space` |
+| Pause / play all videos | **⏸ All** / **▶ All**, or `Shift`+`Space` |
+| Pause / play videos on this display | **⏸ Display** / **▶ Display** (also on secondary displays when spanning) |
 | Loop the current video (per tile) | The **🔁** button on the tile |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |

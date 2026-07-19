@@ -423,6 +423,37 @@ body.mirror { background: #000; }
 body.mirror #topbar,
 body.mirror #display-guide { display: none !important; }
 
+/* Mirror-only floating pause controls (topbar is hidden on secondary displays). */
+.mirror-playback-dock {
+  display: none;
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 80;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(16,17,22,0.94), rgba(16,17,22,0.82));
+  border: 1px solid var(--line);
+  box-shadow: 0 10px 28px rgba(0,0,0,0.45);
+  backdrop-filter: blur(8px);
+  -webkit-app-region: no-drag;
+}
+body.mirror .mirror-playback-dock {
+  display: flex;
+}
+body.mirror.idle .mirror-playback-dock {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+body.mirror:not(.idle) .mirror-playback-dock,
+body.mirror.editing .mirror-playback-dock {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 /* --------------------------------------------------------- Split preview */
 #split-preview {
   position: fixed;
