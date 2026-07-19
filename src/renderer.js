@@ -882,13 +882,25 @@ function sameLayoutStructure(a, b) {
 /**
  * Apply synced playback fields onto an existing tree (no DOM rebuild).
  * Clip index/time are only applied when `applyIdentity` is true (controller → mirrors).
+ * Bulk unpause from a peer is collected and resumed in unison.
  */
 function applyIncomingPlayback(localNode, remoteNode, opts = {}) {
+  const resumeBatch = [];
+  applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch);
+  if (resumeBatch.length > 1) {
+    void resumeLeavesInUnison(resumeBatch, { skipSync: true, quiet: true });
+  } else if (resumeBatch.length === 1) {
+    applyPlaybackIntent(resumeBatch[0], { force: true });
+  }
+}
+
+function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
   if (!localNode || !remoteNode || localNode.kind !== remoteNode.kind) return;
   const applyIdentity = opts.applyIdentity !== false;
 
   if (localNode.kind === 'leaf') {
     if (localNode.spacer) return;
+    const wasPaused = !!localNode.userPaused;
     if (typeof remoteNode.volume === 'number') {
       localNode.volume = clamp(remoteNode.volume, 0, MAX_TILE_VOLUME);
     }
@@ -901,12 +913,13 @@ function applyIncomingPlayback(localNode, remoteNode, opts = {}) {
       const cur = localNode.files[idx];
       if (idx !== localNode.index || (cur && !sourcesMatch(localNode.video, cur.url))) {
         localNode.index = idx;
-        loadCurrent(localNode, leafShouldPlay(localNode), { force: true });
+        // Load without autoplay when we may batch-resume below.
+        loadCurrent(localNode, false, { force: true });
       }
     }
 
     if (applyIdentity && typeof remoteNode.currentTime === 'number' &&
-        localNode.video && leafShouldPlay(localNode) && !localNode.video.seeking &&
+        localNode.video && !localNode.userPaused && !localNode.video.seeking &&
         localNode.video.readyState >= 2) {
       const drift = Math.abs((localNode.video.currentTime || 0) - remoteNode.currentTime);
       if (drift > 0.45) {
@@ -915,12 +928,14 @@ function applyIncomingPlayback(localNode, remoteNode, opts = {}) {
       }
     }
 
-    applyPlaybackIntent(localNode);
+    const shouldResume = wasPaused && !localNode.userPaused && leafShouldPlay(localNode);
+    if (shouldResume) resumeBatch.push(localNode);
+    else applyPlaybackIntent(localNode);
     return;
   }
 
-  applyIncomingPlayback(localNode.children[0], remoteNode.children[0], opts);
-  applyIncomingPlayback(localNode.children[1], remoteNode.children[1], opts);
+  applyIncomingPlaybackWalk(localNode.children[0], remoteNode.children[0], opts, resumeBatch);
+  applyIncomingPlaybackWalk(localNode.children[1], remoteNode.children[1], opts, resumeBatch);
 }
 
 function applyPendingSyncIdentity(leaf) {
@@ -1686,13 +1701,126 @@ function anyLeafPlaying(leaves) {
   return leaves.some((leaf) => leafShouldPlay(leaf));
 }
 
-function setLeavesPaused(leaves, paused) {
-  for (const leaf of leaves) {
-    leaf.userPaused = !!paused;
-    applyPlaybackIntent(leaf, paused ? {} : { force: true });
+let bulkUnpauseToken = 0;
+
+/** Wait until a video can play (or timeout), without starting playback. */
+function waitVideoReady(video, timeoutMs = 2200) {
+  return new Promise((resolve) => {
+    if (!video) return resolve(false);
+    if (video.readyState >= 2 && !video.seeking) return resolve(true);
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      video.removeEventListener('canplay', onReady);
+      video.removeEventListener('loadeddata', onReady);
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    const onReady = () => finish(true);
+    video.addEventListener('canplay', onReady);
+    video.addEventListener('loadeddata', onReady);
+    const timer = setTimeout(() => finish(video.readyState >= 2), timeoutMs);
+  });
+}
+
+/**
+ * Prepare a tile for a bulk resume: clear pause intent, ensure the correct
+ * source is loaded, keep it silent/paused until the unison play barrier.
+ */
+function prepareLeafForUnpause(leaf) {
+  if (!leaf || !leaf.video || !leaf.files.length) return false;
+  leaf.userPaused = false;
+  leaf._wantPlaying = true;
+  leaf.video.loop = !!leaf.loop;
+  leaf.video.preload = 'auto';
+
+  const cur = leaf.files[leaf.index];
+  if (cur && !sourcesMatch(leaf.video, cur.url)) {
+    try { leaf.video.pause(); } catch (_) { /* ignore */ }
+    leaf.video.src = cur.url;
+    try { leaf.video.load(); } catch (_) { /* ignore */ }
+  }
+
+  // Hold silence until every tile is ready — then unmute together.
+  if (leaf._audioGraph) {
+    try { leaf._audioGraph.gain.gain.value = 0; } catch (_) { /* ignore */ }
+    try { leaf.video.muted = true; } catch (_) { /* ignore */ }
+  } else {
+    try { leaf.video.muted = true; } catch (_) { /* ignore */ }
+  }
+  try { leaf.video.pause(); } catch (_) { /* ignore */ }
+  return true;
+}
+
+/**
+ * Resume many tiles in unison: prepare/decode first, wait for readiness, then
+ * fire play() on all in the same animation frames so they start together.
+ */
+async function resumeLeavesInUnison(leaves, opts = {}) {
+  const list = (leaves || []).filter((l) => l && l.video && l.files && l.files.length);
+  if (!list.length) return;
+
+  const token = ++bulkUnpauseToken;
+  if (!opts.quiet) flash('Preparing videos…');
+
+  const targets = [];
+  for (const leaf of list) {
+    leaf.userPaused = false;
+    // Controller: force so secondary-display tiles prepare even if clipped here.
+    // Mirrors: only tiles on this display slice.
+    const force = !projection.active || projection.role === 'controller';
+    if (!leafMayDecode(leaf, force ? { force: true } : {})) {
+      applyPlaybackIntent(leaf);
+      continue;
+    }
+    if (prepareLeafForUnpause(leaf)) targets.push(leaf);
+  }
+
+  updatePauseButtons();
+  if (!opts.skipSync) syncPlaybackNow();
+
+  if (!targets.length) {
+    if (!opts.quiet) flash('Playing videos');
+    return;
+  }
+
+  await Promise.all(targets.map((leaf) => waitVideoReady(leaf.video, 2200)));
+  if (token !== bulkUnpauseToken) return;
+
+  resumeAudioContext();
+  // Two rAFs: let layout/decode settle, then start everyone on the same tick.
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  if (token !== bulkUnpauseToken) return;
+
+  for (const leaf of targets) {
+    if (leaf.userPaused || !leaf.video) continue;
+    leaf._wantPlaying = true;
+    leaf.video.play().catch(() => {});
+  }
+  for (const leaf of targets) {
+    if (leaf.userPaused || !leaf.video) continue;
+    applyTileAudio(leaf);
+    armVideoFrameWatch(leaf);
+    resetLeafSyncClock(leaf);
+    if (leaf.el) leaf.el.classList.add('playing');
   }
   updatePauseButtons();
-  syncPlaybackNow();
+  if (!opts.quiet) flash('Playing in sync');
+}
+
+function setLeavesPaused(leaves, paused) {
+  if (paused) {
+    bulkUnpauseToken++; // cancel any in-flight unison resume
+    for (const leaf of leaves) {
+      leaf.userPaused = true;
+      applyPlaybackIntent(leaf);
+    }
+    updatePauseButtons();
+    syncPlaybackNow();
+    return;
+  }
+  void resumeLeavesInUnison(leaves);
 }
 
 /** Pause or play every tile with media. */
@@ -1700,8 +1828,12 @@ function togglePauseAll() {
   const leaves = collectMediaLeaves();
   if (!leaves.length) { flash('No videos to pause'); return; }
   const pausing = anyLeafPlaying(leaves);
-  setLeavesPaused(leaves, pausing);
-  flash(pausing ? 'Paused all videos' : 'Playing all videos');
+  if (pausing) {
+    setLeavesPaused(leaves, true);
+    flash('Paused all videos');
+  } else {
+    void resumeLeavesInUnison(leaves);
+  }
 }
 
 /** Pause or play only the tiles on this display. */
@@ -1709,8 +1841,12 @@ function togglePauseDisplay() {
   const leaves = collectMediaLeaves().filter(leafOnThisDisplay);
   if (!leaves.length) { flash('No videos on this display'); return; }
   const pausing = anyLeafPlaying(leaves);
-  setLeavesPaused(leaves, pausing);
-  flash(pausing ? 'Paused this display' : 'Playing this display');
+  if (pausing) {
+    setLeavesPaused(leaves, true);
+    flash('Paused this display');
+  } else {
+    void resumeLeavesInUnison(leaves);
+  }
 }
 
 function paintPauseButton(btn, playing, scopeLabel) {
