@@ -166,8 +166,9 @@ body.desktop-preview #stage > .node-leaf {
   /* A clearly visible boundary so the user can always see how the surface has
      been split, even over dark video. */
   border: 1px solid rgba(255,255,255,0.14);
-  /* Limit style/layout work to each tile's box (helps with many videos). */
-  contain: layout style paint;
+  /* Layout/style containment only — paint containment forces videos off the
+     GPU overlay path and makes multi-tile playback lag. */
+  contain: layout style;
 }
 .node-leaf.focused { box-shadow: inset 0 0 0 2px var(--accent); }
 .node-leaf.selected { box-shadow: inset 0 0 0 2px var(--accent-2); }
@@ -192,11 +193,10 @@ body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.8)
   display: block;
   background: #000;
   object-fit: contain;
-  /* Promote playing video planes; paused tiles stay cheaper. */
-  backface-visibility: hidden;
-}
-.node-leaf.playing .tile-video {
+  /* Promote every video plane to its own compositor layer so Chromium can use
+     hardware overlays / zero-copy when the GPU path is available. */
   transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .tile-empty {
@@ -405,14 +405,15 @@ body.idle:not(.editing) #display-guide { opacity: 0; }
 .guide-cell.primary .guide-label { color: #fff; background: var(--accent); }
 
 /* ------------------------------------------------- Projection / display wall */
-/* Each per-display window shows only its slice of the shared canvas. Clip
-   overflow so tiles never bleed past the physical screen edge. */
+/* Each per-display window shows only its slice of the shared canvas. The OS
+   window + body overflow clip the offset stage — avoid CSS clip-path here; it
+   disables Chromium's GPU video overlay path and causes multi-tile lag. */
 body.projection {
   overflow: hidden;
 }
 body.projection #stage,
 body.projection #grid-overlay {
-  overflow: hidden;
+  overflow: visible;
 }
 body.projection #stage > .node-split,
 body.projection #stage > .node-leaf {
