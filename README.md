@@ -91,6 +91,44 @@ background check keeps each tile on the correct clip with audio/video in sync.
 
 ## Getting started
 
+### Windows (recommended)
+
+#### Installer + launcher (`Local Video Tiler.exe`)
+
+Build:
+
+```bash
+npm install
+npm run dist:win
+```
+
+This creates a ready-to-ship folder under `dist/`:
+
+1. **`dist/win-unpacked/`** — packaged app payload  
+2. **`dist/Local Video Tiler.exe`** — installer **and** launcher (also copied to the project root)
+
+**How `Local Video Tiler.exe` works**
+
+| Situation | What it does |
+| --- | --- |
+| App already installed | Launches immediately |
+| Not installed yet | Installs prerequisites + the program into `%LOCALAPPDATA%\Local Video Tiler\`, creates Desktop and Start Menu shortcuts, then launches |
+
+Ship the contents of **`dist/`** (the exe next to `win-unpacked/`). On first run the exe copies the unpacked app into the user install folder; later runs just launch.
+
+You can also double-click **`Local Video Tiler.vbs`** or **`Launch.bat`** — they use the same install-or-launch behavior.
+
+If you run the launcher from the source tree without `win-unpacked`, the first install needs [Node.js LTS](https://nodejs.org/) once so Electron can be downloaded.
+
+#### Optional: classic NSIS setup / portable (build on Windows)
+
+```bash
+npm run dist:win:setup      # → dist/Local Video Tiler Setup.exe
+npm run dist:win:portable   # → dist/Local Video Tiler Portable.exe
+```
+
+### From a terminal (any OS)
+
 ```bash
 npm install
 npm start
@@ -133,6 +171,11 @@ underlying codec is supported by your system's Chromium build.
 ```
 main.js        Electron main process: window, displays, fullscreen, IPC, folder reads
 preload.js     Secure contextBridge API exposed to the renderer
+Launch.bat     Windows install-or-launch script
+Local Video Tiler.vbs
+               Quiet Windows install-or-launch entry point
+scripts/win-launcher.js
+               Source for Local Video Tiler.exe (installer + launcher)
 src/index.html UI shell
 src/styles.css Styling, auto-hide chrome, grid + preview visuals
 src/renderer.js Tiling engine, edit mode, media playback, snap/grid, persistence
