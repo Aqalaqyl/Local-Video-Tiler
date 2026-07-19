@@ -312,17 +312,31 @@ function leafShouldPlay(leaf) {
 /**
  * Honor the tile's play/pause intent: paused tiles must not decode or produce
  * audio (including on the controller while spanning all displays).
+ * Pass `{ force: true }` after an explicit user unpause so a brief viewport
+ * glitch cannot immediately re-pause the tile.
  */
-function applyPlaybackIntent(leaf) {
+function applyPlaybackIntent(leaf, opts = {}) {
   if (!leaf || leaf.spacer || !leaf.video) return;
   leaf.video.loop = !!leaf.loop;
-  if (!leafShouldPlay(leaf) || !leafMayDecode(leaf)) {
+
+  // User/peer pause always wins — silence and stop.
+  if (leaf.userPaused || !leaf.files.length) {
     leaf._wantPlaying = false;
     pauseVideoElement(leaf.video);
     applyTileAudio(leaf);
     resetLeafSyncClock(leaf);
     return;
   }
+
+  // Off-slice mirrors may skip decode, unless the user just hit play.
+  if (!leafMayDecode(leaf, opts)) {
+    leaf._wantPlaying = false;
+    pauseVideoElement(leaf.video);
+    applyTileAudio(leaf);
+    resetLeafSyncClock(leaf);
+    return;
+  }
+
   leaf._wantPlaying = true;
   applyTileAudio(leaf);
   resumeAudioContext();
@@ -803,7 +817,8 @@ function applyIncomingLayout(payload) {
         if (node) {
           if (typeof node.volume === 'number') leaf.volume = clamp(node.volume, 0, MAX_TILE_VOLUME);
           if (node.muted != null) leaf.muted = !!node.muted;
-          if (node.userPaused != null) leaf.userPaused = !!node.userPaused;
+          // Always apply — omitting false left peers stuck paused after unpause.
+          leaf.userPaused = !!node.userPaused;
         }
         if (leaf.el) leaf.el.classList.toggle('pad-spacer', spacer);
         applyTileAudio(leaf);
@@ -1391,12 +1406,12 @@ function loadCurrent(leaf, autoplay, opts = {}) {
 
 function togglePlay(leaf) {
   if (!leaf.files.length) { assignFolder(leaf); return; }
-  if (leaf.video.paused || leaf.userPaused) {
-    leaf.userPaused = false;
-  } else {
-    leaf.userPaused = true;
-  }
-  applyPlaybackIntent(leaf);
+  // Source of truth is userPaused (not video.paused — fullscreen can lie).
+  // If the tile is currently supposed to play, pause it; otherwise unpause.
+  const pausing = leafShouldPlay(leaf);
+  leaf.userPaused = pausing;
+  // Force decode on explicit unpause so viewport checks can't swallow play().
+  applyPlaybackIntent(leaf, pausing ? {} : { force: true });
   // Sync pause/play to every projection window immediately so controller audio
   // cannot keep a playlist alive after the user pauses on another display.
   syncPlaybackNow();
@@ -1783,8 +1798,8 @@ function serializeTree(node, withIndex) {
     if (withIndex) o.index = node.index;
     o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
     if (node.muted) o.muted = true;
-    // Pause intent must sync across All Displays windows (controller owns audio).
-    if (node.userPaused) o.userPaused = true;
+    // Always include so unpause (false) clears peers — omitting it left them stuck.
+    o.userPaused = !!node.userPaused;
     return o;
   }
   return {
