@@ -348,16 +348,23 @@ function applyPlaybackIntent(leaf, opts = {}) {
     return;
   }
 
-  // Off-slice mirrors may skip decode, unless the user just hit play.
+  // Off-slice / off-wall tiles skip decode, unless the user just hit play.
   if (!leafMayDecode(leaf, opts)) {
     leaf._wantPlaying = false;
     pauseVideoElement(leaf.video);
+    if (leaf.video) leaf.video.preload = 'none';
     applyTileAudio(leaf);
     resetLeafSyncClock(leaf);
     return;
   }
 
   leaf._wantPlaying = true;
+  // Prefer full preload for focused / on-screen tiles; metadata is enough elsewhere.
+  if (leaf.video) {
+    leaf.video.preload = (leaf === focusedLeaf || isLeafVisible(leaf) || isLeafInViewport(leaf))
+      ? 'auto'
+      : 'metadata';
+  }
   applyTileAudio(leaf);
   resumeAudioContext();
   leaf.video.play().catch(() => {});
@@ -382,13 +389,14 @@ function syncPlaybackNow() {
 }
 
 /**
- * Controller keeps media loaded for every tile (it owns audible output).
- * Mirrors only decode tiles on their own display slice.
+ * Controller keeps media loaded for tiles that hit a physical display (it owns
+ * audible output). Padding / off-wall tiles stay paused. Mirrors only decode
+ * their own display slice.
  */
 function leafMayDecode(leaf, opts = {}) {
   if (opts.force) return true;
   if (!projection.active) return true;
-  if (projection.role === 'controller') return true;
+  if (projection.role === 'controller') return leafIntersectsAnyDisplay(leaf);
   return isLeafInViewport(leaf) || isLeafVisible(leaf);
 }
 
@@ -464,12 +472,12 @@ function stopVideoElement(video) {
 // Under heavy load the decoder can stall or drift from the audio clock. We
 // periodically verify each tile is on the right file with correct mute/volume,
 // and gently resync (seek-to-self + play) when wall-clock vs media-clock diverge.
-const PLAYBACK_AUDIT_MS = 2000;
-const SYNC_SAMPLE_SEC = 1.0;
-const STALL_RATIO = 0.45;
-const JUMP_SLACK_SEC = 0.75;
-const REPAIR_COOLDOWN_MS = 4000;
-const DROPPED_FRAME_BURST = 18;
+const PLAYBACK_AUDIT_MS = 4000;
+const SYNC_SAMPLE_SEC = 1.25;
+const STALL_RATIO = 0.3;
+const JUMP_SLACK_SEC = 0.9;
+const REPAIR_COOLDOWN_MS = 8000;
+const DROPPED_FRAME_BURST = 24;
 
 let playbackAuditTimer = 0;
 
@@ -484,7 +492,8 @@ function configureVideoElement(video) {
   video.playsInline = true;
   video.setAttribute('playsinline', '');
   video.setAttribute('webkit-playsinline', '');
-  video.preload = 'auto';
+  // Default light; applyPlaybackIntent raises to 'auto' for visible/focused tiles.
+  video.preload = 'metadata';
   try { video.disablePictureInPicture = true; } catch (_) { /* ignore */ }
   try { video.disableRemotePlayback = true; } catch (_) { /* ignore */ }
 }
@@ -492,6 +501,8 @@ function configureVideoElement(video) {
 function armVideoFrameWatch(leaf) {
   const video = leaf && leaf.video;
   if (!video || typeof video.requestVideoFrameCallback !== 'function') return;
+  // Skip frame watches for tiles this window is not showing — saves main-thread work.
+  if (!isLeafVisible(leaf) && leaf !== focusedLeaf) return;
   if (leaf._frameWatchArmed) return;
   leaf._frameWatchArmed = true;
   const tick = (_now, meta) => {
@@ -572,6 +583,14 @@ function repairLeafPlayback(leaf, reason) {
   }
 }
 
+function countPlayingLeaves() {
+  let n = 0;
+  forEachLeaf(root, (leaf) => {
+    if (!leaf.spacer && leaf.video && !leaf.video.paused && !leaf.video.ended) n++;
+  });
+  return n;
+}
+
 function auditLeafPlayback(leaf) {
   if (!leaf || leaf.spacer || !leaf.video || !leaf.files.length) return;
   const video = leaf.video;
@@ -586,8 +605,8 @@ function auditLeafPlayback(leaf) {
     return;
   }
 
-  // Mirrors: off-slice tiles stay paused and silent. Controller owns all audio.
-  if (projection.active && projection.role === 'mirror' && !leafMayDecode(leaf)) {
+  // Off-decode tiles (mirror off-slice or controller off-wall) stay paused/silent.
+  if (!leafMayDecode(leaf)) {
     if (!video.paused) pauseVideoElement(video);
     applyTileAudio(leaf);
     resetLeafSyncClock(leaf);
@@ -602,6 +621,13 @@ function auditLeafPlayback(leaf) {
 
   // Enforce mute/volume / boost (mirrors stay silent via GainNode = 0).
   applyTileAudio(leaf);
+
+  // Under heavy multi-tile load, skip stall self-seeks — they make lag worse.
+  const playingCount = countPlayingLeaves();
+  if (playingCount >= 6 && document.body.classList.contains('idle')) {
+    resetLeafSyncClock(leaf);
+    return;
+  }
 
   if (video.paused || video.ended || video.seeking || video.readyState < 2) {
     resetLeafSyncClock(leaf);
@@ -684,19 +710,32 @@ function stopPlaybackAudit() {
 /** True if the tile intersects at least one physical display in the wall. */
 function leafIntersectsAnyDisplay(leaf) {
   if (!projection.active) return true;
+  const now = performance.now();
+  if (leaf._intersectCacheAt && now - leaf._intersectCacheAt < 250) {
+    return !!leaf._intersectCache;
+  }
   const r = getLeafUnionRect(leaf);
-  if (!r || r.w < 1 || r.h < 1) return isLeafVisible(leaf);
-  const displays = winState.displays || [];
-  if (!displays.length) return true;
-  for (const d of displays) {
-    const b = d.bounds;
-    if (!b) continue;
-    if (r.x < b.x + b.width && r.x + r.w > b.x &&
-        r.y < b.y + b.height && r.y + r.h > b.y) {
-      return true;
+  let hit = false;
+  if (!r || r.w < 1 || r.h < 1) {
+    hit = isLeafVisible(leaf);
+  } else {
+    const displays = winState.displays || [];
+    if (!displays.length) hit = true;
+    else {
+      for (const d of displays) {
+        const b = d.bounds;
+        if (!b) continue;
+        if (r.x < b.x + b.width && r.x + r.w > b.x &&
+            r.y < b.y + b.height && r.y + r.h > b.y) {
+          hit = true;
+          break;
+        }
+      }
     }
   }
-  return false;
+  leaf._intersectCacheAt = now;
+  leaf._intersectCache = hit;
+  return hit;
 }
 
 /** Apply per-tile volume/mute. Values above 1.0 boost via Web Audio (up to 200%). */
@@ -919,9 +958,9 @@ function applyIncomingLayout(payload) {
 
     // Fast path: same tile structure → just realign clip identity / pause / volume.
     // Mirrors no longer auto-shuffle on ended, so index/time from any peer is safe.
+    // Do not schedule span recovery here — that was re-playing every tile every sync.
     if (sameLayoutStructure(root, payload.tree)) {
       applyIncomingPlayback(root, payload.tree, { applyIdentity: true });
-      if (projection.active) scheduleSpanPlaybackRecovery();
       return;
     }
 
@@ -997,14 +1036,49 @@ function applyIncomingLayout(payload) {
 }
 
 let projectionIdentityTimer = 0;
+const IDENTITY_SYNC_MS = 4000;
+const IDENTITY_TIME_DRIFT = 0.5;
+
+/** True when any playing tile's clip/time drifted enough to bother mirrors. */
+function needsIdentityBroadcast() {
+  let needed = false;
+  forEachLeaf(root, (leaf) => {
+    if (needed || leaf.spacer || !leaf.files.length) return;
+    if (leaf.index !== leaf._lastBroadcastIndex || !!leaf.userPaused !== !!leaf._lastBroadcastPaused) {
+      needed = true;
+      return;
+    }
+    if (!leafShouldPlay(leaf) || !leaf.video) return;
+    const t = leaf.video.currentTime;
+    if (!isFinite(t)) return;
+    if (leaf._lastBroadcastTime == null || Math.abs(t - leaf._lastBroadcastTime) > IDENTITY_TIME_DRIFT) {
+      needed = true;
+    }
+  });
+  return needed;
+}
+
+function rememberIdentityBroadcast() {
+  forEachLeaf(root, (leaf) => {
+    if (leaf.spacer) return;
+    leaf._lastBroadcastIndex = leaf.index;
+    leaf._lastBroadcastPaused = !!leaf.userPaused;
+    leaf._lastBroadcastTime = leaf.video && isFinite(leaf.video.currentTime)
+      ? leaf.video.currentTime
+      : leaf._lastBroadcastTime;
+  });
+}
+
 /** Controller periodically rebroadcasts clip index + time so mirrors cannot drift. */
 function startProjectionIdentitySync() {
   if (projectionIdentityTimer || IS_MIRROR) return;
   projectionIdentityTimer = window.setInterval(() => {
     if (!projection.active || projection.role !== 'controller' || applyingRemote) return;
-    lastSyncJSON = '';
+    if (!needsIdentityBroadcast()) return;
+    // Do not clear lastSyncJSON — let broadcastLayout dedupe identical payloads.
     broadcastLayout();
-  }, 2000);
+    rememberIdentityBroadcast();
+  }, IDENTITY_SYNC_MS);
 }
 function stopProjectionIdentitySync() {
   if (!projectionIdentityTimer) return;
@@ -1363,16 +1437,23 @@ function wireLeafEvents(leaf) {
   video.addEventListener('play', () => {
     refs.play.textContent = '⏸';
     leaf._wantPlaying = true;
+    if (el) el.classList.add('playing');
     resetLeafSyncClock(leaf);
     armVideoFrameWatch(leaf);
   });
   video.addEventListener('pause', () => {
     refs.play.textContent = '▶';
     leaf._wantPlaying = false;
+    if (el) el.classList.remove('playing');
     resetLeafSyncClock(leaf);
   });
   // Throttle seek-bar UI updates so many tiles don't flood the main thread.
   video.addEventListener('timeupdate', () => {
+    // Skip chrome updates while idle and this tile isn't focused/hovered.
+    if (document.body.classList.contains('idle') && !document.body.classList.contains('editing') &&
+        leaf !== focusedLeaf && !(el.matches && el.matches(':hover'))) {
+      return;
+    }
     if (leaf._timeUiPending) return;
     leaf._timeUiPending = true;
     requestAnimationFrame(() => {
