@@ -152,11 +152,13 @@ npm start
 | Play / pause focused tile | `Space` |
 | Pause / play all videos | **⏸ All** / **▶ All**, or `Shift`+`Space` |
 | Pause / play videos on this display | **⏸ Display** / **▶ Display** (also on secondary displays when spanning) |
+| Reset one display’s tiles | **Reset Display** or `R` (needs 2+ monitors) |
+| Reset entire layout | **Reset All** |
 | Loop the current video (per tile) | The **🔁** button on the tile |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |
 | Adjust grid cell size | The **Cell** slider |
-| Reset layout | The **Reset** button |
+| Reset entire layout | **Reset All** |
 | Fullscreen (current display) | `F` or the **Fullscreen** button |
 | Fullscreen across ALL displays | `A` or the **All Displays** button |
 | Toggle the screen-split guide | `D` or the **Guide** button |
