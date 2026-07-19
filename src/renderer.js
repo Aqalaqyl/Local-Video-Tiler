@@ -396,7 +396,11 @@ function syncPlaybackNow() {
 function leafMayDecode(leaf, opts = {}) {
   if (opts.force) return true;
   if (!projection.active) return true;
-  if (projection.role === 'controller') return leafIntersectsAnyDisplay(leaf);
+  if (projection.role === 'controller') {
+    // Fail open when geometry is unknown so secondary-display audio never drops.
+    if (!leaf.el) return true;
+    return leafIntersectsAnyDisplay(leaf);
+  }
   return isLeafInViewport(leaf) || isLeafVisible(leaf);
 }
 
@@ -715,13 +719,11 @@ function leafIntersectsAnyDisplay(leaf) {
     return !!leaf._intersectCache;
   }
   const r = getLeafUnionRect(leaf);
-  let hit = false;
-  if (!r || r.w < 1 || r.h < 1) {
-    hit = isLeafVisible(leaf);
-  } else {
+  let hit = true; // fail open — better extra decode than silent secondary displays
+  if (r && r.w >= 1 && r.h >= 1) {
     const displays = winState.displays || [];
-    if (!displays.length) hit = true;
-    else {
+    if (displays.length) {
+      hit = false;
       for (const d of displays) {
         const b = d.bounds;
         if (!b) continue;
