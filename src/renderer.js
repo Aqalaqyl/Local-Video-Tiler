@@ -306,7 +306,44 @@ function isLeafInViewport(leaf) {
 }
 
 function leafShouldPlay(leaf) {
-  return !leaf.userPaused && leaf.files.length > 0;
+  return !!leaf && !leaf.userPaused && leaf.files.length > 0;
+}
+
+/**
+ * Honor the tile's play/pause intent: paused tiles must not decode or produce
+ * audio (including on the controller while spanning all displays).
+ */
+function applyPlaybackIntent(leaf) {
+  if (!leaf || leaf.spacer || !leaf.video) return;
+  leaf.video.loop = !!leaf.loop;
+  if (!leafShouldPlay(leaf) || !leafMayDecode(leaf)) {
+    leaf._wantPlaying = false;
+    pauseVideoElement(leaf.video);
+    applyTileAudio(leaf);
+    resetLeafSyncClock(leaf);
+    return;
+  }
+  leaf._wantPlaying = true;
+  applyTileAudio(leaf);
+  resumeAudioContext();
+  leaf.video.play().catch(() => {});
+  armVideoFrameWatch(leaf);
+  resetLeafSyncClock(leaf);
+}
+
+/** Persist + sync pause/play immediately (do not wait for the saveState debounce). */
+function syncPlaybackNow() {
+  if (!IS_MIRROR) {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) }));
+    } catch (_) { /* ignore */ }
+  }
+  if (projection.active) {
+    lastSyncJSON = '';
+    broadcastLayout();
+  } else {
+    saveState();
+  }
 }
 
 /**
@@ -334,9 +371,10 @@ function sourcesMatch(video, url) {
 
 /**
  * Projection playback:
- * - Controller plays every non-paused tile (audio comes from the primary window).
- * - Mirrors stay muted and only run tiles on their slice.
- * Never trust video.paused during fullscreen — the OS briefly pauses media.
+ * - Controller owns audible output for every non-paused tile.
+ * - Mirrors stay muted and only decode tiles on their slice.
+ * - userPaused is honored on every window (synced via layout broadcast).
+ * Never trust video.paused alone during fullscreen — the OS briefly pauses media.
  */
 function reconcileProjectionPlayback() {
   if (!projection.active) return;
@@ -351,38 +389,24 @@ function reconcileProjectionPlayback() {
       if (cur && !sourcesMatch(leaf.video, cur.url)) {
         loadCurrent(leaf, shouldPlay, { force: true });
       } else {
-        applyTileAudio(leaf);
-        leaf.video.loop = !!leaf.loop;
-        if (shouldPlay) {
-          leaf._wantPlaying = true;
-          leaf.video.play().catch(() => {});
-          armVideoFrameWatch(leaf);
-        } else {
-          leaf._wantPlaying = false;
-          leaf.video.pause();
-        }
-        resetLeafSyncClock(leaf);
+        applyPlaybackIntent(leaf);
       }
       return;
     }
 
     const visible = isLeafInViewport(leaf) || isLeafVisible(leaf);
-    if (visible) {
-      if (cur && !sourcesMatch(leaf.video, cur.url)) {
-        loadCurrent(leaf, true);
-      } else {
-        applyTileAudio(leaf);
-        leaf.video.loop = !!leaf.loop;
-        leaf._wantPlaying = true;
-        leaf.video.play().catch(() => {});
-        armVideoFrameWatch(leaf);
-        resetLeafSyncClock(leaf);
-      }
-    } else {
+    if (!visible) {
       leaf._wantPlaying = false;
       pauseVideoElement(leaf.video);
       applyTileAudio(leaf);
       resetLeafSyncClock(leaf);
+      return;
+    }
+
+    if (cur && !sourcesMatch(leaf.video, cur.url)) {
+      loadCurrent(leaf, shouldPlay);
+    } else {
+      applyPlaybackIntent(leaf);
     }
   });
 }
@@ -464,11 +488,20 @@ function repairLeafPlayback(leaf, reason) {
   if (leaf._syncRepairAt && now - leaf._syncRepairAt < REPAIR_COOLDOWN_MS) return;
   leaf._syncRepairAt = now;
 
+  // Never restart a tile the user (or a peer window) paused.
+  if (leaf.userPaused || !leafShouldPlay(leaf)) {
+    leaf._wantPlaying = false;
+    pauseVideoElement(video);
+    applyTileAudio(leaf);
+    resetLeafSyncClock(leaf);
+    return;
+  }
+
   const cur = leaf.files[leaf.index];
-  const shouldPlay = leafShouldPlay(leaf) || (!video.paused && !video.ended);
+  const shouldPlay = leafShouldPlay(leaf);
 
   if (cur && videoSourceUrl(video) && !sourcesMatch(video, cur.url)) {
-    loadCurrent(leaf, shouldPlay || !!leaf._wantPlaying);
+    loadCurrent(leaf, shouldPlay);
     resetLeafSyncClock(leaf);
     return;
   }
@@ -490,11 +523,14 @@ function repairLeafPlayback(leaf, reason) {
     applyTileAudio(leaf);
   }
 
-  if (shouldPlay || leaf._wantPlaying) {
+  if (shouldPlay && leafMayDecode(leaf)) {
     resumeAudioContext();
     video.play().catch(() => {});
+    armVideoFrameWatch(leaf);
+  } else {
+    leaf._wantPlaying = false;
+    pauseVideoElement(video);
   }
-  armVideoFrameWatch(leaf);
   resetLeafSyncClock(leaf);
   if (reason) {
     try { console.debug('[playback-sync] repaired', leaf.id, reason); } catch (_) { /* ignore */ }
@@ -505,6 +541,15 @@ function auditLeafPlayback(leaf) {
   if (!leaf || leaf.spacer || !leaf.video || !leaf.files.length) return;
   const video = leaf.video;
   const cur = leaf.files[leaf.index];
+
+  // User/peer pause must win over recovery — kill decode + GainNode output.
+  if (leaf.userPaused) {
+    leaf._wantPlaying = false;
+    if (!video.paused) pauseVideoElement(video);
+    applyTileAudio(leaf);
+    resetLeafSyncClock(leaf);
+    return;
+  }
 
   // Mirrors: off-slice tiles stay paused and silent. Controller owns all audio.
   if (projection.active && projection.role === 'mirror' && !leafMayDecode(leaf)) {
@@ -526,7 +571,7 @@ function auditLeafPlayback(leaf) {
   if (video.paused || video.ended || video.seeking || video.readyState < 2) {
     resetLeafSyncClock(leaf);
     leaf._wantPlaying = leafShouldPlay(leaf);
-    // Fullscreen transitions can leave tiles paused — resume intentional play.
+    // Fullscreen transitions can leave tiles paused — resume only if still wanted.
     if (leafShouldPlay(leaf) && video.paused && !video.ended && leafMayDecode(leaf)) {
       resumeAudioContext();
       video.play().catch(() => {});
@@ -607,7 +652,8 @@ function applyTileAudio(leaf) {
   const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
   leaf.volume = vol;
   const mirror = projection.active && projection.role === 'mirror';
-  const muted = mirror || !!leaf.muted || vol === 0;
+  // Paused tiles must be silent even if the element hasn't finished pausing yet.
+  const muted = mirror || !!leaf.muted || vol === 0 || !!leaf.userPaused;
 
   const graph = ensureTileAudioGraph(leaf);
   if (graph) {
@@ -629,8 +675,10 @@ function applyTileAudio(leaf) {
     const pct = Math.round(vol * 100);
     leaf.refs.vol.title =
       `Volume ${pct}%` + (vol > 1 ? ' (boost)' : '') + ' — scroll wheel over tile (up to 200%)';
-    leaf.refs.mute.textContent = muted ? '🔇' : (vol > 1 ? '🔊+' : '🔊');
-    leaf.refs.mute.title = muted ? 'Unmute' : (vol > 1 ? `Boosted ${pct}%` : 'Mute');
+    // Mute icon reflects user mute / zero volume, not pause silencing.
+    const uiMuted = !!leaf.muted || vol === 0;
+    leaf.refs.mute.textContent = uiMuted ? '🔇' : (vol > 1 ? '🔊+' : '🔊');
+    leaf.refs.mute.title = uiMuted ? 'Unmute' : (vol > 1 ? `Boosted ${pct}%` : 'Mute');
     if (leaf.refs.volPct) {
       leaf.refs.volPct.textContent = pct + '%';
       leaf.refs.volPct.classList.toggle('boosted', vol > 1);
@@ -755,6 +803,7 @@ function applyIncomingLayout(payload) {
         if (node) {
           if (typeof node.volume === 'number') leaf.volume = clamp(node.volume, 0, MAX_TILE_VOLUME);
           if (node.muted != null) leaf.muted = !!node.muted;
+          if (node.userPaused != null) leaf.userPaused = !!node.userPaused;
         }
         if (leaf.el) leaf.el.classList.toggle('pad-spacer', spacer);
         applyTileAudio(leaf);
@@ -770,10 +819,15 @@ function applyIncomingLayout(payload) {
     focusedLeaf = null;
     selectedLeaves.clear();
     render();
-    // Start media only for brand-new tiles; reused tiles are already playing.
+    // Start media only for brand-new tiles; reused tiles honor synced pause.
     forEachLeaf(root, (leaf) => {
       if (leaf.folder && leaf.files.length === 0) {
-        loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf));
+        loadFolder(leaf, leaf.folder, 0, false).then(() => {
+          if (!leaf.userPaused) advanceRandom(leaf);
+          else applyPlaybackIntent(leaf);
+        });
+      } else {
+        applyPlaybackIntent(leaf);
       }
     });
     applyProjection();
@@ -1158,7 +1212,10 @@ function wireLeafEvents(leaf) {
     armVideoFrameWatch(leaf);
   });
   // When a clip ends (and the tile isn't looping), shuffle to a random clip.
-  video.addEventListener('ended', () => advanceRandom(leaf));
+  video.addEventListener('ended', () => {
+    if (leaf.userPaused) return;
+    advanceRandom(leaf);
+  });
 
   // Click on the tile body: split (edit mode) or focus (view mode).
   // Note: the toolbar buttons and the "Choose media folder…" / 📁 buttons all
@@ -1336,13 +1393,13 @@ function togglePlay(leaf) {
   if (!leaf.files.length) { assignFolder(leaf); return; }
   if (leaf.video.paused || leaf.userPaused) {
     leaf.userPaused = false;
-    resumeAudioContext();
-    leaf.video.play().catch(() => {});
   } else {
     leaf.userPaused = true;
-    leaf.video.pause();
   }
-  applyTileAudio(leaf);
+  applyPlaybackIntent(leaf);
+  // Sync pause/play to every projection window immediately so controller audio
+  // cannot keep a playlist alive after the user pauses on another display.
+  syncPlaybackNow();
 }
 
 function step(leaf, dir, autoplay = false) {
@@ -1364,9 +1421,11 @@ function pickRandomIndex(leaf) {
 /** Auto-advance to a random clip from the folder (the default shuffle playback). */
 function advanceRandom(leaf, initial = false) {
   if (!leaf.files.length) return;
-  leaf.userPaused = false;
+  // Never clear a user pause via ended/advance — that caused ghost background audio.
+  if (leaf.userPaused && !initial) return;
+  if (initial) leaf.userPaused = false;
   leaf.index = initial ? Math.floor(Math.random() * leaf.files.length) : pickRandomIndex(leaf);
-  loadCurrent(leaf, true);
+  loadCurrent(leaf, leafShouldPlay(leaf) || initial);
   saveState();
 }
 
@@ -1460,11 +1519,15 @@ function closeLeaf(leaf) {
 }
 
 function disposeLeaf(leaf) {
+  if (leaf._audioGraph) {
+    try { leaf._audioGraph.source.disconnect(); } catch (_) { /* ignore */ }
+    try { leaf._audioGraph.gain.disconnect(); } catch (_) { /* ignore */ }
+    leaf._audioGraph = null;
+  }
   if (leaf.video) {
     try { leaf.video.pause(); leaf.video.removeAttribute('src'); leaf.video.load(); } catch (_) {}
   }
-  // MediaElementSource can't be rebuilt on the same element; drop the handle.
-  leaf._audioGraph = null;
+  leaf.userPaused = true;
   leaf._frameWatchArmed = false;
   leaf._wantPlaying = false;
   leaf._syncWall = null;
@@ -1720,6 +1783,8 @@ function serializeTree(node, withIndex) {
     if (withIndex) o.index = node.index;
     o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
     if (node.muted) o.muted = true;
+    // Pause intent must sync across All Displays windows (controller owns audio).
+    if (node.userPaused) o.userPaused = true;
     return o;
   }
   return {
@@ -1741,6 +1806,7 @@ function deserialize(obj) {
     l.loop = !!obj.loop;
     l.volume = typeof obj.volume === 'number' ? clamp(obj.volume, 0, MAX_TILE_VOLUME) : 1;
     l.muted = !!obj.muted;
+    l.userPaused = !!obj.userPaused;
     return l;
   }
   return makeSplit(obj.direction, deserialize(obj.children[0]), deserialize(obj.children[1]), obj.ratio);
