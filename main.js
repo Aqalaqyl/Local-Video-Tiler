@@ -8,20 +8,25 @@ const url = require('url');
 /**
  * Prefer GPU compositing + hardware video decode. Chromium falls back to
  * software (CPU) paths automatically when the GPU / decoder isn't available.
- * These switches must be set before app.whenReady().
+ * These switches must be set before app.whenReady(). Never call
+ * app.disableHardwareAcceleration() — that forces the laggy CPU path.
  */
 function configureHardwareAcceleration() {
   // Allow GPUs that Chromium would otherwise blocklist; still fails safe to CPU.
   app.commandLine.appendSwitch('ignore-gpu-blocklist');
   app.commandLine.appendSwitch('enable-gpu-rasterization');
   app.commandLine.appendSwitch('enable-zero-copy');
+  app.commandLine.appendSwitch('enable-native-gpu-memory-buffers');
   // Legacy Chromium flags — ignored when unsupported, helpful on older builds.
   app.commandLine.appendSwitch('enable-accelerated-video-decode');
+  app.commandLine.appendSwitch('enable-accelerated-video-encode');
   app.commandLine.appendSwitch('enable-accelerated-mjpeg-decode');
+  // Dual-GPU laptops: prefer the discrete adapter for decode/compositing.
+  app.commandLine.appendSwitch('force_high_performance_gpu');
 
   const features = ['CanvasOopRasterization'];
   if (process.platform === 'linux') {
-    features.push('VaapiVideoDecoder', 'VaapiVideoEncoder');
+    features.push('VaapiVideoDecoder', 'VaapiVideoEncoder', 'VaapiIgnoreDriverChecks');
   } else if (process.platform === 'win32') {
     features.push('PlatformHEVCDecoderSupport');
   }

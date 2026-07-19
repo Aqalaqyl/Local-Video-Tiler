@@ -129,9 +129,9 @@ function applyProjection() {
     document.body.classList.remove('desktop-preview');
     const offX = projOffX();
     const offY = projOffY();
-    const vw = projection.viewport.width;
-    const vh = projection.viewport.height;
-    const clip = `inset(${offY}px ${projection.union.width - offX - vw}px ${projection.union.height - offY - vh}px ${offX}px)`;
+    // Offset the full union canvas so this window's slice sits at (0,0). Do not
+    // use clip-path — it forces software compositing of <video> and tanks FPS.
+    // Window bounds + body.overflow:hidden already clip to the physical display.
     for (const el of layers) {
       el.style.left = (-offX) + 'px';
       el.style.top = (-offY) + 'px';
@@ -139,7 +139,7 @@ function applyProjection() {
       el.style.bottom = 'auto';
       el.style.width = projection.union.width + 'px';
       el.style.height = projection.union.height + 'px';
-      el.style.clipPath = clip;
+      el.style.clipPath = '';
     }
   } else {
     applyDesktopPreview();
@@ -359,12 +359,8 @@ function applyPlaybackIntent(leaf, opts = {}) {
   }
 
   leaf._wantPlaying = true;
-  // Prefer full preload for focused / on-screen tiles; metadata is enough elsewhere.
-  if (leaf.video) {
-    leaf.video.preload = (leaf === focusedLeaf || isLeafVisible(leaf) || isLeafInViewport(leaf))
-      ? 'auto'
-      : 'metadata';
-  }
+  // Full preload keeps hardware decoders fed; metadata-only caused stutter.
+  if (leaf.video) leaf.video.preload = 'auto';
   applyTileAudio(leaf);
   resumeAudioContext();
   leaf.video.play().catch(() => {});
@@ -496,8 +492,8 @@ function configureVideoElement(video) {
   video.playsInline = true;
   video.setAttribute('playsinline', '');
   video.setAttribute('webkit-playsinline', '');
-  // Default light; applyPlaybackIntent raises to 'auto' for visible/focused tiles.
-  video.preload = 'metadata';
+  // Keep the decoder pipeline warm so GPU decode can start without hitching.
+  video.preload = 'auto';
   try { video.disablePictureInPicture = true; } catch (_) { /* ignore */ }
   try { video.disableRemotePlayback = true; } catch (_) { /* ignore */ }
 }
