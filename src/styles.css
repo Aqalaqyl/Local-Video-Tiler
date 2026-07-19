@@ -48,6 +48,8 @@ body.idle:not(.editing) #topbar {
   opacity: 0;
   transform: translateY(-100%);
   pointer-events: none;
+  /* Blur while hidden still costs GPU fill — drop it when chrome is off-screen. */
+  backdrop-filter: none;
 }
 
 /* When spanning every display, pin the chrome onto the primary monitor so it
@@ -193,10 +195,11 @@ body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.8)
   display: block;
   background: #000;
   object-fit: contain;
-  /* Promote every video plane to its own compositor layer so Chromium can use
-     hardware overlays / zero-copy when the GPU path is available. */
-  transform: translateZ(0);
   backface-visibility: hidden;
+}
+/* Promote only actively playing videos onto compositor layers (GPU overlays). */
+.node-leaf.playing .tile-video {
+  transform: translateZ(0);
 }
 
 .tile-empty {
@@ -232,10 +235,10 @@ body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.8)
   align-items: center;
   gap: 8px;
   padding: 7px 9px;
-  background: rgba(12,13,18,0.82);
+  background: rgba(12,13,18,0.92);
   border: 1px solid var(--line);
   border-radius: 10px;
-  backdrop-filter: blur(6px);
+  /* No backdrop-filter — blur over live video is expensive on the GPU. */
   z-index: 5;
   transition: opacity 0.2s ease;
 }
@@ -439,10 +442,9 @@ body.mirror #display-guide { display: none !important; }
   gap: 6px;
   padding: 6px 8px;
   border-radius: 10px;
-  background: linear-gradient(180deg, rgba(16,17,22,0.94), rgba(16,17,22,0.82));
+  background: linear-gradient(180deg, rgba(16,17,22,0.96), rgba(16,17,22,0.9));
   border: 1px solid var(--line);
   box-shadow: 0 10px 28px rgba(0,0,0,0.45);
-  backdrop-filter: blur(8px);
   -webkit-app-region: no-drag;
 }
 body.mirror .mirror-playback-dock {
