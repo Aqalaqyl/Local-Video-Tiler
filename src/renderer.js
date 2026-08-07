@@ -47,6 +47,7 @@ const btnFsAll = document.getElementById('btn-fs-all');
 const btnGuide = document.getElementById('btn-guide');
 const btnTileDisplays = document.getElementById('btn-tile-displays');
 const btnAssign = document.getElementById('btn-assign');
+const btnClearFolders = document.getElementById('btn-clear-folders');
 const btnPresets = document.getElementById('btn-presets');
 const btnPreview = document.getElementById('btn-preview');
 const presetsPanel = document.getElementById('presets-panel');
@@ -863,11 +864,14 @@ function broadcastLayout() {
   try { window.api.pushLayout(payload); } catch (_) { /* ignore */ }
 }
 
-/** Compare tile/split structure only (ignore clip index, time, volume, pause). */
+/**
+ * Compare BSP skeleton only (split direction/ratio + spacer flags).
+ * Folder assignments are content and sync via applyIncomingPlayback.
+ */
 function sameLayoutStructure(a, b) {
   if (!a || !b || a.kind !== b.kind) return false;
   if (a.kind === 'leaf') {
-    return (a.folder || null) === (b.folder || null) && !!a.spacer === !!b.spacer;
+    return !!a.spacer === !!b.spacer;
   }
   return a.direction === b.direction &&
     Math.abs((a.ratio || 0.5) - (b.ratio || 0.5)) < 0.0005 &&
@@ -903,6 +907,24 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     if (remoteNode.muted != null) localNode.muted = !!remoteNode.muted;
     localNode.userPaused = !!remoteNode.userPaused;
     localNode.loop = !!remoteNode.loop;
+
+    // Folder link changes (including Clear Folders) without rebuilding splits.
+    const remoteFolder = remoteNode.folder || null;
+    const localFolder = localNode.folder || null;
+    if (remoteFolder !== localFolder) {
+      if (!remoteFolder) {
+        clearLeafFolder(localNode);
+      } else {
+        const startIndex = typeof remoteNode.index === 'number' ? remoteNode.index : 0;
+        void loadFolder(localNode, remoteFolder, startIndex, false).then(() => {
+          if (typeof remoteNode.currentTime === 'number' && localNode.video) {
+            try { localNode.video.currentTime = remoteNode.currentTime; } catch (_) { /* ignore */ }
+          }
+          applyPlaybackIntent(localNode, { force: true });
+        });
+        return;
+      }
+    }
 
     if (applyIdentity && typeof remoteNode.index === 'number' && localNode.files.length) {
       const idx = clamp(remoteNode.index, 0, localNode.files.length - 1);
@@ -1384,12 +1406,17 @@ function updateLeaf(leaf) {
   if (!leaf.refs) return;
   const { refs, video } = leaf;
   const hasFiles = leaf.files.length > 0;
-  refs.empty.style.display = leaf.folder ? 'none' : 'flex';
+  const emptyMsg = refs.empty.querySelector('div:nth-child(2)');
   video.style.display = hasFiles ? 'block' : 'none';
 
-  if (leaf.folder && !hasFiles) {
+  if (!leaf.folder) {
     refs.empty.style.display = 'flex';
-    refs.empty.querySelector('div:nth-child(2)').textContent = 'No playable media in folder';
+    if (emptyMsg) emptyMsg.textContent = 'No folder assigned';
+  } else if (!hasFiles) {
+    refs.empty.style.display = 'flex';
+    if (emptyMsg) emptyMsg.textContent = 'No playable media in folder';
+  } else {
+    refs.empty.style.display = 'none';
   }
 
   refs.close.style.display = settings.editMode ? 'inline-block' : 'none';
@@ -1399,6 +1426,54 @@ function updateLeaf(leaf) {
   const current = hasFiles ? leaf.files[leaf.index] : null;
   refs.title.textContent = current ? `${leaf.index + 1}/${leaf.files.length} · ${current.name}` : '';
   applyTileAudio(leaf);
+}
+
+/**
+ * Unlink a tile from its media folder and stop playback, keeping the leaf
+ * (and therefore the surrounding split layout) in place.
+ */
+function clearLeafFolder(leaf) {
+  if (!leaf || leaf.spacer) return false;
+  const hadMedia = !!(leaf.folder || (leaf.files && leaf.files.length) ||
+    (leaf.video && (leaf.video.getAttribute('src') || leaf.video.currentSrc)));
+  if (!hadMedia) return false;
+
+  leaf.folder = null;
+  leaf.files = [];
+  leaf.index = 0;
+  leaf.savedIndex = 0;
+  leaf.loop = false;
+  leaf.userPaused = false;
+  leaf._wantPlaying = false;
+  if (leaf.video) {
+    stopVideoElement(leaf.video);
+    if (leaf.el) leaf.el.classList.remove('playing');
+  }
+  updateLeaf(leaf);
+  return true;
+}
+
+/** Clear every tile’s folder assignment; keep the current BSP split layout. */
+function clearAllFolders() {
+  let cleared = 0;
+  forEachLeaf(root, (leaf) => {
+    if (clearLeafFolder(leaf)) cleared++;
+  });
+  clearSelection();
+  if (!cleared) {
+    flash('No folders to clear');
+    return;
+  }
+  // Persist + sync immediately so projection mirrors drop the same folders.
+  clearTimeout(saveTimer);
+  if (!IS_MIRROR) {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) }));
+    } catch (_) { /* ignore */ }
+  }
+  lastSyncJSON = '';
+  broadcastLayout();
+  flash(`Cleared folders from ${cleared} tile${cleared === 1 ? '' : 's'} — layout kept`);
 }
 
 // ============================================================================
@@ -3060,6 +3135,9 @@ document.addEventListener('keydown', (e) => {
     case 'v': setDesktopPreview(!settings.desktopPreview); break;
     case 't': tileToDisplays(); break;
     case 'r': resetActiveDisplay(); break;
+    case 'c':
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) clearAllFolders();
+      break;
     case 'delete':
     case 'backspace':
       e.preventDefault();
@@ -3109,6 +3187,7 @@ btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
 if (btnPreview) btnPreview.addEventListener('click', () => setDesktopPreview(!settings.desktopPreview));
 btnTileDisplays.addEventListener('click', () => tileToDisplays());
 if (btnAssign) btnAssign.addEventListener('click', () => assignFolderToSelection());
+if (btnClearFolders) btnClearFolders.addEventListener('click', () => clearAllFolders());
 if (btnPresets) btnPresets.addEventListener('click', () => togglePresetsPanel());
 const btnPresetsClose = document.getElementById('btn-presets-close');
 if (btnPresetsClose) btnPresetsClose.addEventListener('click', () => setPresetsPanelOpen(false));
