@@ -347,6 +347,7 @@ function applyPlaybackIntent(leaf, opts = {}) {
   // User/peer pause always wins — silence and stop.
   if (leaf.userPaused || !leaf.files.length) {
     leaf._wantPlaying = false;
+    leaf._holdSilence = false;
     pauseVideoElement(leaf.video);
     applyTileAudio(leaf);
     resetLeafSyncClock(leaf);
@@ -356,6 +357,7 @@ function applyPlaybackIntent(leaf, opts = {}) {
   // Off-slice / off-wall tiles skip decode, unless the user just hit play.
   if (!leafMayDecode(leaf, opts)) {
     leaf._wantPlaying = false;
+    leaf._holdSilence = false;
     pauseVideoElement(leaf.video);
     if (leaf.video) leaf.video.preload = 'none';
     applyTileAudio(leaf);
@@ -367,8 +369,10 @@ function applyPlaybackIntent(leaf, opts = {}) {
   // Full preload keeps hardware decoders fed; metadata-only caused stutter.
   if (leaf.video) leaf.video.preload = 'auto';
   applyTileAudio(leaf);
+  // A clip swap is still warming — finishLoadAndPlay will unmute + play.
+  if (leaf._holdSilence) return;
   resumeAudioContext();
-  leaf.video.play().catch(() => {});
+  if (leaf.video.paused || leaf.video.ended) leaf.video.play().catch(() => {});
   armVideoFrameWatch(leaf);
   resetLeafSyncClock(leaf);
 }
@@ -530,7 +534,8 @@ function armVideoFrameWatch(leaf) {
 
 /**
  * Soft A/V repair: re-apply mute/volume, optionally reload the correct source,
- * otherwise seek to the current time to flush desynced decoder buffers.
+ * otherwise gently resync. Seek-to-self is held silent until seeked — restoring
+ * audio mid-seek was a common desync after deletes/volume changes.
  */
 function repairLeafPlayback(leaf, reason) {
   if (!leaf || !leaf.video || leaf.spacer) return;
@@ -538,11 +543,13 @@ function repairLeafPlayback(leaf, reason) {
   const now = performance.now();
   if (leaf._syncRepairAt && now - leaf._syncRepairAt < REPAIR_COOLDOWN_MS) return;
   leaf._syncRepairAt = now;
+  const repairGen = (leaf._repairGen = (leaf._repairGen || 0) + 1);
 
   // Never restart a tile the user (or a peer window) paused.
   if (leaf.userPaused || !leafShouldPlay(leaf)) {
     leaf._wantPlaying = false;
     pauseVideoElement(video);
+    leaf._holdSilence = false;
     applyTileAudio(leaf);
     resetLeafSyncClock(leaf);
     return;
@@ -557,32 +564,51 @@ function repairLeafPlayback(leaf, reason) {
     return;
   }
 
-  applyTileAudio(leaf);
   video.loop = !!leaf.loop;
 
-  if (video.readyState >= 2 && isFinite(video.currentTime) && !video.seeking) {
-    const t = video.currentTime;
-    // Briefly silence during the seek so a desynced burst doesn't pile on.
-    // Prefer GainNode mute when boost graph is active (element.muted is forced off).
-    const graph = leaf._audioGraph;
-    if (graph) {
-      try { graph.gain.gain.value = 0; } catch (_) { /* ignore */ }
-    } else {
-      try { video.muted = true; } catch (_) { /* ignore */ }
-    }
-    try { video.currentTime = t; } catch (_) { /* ignore */ }
+  // With Web Audio boost or many tiles, seek-to-self often worsens lip-sync —
+  // just ensure playback is running and leave decoder buffers alone.
+  const heavy = countPlayingLeaves() >= 4 || !!leaf._audioGraph;
+  if (heavy || !(video.readyState >= 2 && isFinite(video.currentTime) && !video.seeking)) {
+    leaf._holdSilence = false;
     applyTileAudio(leaf);
+    if (shouldPlay && leafMayDecode(leaf)) {
+      resumeAudioContext();
+      if (video.paused || video.ended) video.play().catch(() => {});
+      armVideoFrameWatch(leaf);
+    } else {
+      leaf._wantPlaying = false;
+      pauseVideoElement(video);
+    }
+    resetLeafSyncClock(leaf);
+    if (reason) {
+      try { console.debug('[playback-sync] repaired', leaf.id, reason); } catch (_) { /* ignore */ }
+    }
+    return;
   }
 
-  if (shouldPlay && leafMayDecode(leaf)) {
-    resumeAudioContext();
-    video.play().catch(() => {});
-    armVideoFrameWatch(leaf);
-  } else {
-    leaf._wantPlaying = false;
-    pauseVideoElement(video);
-  }
-  resetLeafSyncClock(leaf);
+  const t = video.currentTime;
+  leaf._holdSilence = true;
+  silenceLeafOutput(leaf);
+
+  const finish = () => {
+    if (leaf._repairGen !== repairGen || leaf.video !== video) return;
+    video.removeEventListener('seeked', onSeeked);
+    clearTimeout(timer);
+    leaf._holdSilence = false;
+    applyTileAudio(leaf);
+    if (shouldPlay && leafMayDecode(leaf) && !leaf.userPaused) {
+      resumeAudioContext();
+      video.play().catch(() => {});
+      armVideoFrameWatch(leaf);
+    }
+    resetLeafSyncClock(leaf);
+  };
+  const onSeeked = () => finish();
+  video.addEventListener('seeked', onSeeked);
+  const timer = setTimeout(finish, 600);
+  try { video.currentTime = t; } catch (_) { finish(); }
+
   if (reason) {
     try { console.debug('[playback-sync] repaired', leaf.id, reason); } catch (_) { /* ignore */ }
   }
@@ -624,12 +650,20 @@ function auditLeafPlayback(leaf) {
     return;
   }
 
-  // Enforce mute/volume / boost (mirrors stay silent via GainNode = 0).
-  applyTileAudio(leaf);
+  // Only touch the audio graph/element when mute/volume actually looks wrong.
+  // Re-applying every audit tick while the user adjusts volume caused desync.
+  if (!leaf._holdSilence) {
+    const wantMute = leafAudioShouldMute(leaf);
+    const graph = leaf._audioGraph;
+    const audioWrong = graph
+      ? ((wantMute && graph.gain.gain.value !== 0) || (!wantMute && Math.abs(graph.gain.gain.value - leaf.volume) > 0.001))
+      : (!!video.muted !== wantMute);
+    if (audioWrong) applyTileAudio(leaf);
+  }
 
   // Under heavy multi-tile load, skip stall self-seeks — they make lag worse.
   const playingCount = countPlayingLeaves();
-  if (playingCount >= 6 && document.body.classList.contains('idle')) {
+  if (playingCount >= 4 && document.body.classList.contains('idle')) {
     resetLeafSyncClock(leaf);
     return;
   }
@@ -741,26 +775,51 @@ function leafIntersectsAnyDisplay(leaf) {
   return hit;
 }
 
+/** True when this tile should produce no audible output right now. */
+function leafAudioShouldMute(leaf) {
+  if (!leaf) return true;
+  if (leaf._holdSilence) return true;
+  const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
+  const mirror = projection.active && projection.role === 'mirror';
+  const offWall = projection.active && projection.role === 'controller' && !leafIntersectsAnyDisplay(leaf);
+  return mirror || offWall || !!leaf.muted || vol === 0 || !!leaf.userPaused;
+}
+
+/** Silence output immediately without rebuilding the audio graph. */
+function silenceLeafOutput(leaf) {
+  if (!leaf || !leaf.video) return;
+  if (leaf._audioGraph) {
+    try { leaf._audioGraph.gain.gain.value = 0; } catch (_) { /* ignore */ }
+    // Keep element.muted false when Web Audio owns the stream — toggling it desyncs A/V.
+    try { leaf.video.muted = false; } catch (_) { /* ignore */ }
+  } else {
+    try { leaf.video.muted = true; } catch (_) { /* ignore */ }
+  }
+}
+
 /** Apply per-tile volume/mute. Values above 1.0 boost via Web Audio (up to 200%). */
 function applyTileAudio(leaf) {
   if (!leaf.video) return;
   const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
   leaf.volume = vol;
-  const mirror = projection.active && projection.role === 'mirror';
-  // Off-wall padding tiles must not contribute mystery audio on the controller.
-  const offWall = projection.active && projection.role === 'controller' && !leafIntersectsAnyDisplay(leaf);
-  // Paused tiles must be silent even if the element hasn't finished pausing yet.
-  const muted = mirror || offWall || !!leaf.muted || vol === 0 || !!leaf.userPaused;
+  const muted = leafAudioShouldMute(leaf);
 
-  const graph = ensureTileAudioGraph(leaf);
-  if (graph) {
-    resumeAudioContext();
-    // Element stays at unity for boost headroom; silence via gain AND element mute.
-    try { leaf.video.volume = 1; } catch (_) { /* ignore */ }
-    leaf.video.muted = muted;
-    try { graph.gain.gain.value = muted ? 0 : vol; } catch (_) { /* ignore */ }
+  // Stay on the native media path whenever possible. MediaElementSource captures
+  // the element into the Web Audio clock and is a common A/V desync source —
+  // only build it when this tile actually needs >100% boost.
+  const needsBoost = !muted && vol > 1;
+  if (needsBoost || leaf._audioGraph) {
+    const graph = needsBoost ? ensureTileAudioGraph(leaf) : leaf._audioGraph;
+    if (graph) {
+      resumeAudioContext();
+      try { leaf.video.volume = 1; } catch (_) { /* ignore */ }
+      try { leaf.video.muted = false; } catch (_) { /* ignore */ }
+      try { graph.gain.gain.value = muted ? 0 : vol; } catch (_) { /* ignore */ }
+    } else {
+      leaf.video.volume = Math.min(vol, 1);
+      leaf.video.muted = muted;
+    }
   } else {
-    // No Web Audio: native volume cannot exceed 100%.
     leaf.video.volume = Math.min(vol, 1);
     leaf.video.muted = muted;
   }
@@ -793,11 +852,15 @@ function getAudioContext() {
 }
 
 function resumeAudioContext() {
-  const ctx = getAudioContext();
-  if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+  // Do not eagerly create an AudioContext — only resume one already used for boost.
+  if (!sharedAudioCtx) return;
+  if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume().catch(() => {});
 }
 
-/** Wire a GainNode once per tile so volume can exceed the HTMLMediaElement 100% cap. */
+/**
+ * Wire a GainNode once per tile so volume can exceed the HTMLMediaElement 100%
+ * cap. Call only when boost (>1.0) is required — never for normal volume/mirrors.
+ */
 function ensureTileAudioGraph(leaf) {
   if (!leaf || !leaf.video) return null;
   if (leaf._audioGraph) return leaf._audioGraph;
@@ -1724,14 +1787,21 @@ async function deleteCurrentVideo(leaf) {
   }
 
   const removedPath = current.path;
+  // Drop remembered volume for a file that no longer exists.
+  if (fileVolumes.has(removedPath)) {
+    fileVolumes.delete(removedPath);
+    schedulePersistFileVolumes();
+  }
   leaf.files = leaf.files.filter((f) => f.path !== removedPath);
   if (leaf.index >= leaf.files.length) leaf.index = Math.max(0, leaf.files.length - 1);
 
   if (leaf.files.length > 0) {
     leaf.userPaused = false;
-    loadCurrent(leaf, true);
+    // Hard clip swap (silence → clear src → load next → unmute when ready).
+    loadCurrent(leaf, true, { hardSwap: true });
     flash('Deleted ' + current.name);
   } else {
+    leaf._holdSilence = false;
     stopVideoElement(leaf.video);
     updateLeaf(leaf);
     flash('Deleted ' + current.name + ' — folder empty');
@@ -1749,6 +1819,26 @@ async function loadFolder(leaf, folder, index = 0, autoplay = false) {
   saveState();
 }
 
+/**
+ * After a source swap: wait until the decoder is ready, then unmute and play.
+ * Generation token ignores stale callbacks when the user deletes/skips quickly.
+ */
+async function finishLoadAndPlay(leaf, gen, autoplay) {
+  const video = leaf && leaf.video;
+  if (!video) return;
+  await waitVideoReady(video, 2200);
+  if (!leaf.video || leaf.video !== video || leaf._loadGen !== gen) return;
+  leaf._holdSilence = false;
+  applyTileAudio(leaf);
+  if (autoplay && leaf._wantPlaying && leafShouldPlay(leaf) && leafMayDecode(leaf)) {
+    resumeAudioContext();
+    video.play().catch(() => {});
+    armVideoFrameWatch(leaf);
+  }
+  resetLeafSyncClock(leaf);
+  updateLeaf(leaf);
+}
+
 function loadCurrent(leaf, autoplay, opts = {}) {
   const { video } = leaf;
   if (!video) return;
@@ -1757,6 +1847,7 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   const sameSource = current && sourcesMatch(video, current.url);
 
   if (!current || !mayDecode) {
+    leaf._holdSilence = false;
     if (!mayDecode && current && !opts.force) pauseVideoElement(video);
     else {
       try {
@@ -1771,7 +1862,8 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   // Restore this clip’s last volume before wiring audio / starting playback.
   applyRememberedFileVolume(leaf);
 
-  if (sameSource) {
+  if (sameSource && !opts.hardSwap) {
+    leaf._holdSilence = false;
     applyTileAudio(leaf);
     video.loop = !!leaf.loop;
     if (autoplay) {
@@ -1787,24 +1879,30 @@ function loadCurrent(leaf, autoplay, opts = {}) {
     return;
   }
 
+  // Clip change / delete advance: hold silence across the decoder swap so audio
+  // cannot race ahead of the first frames (Web Audio + mid-play src changes).
+  const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
+  leaf._holdSilence = true;
+  silenceLeafOutput(leaf);
   try { video.pause(); } catch (_) { /* ignore */ }
+  try {
+    if (video.getAttribute('src')) {
+      video.removeAttribute('src');
+      video.load();
+    }
+  } catch (_) { /* ignore */ }
+
   video.src = current.url;
   video.load();
   video.loop = !!leaf.loop;
-  applyTileAudio(leaf);
   leaf._lastDropped = null;
   leaf._lastTotal = null;
   leaf._frameWatchArmed = false;
   leaf._lastFrameWall = null;
-  if (autoplay) {
-    leaf._wantPlaying = true;
-    video.play().catch(() => {});
-    armVideoFrameWatch(leaf);
-  } else {
-    leaf._wantPlaying = false;
-  }
-  resetLeafSyncClock(leaf);
+  leaf._wantPlaying = !!autoplay;
   updateLeaf(leaf);
+  resetLeafSyncClock(leaf);
+  void finishLoadAndPlay(leaf, gen, !!autoplay);
 }
 
 function togglePlay(leaf) {
@@ -1882,12 +1980,8 @@ function prepareLeafForUnpause(leaf) {
   }
 
   // Hold silence until every tile is ready — then unmute together.
-  if (leaf._audioGraph) {
-    try { leaf._audioGraph.gain.gain.value = 0; } catch (_) { /* ignore */ }
-    try { leaf.video.muted = true; } catch (_) { /* ignore */ }
-  } else {
-    try { leaf.video.muted = true; } catch (_) { /* ignore */ }
-  }
+  leaf._holdSilence = true;
+  silenceLeafOutput(leaf);
   try { leaf.video.pause(); } catch (_) { /* ignore */ }
   return true;
 }
@@ -1939,6 +2033,7 @@ async function resumeLeavesInUnison(leaves, opts = {}) {
   }
   for (const leaf of targets) {
     if (leaf.userPaused || !leaf.video) continue;
+    leaf._holdSilence = false;
     applyTileAudio(leaf);
     armVideoFrameWatch(leaf);
     resetLeafSyncClock(leaf);
