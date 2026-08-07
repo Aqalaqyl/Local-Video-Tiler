@@ -661,9 +661,11 @@ function auditLeafPlayback(leaf) {
     if (audioWrong) applyTileAudio(leaf);
   }
 
-  // Under heavy multi-tile load, skip stall self-seeks — they make lag worse.
+  // Under heavy multi-tile load, or while the user is adjusting volume, skip
+  // seek-style repairs — they make other tiles visibly jump.
   const playingCount = countPlayingLeaves();
-  if (playingCount >= 4 && document.body.classList.contains('idle')) {
+  const volumeBusy = performance.now() < volumeAdjustUntil;
+  if (volumeBusy || (playingCount >= 4 && document.body.classList.contains('idle'))) {
     resetLeafSyncClock(leaf);
     return;
   }
@@ -928,25 +930,35 @@ function rememberFileVolume(path, volume) {
   schedulePersistFileVolumes();
 }
 
-/** Apply a remembered per-file volume onto the leaf when that clip is current. */
+/**
+ * Apply per-file volume for the current clip. Clips with no remembered level
+ * always start at 100% (do not inherit the previous clip’s volume).
+ */
 function applyRememberedFileVolume(leaf) {
   if (!leaf || !leaf.files || !leaf.files.length) return;
   const cur = leaf.files[leaf.index];
   if (!cur || !cur.path) return;
   const remembered = lookupFileVolume(cur.path);
-  if (remembered == null) return;
-  leaf.volume = remembered;
+  leaf.volume = remembered == null ? 1 : remembered;
+}
+
+/** While the user is scrubbing volume, suppress seek-style A/V repairs. */
+let volumeAdjustUntil = 0;
+function markVolumeAdjusting() {
+  volumeAdjustUntil = performance.now() + 1500;
 }
 
 function setTileVolume(leaf, volume, opts = {}) {
   if (!leaf) return;
+  markVolumeAdjusting();
   leaf.volume = clamp(volume, 0, MAX_TILE_VOLUME);
   if (leaf.volume > 0 && !opts.keepMuted) leaf.muted = false;
   applyTileAudio(leaf);
   // Persist against the clip the user is actually hearing/adjusting.
   const cur = leaf.files && leaf.files[leaf.index];
   if (cur && cur.path) rememberFileVolume(cur.path, leaf.volume);
-  if (!opts.skipSave) saveState();
+  // Volume-only save: never piggy-back currentTime sync (that was seeking peers).
+  if (!opts.skipSave) saveState({ volumesOnly: true });
 }
 
 function adjustTileVolume(leaf, delta) {
@@ -978,13 +990,16 @@ function applySettingsFromPayload(s) {
 }
 
 // Push the current layout + settings to peer windows (deduped to avoid echoes).
-function broadcastLayout() {
+// `volumesOnly` omits currentTime so volume tweaks cannot seek other tiles.
+function broadcastLayout(opts = {}) {
   if (!projection.active) return;
+  const volumesOnly = !!opts.volumesOnly;
   const payload = {
-    tree: serializeForSync(root),
+    tree: serializeTree(root, true, !volumesOnly),
     settings: snapshotSettings(),
     // Controller is the authority for which clip/time each tile is on.
-    from: projection.role || (IS_MIRROR ? 'mirror' : 'controller')
+    from: projection.role || (IS_MIRROR ? 'mirror' : 'controller'),
+    volumesOnly
   };
   const json = JSON.stringify(payload);
   if (json === lastSyncJSON) return;
@@ -1025,16 +1040,30 @@ function applyIncomingPlayback(localNode, remoteNode, opts = {}) {
 function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
   if (!localNode || !remoteNode || localNode.kind !== remoteNode.kind) return;
   const applyIdentity = opts.applyIdentity !== false;
+  const volumesOnly = !!opts.volumesOnly;
 
   if (localNode.kind === 'leaf') {
     if (localNode.spacer) return;
     const wasPaused = !!localNode.userPaused;
+    let audioDirty = false;
+    let mediaDirty = false;
+
     if (typeof remoteNode.volume === 'number') {
-      localNode.volume = clamp(remoteNode.volume, 0, MAX_TILE_VOLUME);
+      const nextVol = clamp(remoteNode.volume, 0, MAX_TILE_VOLUME);
+      if (nextVol !== localNode.volume) {
+        localNode.volume = nextVol;
+        audioDirty = true;
+      }
     }
-    if (remoteNode.muted != null) localNode.muted = !!remoteNode.muted;
+    if (remoteNode.muted != null && !!remoteNode.muted !== !!localNode.muted) {
+      localNode.muted = !!remoteNode.muted;
+      audioDirty = true;
+    }
     localNode.userPaused = !!remoteNode.userPaused;
-    localNode.loop = !!remoteNode.loop;
+    if (!!remoteNode.loop !== !!localNode.loop) {
+      localNode.loop = !!remoteNode.loop;
+      if (localNode.video) localNode.video.loop = localNode.loop;
+    }
 
     // Folder link changes (including Clear Folders) without rebuilding splits.
     const remoteFolder = remoteNode.folder || null;
@@ -1042,6 +1071,7 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     if (remoteFolder !== localFolder) {
       if (!remoteFolder) {
         clearLeafFolder(localNode);
+        mediaDirty = true;
       } else {
         const startIndex = typeof remoteNode.index === 'number' ? remoteNode.index : 0;
         void loadFolder(localNode, remoteFolder, startIndex, false).then(() => {
@@ -1054,29 +1084,35 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
       }
     }
 
-    if (applyIdentity && typeof remoteNode.index === 'number' && localNode.files.length) {
+    if (!volumesOnly && applyIdentity && typeof remoteNode.index === 'number' && localNode.files.length) {
       const idx = clamp(remoteNode.index, 0, localNode.files.length - 1);
       const cur = localNode.files[idx];
       if (idx !== localNode.index || (cur && !sourcesMatch(localNode.video, cur.url))) {
         localNode.index = idx;
         // Load without autoplay when we may batch-resume below.
         loadCurrent(localNode, false, { force: true });
+        mediaDirty = true;
       }
     }
 
-    if (applyIdentity && typeof remoteNode.currentTime === 'number' &&
+    // Never seek on volume-only syncs — that made unrelated tiles jump while
+    // the user scrubbed another tile's volume.
+    if (!volumesOnly && applyIdentity && typeof remoteNode.currentTime === 'number' &&
         localNode.video && !localNode.userPaused && !localNode.video.seeking &&
         localNode.video.readyState >= 2) {
       const drift = Math.abs((localNode.video.currentTime || 0) - remoteNode.currentTime);
-      if (drift > 0.45) {
+      if (drift > 1.25) {
         try { localNode.video.currentTime = remoteNode.currentTime; } catch (_) { /* ignore */ }
         resetLeafSyncClock(localNode);
+        mediaDirty = true;
       }
     }
 
+    const pauseDirty = wasPaused !== !!localNode.userPaused;
     const shouldResume = wasPaused && !localNode.userPaused && leafShouldPlay(localNode);
     if (shouldResume) resumeBatch.push(localNode);
-    else applyPlaybackIntent(localNode);
+    else if (pauseDirty || mediaDirty) applyPlaybackIntent(localNode);
+    else if (audioDirty) applyTileAudio(localNode);
     return;
   }
 
@@ -1112,7 +1148,12 @@ function applyPendingSyncIdentity(leaf) {
 // (split / delete / resize) doesn't restart the videos already playing here.
 function applyIncomingLayout(payload) {
   if (!payload) return;
-  const json = JSON.stringify({ tree: payload.tree, settings: payload.settings, from: payload.from });
+  const json = JSON.stringify({
+    tree: payload.tree,
+    settings: payload.settings,
+    from: payload.from,
+    volumesOnly: !!payload.volumesOnly
+  });
   if (json === lastSyncJSON) return;
   lastSyncJSON = json;
   applyingRemote = true;
@@ -1123,7 +1164,10 @@ function applyIncomingLayout(payload) {
     // Mirrors no longer auto-shuffle on ended, so index/time from any peer is safe.
     // Do not schedule span recovery here — that was re-playing every tile every sync.
     if (sameLayoutStructure(root, payload.tree)) {
-      applyIncomingPlayback(root, payload.tree, { applyIdentity: true });
+      applyIncomingPlayback(root, payload.tree, {
+        applyIdentity: true,
+        volumesOnly: !!payload.volumesOnly
+      });
       return;
     }
 
@@ -1633,16 +1677,17 @@ function wireLeafEvents(leaf) {
   });
   refs.mute.addEventListener('click', (e) => {
     e.stopPropagation();
+    markVolumeAdjusting();
     leaf.muted = !leaf.muted;
     applyTileAudio(leaf);
-    saveState();
+    saveState({ volumesOnly: true });
   });
 
   el.addEventListener('wheel', (e) => {
     if (leaf.spacer || !leaf.files.length) return;
     if (e.target.closest('.tile-toolbar')) return;
     e.preventDefault();
-    resumeAudioContext();
+    e.stopPropagation();
     const step = e.shiftKey ? 0.02 : 0.08;
     adjustTileVolume(leaf, e.deltaY < 0 ? step : -step);
   }, { passive: false });
@@ -2691,15 +2736,25 @@ function deserialize(obj) {
 }
 
 let saveTimer = null;
-function saveState() {
+/** @type {{ volumesOnly?: boolean }} */
+let pendingSaveOpts = {};
+function saveState(opts = {}) {
+  // A full save upgrades any pending volumes-only flush.
+  if (opts.volumesOnly) {
+    if (pendingSaveOpts.volumesOnly !== false) pendingSaveOpts.volumesOnly = true;
+  } else {
+    pendingSaveOpts.volumesOnly = false;
+  }
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
+    const volumesOnly = pendingSaveOpts.volumesOnly === true;
+    pendingSaveOpts = {};
     // Only the controller (main window) persists, so mirror windows can't clobber
     // the saved layout. Every window broadcasts its edits to the other displays.
     if (!IS_MIRROR) {
       try { localStorage.setItem(LS_KEY, JSON.stringify({ settings, tree: serialize(root) })); } catch (_) {}
     }
-    broadcastLayout();
+    broadcastLayout(volumesOnly ? { volumesOnly: true } : {});
   }, 200);
 }
 
