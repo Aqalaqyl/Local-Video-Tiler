@@ -40,6 +40,9 @@ picture you see.
     from disk (with confirmation), then advances the tile.
   - **Ctrl/Cmd+click multi-select** — select several tiles, then assign one folder
     to all of them.
+  - **Clear Folders** (`C`) — unlink every tile from its media folder while
+    keeping the current layout splits, so you can re-assign folders without
+    rebuilding the grid.
   - **Random / shuffle playback** — a tile starts on a random clip and, when a
     clip finishes, automatically shuffles to another random clip from its folder.
     (Next / Previous still step through in order for manual control.)
