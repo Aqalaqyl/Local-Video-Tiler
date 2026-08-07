@@ -36,6 +36,9 @@ picture you see.
   volume and mute controls.
   - **Audio boost up to 200%** — scroll-wheel or the volume slider can go past
     100% via a Web Audio gain stage (falls back to 100% if Web Audio is unavailable).
+  - **Per-video volume memory** — adjusting a clip’s volume remembers that level
+    for the file, so the next time it plays (shuffle or next launch) it comes
+    back at the same volume.
   - **Delete current video** (toolbar 🗑) — permanently removes the playing file
     from disk (with confirmation), then advances the tile.
   - **Ctrl/Cmd+click multi-select** — select several tiles, then assign one folder
