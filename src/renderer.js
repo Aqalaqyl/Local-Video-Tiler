@@ -17,8 +17,12 @@
 const VIDEO_EXTS_HINT = 'mp4, webm, mov, mkv, avi, …';
 const LS_KEY = 'lvt.state.v1';
 const PRESETS_KEY = 'lvt.presets.v1';
+/** Remembered per-file volume levels (path → 0..MAX_TILE_VOLUME). */
+const FILE_VOLUMES_KEY = 'lvt.fileVolumes.v1';
 /** Per-tile volume ceiling (2.0 = 200% boost, VLC-style). */
 const MAX_TILE_VOLUME = 2;
+/** Cap remembered file volumes so localStorage cannot grow without bound. */
+const MAX_FILE_VOLUME_ENTRIES = 4000;
 
 // ---------------------------------------------------------------- DOM handles
 const stage = document.getElementById('stage');
@@ -813,11 +817,72 @@ function ensureTileAudioGraph(leaf) {
   }
 }
 
+// ----------------------------------------------------------- Per-file volume
+// When the user adjusts volume on a playing clip, remember it by file path so
+// the next time that same video plays (shuffle / next session) it restores.
+/** @type {Map<string, number>} */
+const fileVolumes = new Map();
+let fileVolumesSaveTimer = 0;
+
+function loadFileVolumes() {
+  fileVolumes.clear();
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(FILE_VOLUMES_KEY) || 'null'); } catch (_) { /* ignore */ }
+  if (!data || typeof data !== 'object') return;
+  for (const [path, vol] of Object.entries(data)) {
+    if (typeof path !== 'string' || !path || typeof vol !== 'number' || !isFinite(vol)) continue;
+    fileVolumes.set(path, clamp(vol, 0, MAX_TILE_VOLUME));
+  }
+}
+
+function persistFileVolumes() {
+  const obj = {};
+  for (const [path, vol] of fileVolumes) obj[path] = vol;
+  try { localStorage.setItem(FILE_VOLUMES_KEY, JSON.stringify(obj)); } catch (_) { /* ignore */ }
+}
+
+function schedulePersistFileVolumes() {
+  clearTimeout(fileVolumesSaveTimer);
+  fileVolumesSaveTimer = window.setTimeout(persistFileVolumes, 200);
+}
+
+function lookupFileVolume(path) {
+  if (!path || !fileVolumes.has(path)) return null;
+  return fileVolumes.get(path);
+}
+
+function rememberFileVolume(path, volume) {
+  if (!path) return;
+  const vol = clamp(volume, 0, MAX_TILE_VOLUME);
+  // Refresh insertion order (LRU-ish) so oldest entries can be trimmed.
+  if (fileVolumes.has(path)) fileVolumes.delete(path);
+  fileVolumes.set(path, vol);
+  while (fileVolumes.size > MAX_FILE_VOLUME_ENTRIES) {
+    const oldest = fileVolumes.keys().next().value;
+    if (oldest == null) break;
+    fileVolumes.delete(oldest);
+  }
+  schedulePersistFileVolumes();
+}
+
+/** Apply a remembered per-file volume onto the leaf when that clip is current. */
+function applyRememberedFileVolume(leaf) {
+  if (!leaf || !leaf.files || !leaf.files.length) return;
+  const cur = leaf.files[leaf.index];
+  if (!cur || !cur.path) return;
+  const remembered = lookupFileVolume(cur.path);
+  if (remembered == null) return;
+  leaf.volume = remembered;
+}
+
 function setTileVolume(leaf, volume, opts = {}) {
   if (!leaf) return;
   leaf.volume = clamp(volume, 0, MAX_TILE_VOLUME);
   if (leaf.volume > 0 && !opts.keepMuted) leaf.muted = false;
   applyTileAudio(leaf);
+  // Persist against the clip the user is actually hearing/adjusting.
+  const cur = leaf.files && leaf.files[leaf.index];
+  if (cur && cur.path) rememberFileVolume(cur.path, leaf.volume);
   if (!opts.skipSave) saveState();
 }
 
@@ -831,7 +896,7 @@ function showVolumeHint(leaf) {
   if (!leaf) return;
   const pct = Math.round((leaf.volume == null ? 1 : leaf.volume) * 100);
   const boost = (leaf.volume || 0) > 1 ? ' · boost' : '';
-  toast.innerHTML = '<strong>Tile volume: ' + pct + '%' + boost + '</strong>';
+  toast.innerHTML = '<strong>Volume: ' + pct + '%' + boost + '</strong>';
   toast.classList.add('show');
   clearTimeout(volumeHintTimer);
   volumeHintTimer = setTimeout(() => toast.classList.remove('show'), 900);
@@ -1703,6 +1768,9 @@ function loadCurrent(leaf, autoplay, opts = {}) {
     return;
   }
 
+  // Restore this clip’s last volume before wiring audio / starting playback.
+  applyRememberedFileVolume(leaf);
+
   if (sameSource) {
     applyTileAudio(leaf);
     video.loop = !!leaf.loop;
@@ -2541,6 +2609,7 @@ function saveState() {
 }
 
 function loadState() {
+  loadFileVolumes();
   let data = null;
   try { data = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (_) {}
   if (data && data.settings) {
