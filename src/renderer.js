@@ -472,9 +472,46 @@ function stopVideoElement(video) {
   if (!video) return;
   try {
     video.pause();
+    try { video.muted = true; } catch (_) { /* ignore */ }
     video.removeAttribute('src');
     video.load();
   } catch (_) { /* ignore */ }
+}
+
+/** Disconnect a tile's Web Audio graph so it cannot keep emitting old audio. */
+function detachTileAudioGraph(leaf) {
+  if (!leaf || !leaf._audioGraph) return;
+  try { leaf._audioGraph.gain.gain.value = 0; } catch (_) { /* ignore */ }
+  try { leaf._audioGraph.source.disconnect(); } catch (_) { /* ignore */ }
+  try { leaf._audioGraph.gain.disconnect(); } catch (_) { /* ignore */ }
+  leaf._audioGraph = null;
+}
+
+/**
+ * Replace the tile's <video> element. Required after MediaElementSource capture
+ * (the element cannot return to a clean native/Web Audio path) and on delete
+ * so buffered audio from the removed clip cannot keep playing.
+ */
+function replaceLeafVideoElement(leaf) {
+  if (!leaf || !leaf.el) return null;
+  detachTileAudioGraph(leaf);
+  const old = leaf.video;
+  if (old) {
+    stopVideoElement(old);
+    try { old.remove(); } catch (_) { /* ignore */ }
+  }
+  const video = document.createElement('video');
+  video.className = 'tile-video';
+  configureVideoElement(video);
+  try { video.muted = true; } catch (_) { /* ignore */ }
+  leaf.video = video;
+  leaf._frameWatchArmed = false;
+  leaf._lastFrameWall = null;
+  leaf._lastDropped = null;
+  leaf._lastTotal = null;
+  leaf.el.insertBefore(video, leaf.el.firstChild);
+  wireVideoElement(leaf);
+  return video;
 }
 
 // ----------------------------------------------------------- A/V sync watchdog
@@ -1617,9 +1654,12 @@ function clearLeafFolder(leaf) {
   leaf.loop = false;
   leaf.userPaused = false;
   leaf._wantPlaying = false;
-  if (leaf.video) {
-    stopVideoElement(leaf.video);
-    if (leaf.el) leaf.el.classList.remove('playing');
+  leaf._holdSilence = false;
+  detachTileAudioGraph(leaf);
+  stopVideoElement(leaf.video);
+  if (leaf.el) {
+    replaceLeafVideoElement(leaf);
+    leaf.el.classList.remove('playing');
   }
   updateLeaf(leaf);
   return true;
@@ -1651,8 +1691,70 @@ function clearAllFolders() {
 // ============================================================================
 // Leaf event wiring (media + split/focus interactions)
 // ============================================================================
+/** Wire listeners on the current leaf.video (safe to call again after replace). */
+function wireVideoElement(leaf) {
+  const video = leaf && leaf.video;
+  const refs = leaf && leaf.refs;
+  const el = leaf && leaf.el;
+  if (!video || !refs) return;
+
+  video.addEventListener('play', () => {
+    if (leaf.video !== video) return;
+    refs.play.textContent = '⏸';
+    leaf._wantPlaying = true;
+    if (el) el.classList.add('playing');
+    resetLeafSyncClock(leaf);
+    armVideoFrameWatch(leaf);
+  });
+  video.addEventListener('pause', () => {
+    if (leaf.video !== video) return;
+    refs.play.textContent = '▶';
+    leaf._wantPlaying = false;
+    if (el) el.classList.remove('playing');
+    resetLeafSyncClock(leaf);
+  });
+  // Throttle seek-bar UI updates so many tiles don't flood the main thread.
+  video.addEventListener('timeupdate', () => {
+    if (leaf.video !== video) return;
+    // Skip chrome updates while idle and this tile isn't focused/hovered.
+    if (document.body.classList.contains('idle') && !document.body.classList.contains('editing') &&
+        leaf !== focusedLeaf && !(el && el.matches && el.matches(':hover'))) {
+      return;
+    }
+    if (leaf._timeUiPending) return;
+    leaf._timeUiPending = true;
+    requestAnimationFrame(() => {
+      leaf._timeUiPending = false;
+      const v = leaf.video;
+      if (!v || !leaf.refs || v !== video) return;
+      if (v.duration) {
+        refs.seek.value = String(Math.round((v.currentTime / v.duration) * 1000));
+        refs.time.textContent = `${fmtTime(v.currentTime)} / ${fmtTime(v.duration)}`;
+      }
+    });
+  });
+  video.addEventListener('seeking', () => {
+    if (leaf.video !== video) return;
+    resetLeafSyncClock(leaf);
+  });
+  video.addEventListener('seeked', () => {
+    if (leaf.video !== video) return;
+    resetLeafSyncClock(leaf);
+    armVideoFrameWatch(leaf);
+  });
+  // When a clip ends (and the tile isn't looping), shuffle to a random clip.
+  // While spanning, only the controller advances — mirrors follow synced index
+  // so on-screen video and controller audio never drift onto different clips.
+  video.addEventListener('ended', () => {
+    if (leaf.video !== video) return;
+    if (leaf.userPaused) return;
+    if (projection.active && projection.role === 'mirror') return;
+    advanceRandom(leaf);
+  });
+}
+
 function wireLeafEvents(leaf) {
-  const { refs, video, el } = leaf;
+  const { refs, el } = leaf;
 
   refs.assign.addEventListener('click', (e) => { e.stopPropagation(); assignFolder(leaf); });
   refs.folder.addEventListener('click', (e) => { e.stopPropagation(); assignFolder(leaf); });
@@ -1668,7 +1770,8 @@ function wireLeafEvents(leaf) {
 
   refs.seek.addEventListener('input', (e) => {
     e.stopPropagation();
-    if (video.duration) video.currentTime = (refs.seek.value / 1000) * video.duration;
+    const v = leaf.video;
+    if (v && v.duration) v.currentTime = (refs.seek.value / 1000) * v.duration;
   });
   refs.vol.addEventListener('input', (e) => {
     e.stopPropagation();
@@ -1695,50 +1798,7 @@ function wireLeafEvents(leaf) {
   // Prevent toolbar interactions from triggering a split.
   refs.toolbar.addEventListener('mousedown', (e) => e.stopPropagation());
 
-  video.addEventListener('play', () => {
-    refs.play.textContent = '⏸';
-    leaf._wantPlaying = true;
-    if (el) el.classList.add('playing');
-    resetLeafSyncClock(leaf);
-    armVideoFrameWatch(leaf);
-  });
-  video.addEventListener('pause', () => {
-    refs.play.textContent = '▶';
-    leaf._wantPlaying = false;
-    if (el) el.classList.remove('playing');
-    resetLeafSyncClock(leaf);
-  });
-  // Throttle seek-bar UI updates so many tiles don't flood the main thread.
-  video.addEventListener('timeupdate', () => {
-    // Skip chrome updates while idle and this tile isn't focused/hovered.
-    if (document.body.classList.contains('idle') && !document.body.classList.contains('editing') &&
-        leaf !== focusedLeaf && !(el.matches && el.matches(':hover'))) {
-      return;
-    }
-    if (leaf._timeUiPending) return;
-    leaf._timeUiPending = true;
-    requestAnimationFrame(() => {
-      leaf._timeUiPending = false;
-      if (!leaf.video || !leaf.refs || leaf.video !== video) return;
-      if (video.duration) {
-        refs.seek.value = String(Math.round((video.currentTime / video.duration) * 1000));
-        refs.time.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
-      }
-    });
-  });
-  video.addEventListener('seeking', () => resetLeafSyncClock(leaf));
-  video.addEventListener('seeked', () => {
-    resetLeafSyncClock(leaf);
-    armVideoFrameWatch(leaf);
-  });
-  // When a clip ends (and the tile isn't looping), shuffle to a random clip.
-  // While spanning, only the controller advances — mirrors follow synced index
-  // so on-screen video and controller audio never drift onto different clips.
-  video.addEventListener('ended', () => {
-    if (leaf.userPaused) return;
-    if (projection.active && projection.role === 'mirror') return;
-    advanceRandom(leaf);
-  });
+  wireVideoElement(leaf);
 
   // Click on the tile body: split (edit mode) or focus (view mode).
   // Note: the toolbar buttons and the "Choose media folder…" / 📁 buttons all
@@ -1842,12 +1902,16 @@ async function deleteCurrentVideo(leaf) {
 
   if (leaf.files.length > 0) {
     leaf.userPaused = false;
-    // Hard clip swap (silence → clear src → load next → unmute when ready).
+    // Hard clip swap: kill old audio pipeline, replace <video>, then load next.
     loadCurrent(leaf, true, { hardSwap: true });
     flash('Deleted ' + current.name);
   } else {
+    leaf._wantPlaying = false;
     leaf._holdSilence = false;
+    detachTileAudioGraph(leaf);
     stopVideoElement(leaf.video);
+    replaceLeafVideoElement(leaf);
+    if (leaf.el) leaf.el.classList.remove('playing');
     updateLeaf(leaf);
     flash('Deleted ' + current.name + ' — folder empty');
   }
@@ -1885,26 +1949,24 @@ async function finishLoadAndPlay(leaf, gen, autoplay) {
 }
 
 function loadCurrent(leaf, autoplay, opts = {}) {
-  const { video } = leaf;
-  if (!video) return;
+  if (!leaf || !leaf.video) return;
   const current = leaf.files[leaf.index];
   const mayDecode = leafMayDecode(leaf, opts);
+  const video = leaf.video;
   const sameSource = current && sourcesMatch(video, current.url);
 
   if (!current || !mayDecode) {
     leaf._holdSilence = false;
     if (!mayDecode && current && !opts.force) pauseVideoElement(video);
     else {
-      try {
-        video.pause();
-        if (video.getAttribute('src')) { video.removeAttribute('src'); video.load(); }
-      } catch (_) { /* ignore */ }
+      detachTileAudioGraph(leaf);
+      stopVideoElement(video);
     }
     updateLeaf(leaf);
     return;
   }
 
-  // Restore this clip’s last volume before wiring audio / starting playback.
+  // Restore this clip’s last volume (or 100% default) before starting playback.
   applyRememberedFileVolume(leaf);
 
   if (sameSource && !opts.hardSwap) {
@@ -1924,19 +1986,51 @@ function loadCurrent(leaf, autoplay, opts = {}) {
     return;
   }
 
-  // Clip change / delete advance: hold silence across the decoder swap so audio
-  // cannot race ahead of the first frames (Web Audio + mid-play src changes).
+  // Clip change / delete: fully kill the previous media pipeline first. Changing
+  // src alone (especially with MediaElementSource) can leave the old clip's
+  // audio playing under the new picture.
   const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
   leaf._holdSilence = true;
-  silenceLeafOutput(leaf);
-  try { video.pause(); } catch (_) { /* ignore */ }
-  try {
-    if (video.getAttribute('src')) {
-      video.removeAttribute('src');
-      video.load();
-    }
-  } catch (_) { /* ignore */ }
+  leaf._wantPlaying = !!autoplay;
+  void swapLeafClip(leaf, current, gen, !!autoplay, opts);
+}
 
+/**
+ * Tear down the current clip's audio/video, optionally replace the <video>
+ * element, then load the next URL once the old pipeline has settled.
+ */
+async function swapLeafClip(leaf, current, gen, autoplay, opts = {}) {
+  const hadGraph = !!leaf._audioGraph;
+  silenceLeafOutput(leaf);
+  detachTileAudioGraph(leaf);
+
+  const old = leaf.video;
+  if (old) {
+    try { old.pause(); } catch (_) { /* ignore */ }
+    try { old.muted = true; } catch (_) { /* ignore */ }
+    try {
+      if (old.getAttribute('src') || old.currentSrc) {
+        old.removeAttribute('src');
+        old.load();
+      }
+    } catch (_) { /* ignore */ }
+  }
+
+  // Always replace on delete (hardSwap). Also replace after Web Audio capture —
+  // a captured element cannot cleanly return to native output.
+  if (opts.hardSwap || hadGraph) {
+    replaceLeafVideoElement(leaf);
+  }
+
+  // Two frames: let Chromium finish tearing down the previous decoder/audio.
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  if (!leaf || leaf._loadGen !== gen) return;
+
+  const video = leaf.video;
+  if (!video || !current) return;
+
+  applyRememberedFileVolume(leaf);
+  try { video.muted = true; } catch (_) { /* ignore */ }
   video.src = current.url;
   video.load();
   video.loop = !!leaf.loop;
@@ -1944,10 +2038,9 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   leaf._lastTotal = null;
   leaf._frameWatchArmed = false;
   leaf._lastFrameWall = null;
-  leaf._wantPlaying = !!autoplay;
   updateLeaf(leaf);
   resetLeafSyncClock(leaf);
-  void finishLoadAndPlay(leaf, gen, !!autoplay);
+  await finishLoadAndPlay(leaf, gen, autoplay);
 }
 
 function togglePlay(leaf) {
@@ -2265,15 +2358,10 @@ function closeLeaf(leaf) {
 }
 
 function disposeLeaf(leaf) {
-  if (leaf._audioGraph) {
-    try { leaf._audioGraph.source.disconnect(); } catch (_) { /* ignore */ }
-    try { leaf._audioGraph.gain.disconnect(); } catch (_) { /* ignore */ }
-    leaf._audioGraph = null;
-  }
-  if (leaf.video) {
-    try { leaf.video.pause(); leaf.video.removeAttribute('src'); leaf.video.load(); } catch (_) {}
-  }
+  detachTileAudioGraph(leaf);
+  if (leaf.video) stopVideoElement(leaf.video);
   leaf.userPaused = true;
+  leaf._holdSilence = false;
   leaf._frameWatchArmed = false;
   leaf._wantPlaying = false;
   leaf._syncWall = null;
