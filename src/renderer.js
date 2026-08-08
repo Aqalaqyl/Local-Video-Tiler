@@ -920,11 +920,46 @@ function ensureTileAudioGraph(leaf) {
 }
 
 // ----------------------------------------------------------- Per-file volume
-// When the user adjusts volume on a playing clip, remember it by file path so
-// the next time that same video plays (shuffle / next session) it restores.
+// When the user adjusts volume on a playing clip, remember it by file identity
+// so the next time that same video plays (shuffle / next session) it restores.
 /** @type {Map<string, number>} */
 const fileVolumes = new Map();
 let fileVolumesSaveTimer = 0;
+
+/** Stable localStorage key for a filesystem path or file:// URL. */
+function normalizeVolKey(key) {
+  if (!key || typeof key !== 'string') return '';
+  let k = key.trim();
+  if (!k) return '';
+  try {
+    if (/^file:/i.test(k)) {
+      const u = new URL(k);
+      k = decodeURIComponent(u.pathname || '');
+      // Windows file URLs yield "/C:/..." — drop the leading slash.
+      if (/^\/[A-Za-z]:\//.test(k)) k = k.slice(1);
+    }
+  } catch (_) { /* keep raw key */ }
+  k = k.replace(/\\/g, '/');
+  // Case-insensitive match for Windows paths; harmless elsewhere.
+  return k.toLowerCase();
+}
+
+/** All lookup keys for a file object or raw path/url string. */
+function fileVolumeKeys(fileOrPath) {
+  if (!fileOrPath) return [];
+  const keys = [];
+  const add = (v) => {
+    const n = normalizeVolKey(v);
+    if (n && !keys.includes(n)) keys.push(n);
+  };
+  if (typeof fileOrPath === 'string') {
+    add(fileOrPath);
+    return keys;
+  }
+  add(fileOrPath.path);
+  add(fileOrPath.url);
+  return keys;
+}
 
 function loadFileVolumes() {
   fileVolumes.clear();
@@ -933,7 +968,8 @@ function loadFileVolumes() {
   if (!data || typeof data !== 'object') return;
   for (const [path, vol] of Object.entries(data)) {
     if (typeof path !== 'string' || !path || typeof vol !== 'number' || !isFinite(vol)) continue;
-    fileVolumes.set(path, clamp(vol, 0, MAX_TILE_VOLUME));
+    const key = normalizeVolKey(path) || path;
+    fileVolumes.set(key, clamp(vol, 0, MAX_TILE_VOLUME));
   }
 }
 
@@ -948,36 +984,79 @@ function schedulePersistFileVolumes() {
   fileVolumesSaveTimer = window.setTimeout(persistFileVolumes, 200);
 }
 
-function lookupFileVolume(path) {
-  if (!path || !fileVolumes.has(path)) return null;
-  return fileVolumes.get(path);
+/** Merge any newer localStorage entries (other windows may have written). */
+function refreshFileVolumesFromStorage() {
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(FILE_VOLUMES_KEY) || 'null'); } catch (_) { /* ignore */ }
+  if (!data || typeof data !== 'object') return;
+  for (const [path, vol] of Object.entries(data)) {
+    if (typeof path !== 'string' || !path || typeof vol !== 'number' || !isFinite(vol)) continue;
+    const key = normalizeVolKey(path) || path;
+    fileVolumes.set(key, clamp(vol, 0, MAX_TILE_VOLUME));
+  }
 }
 
-function rememberFileVolume(path, volume) {
-  if (!path) return;
+function lookupFileVolume(fileOrPath) {
+  // Prefer the in-session mark on the file object (survives path-key quirks).
+  if (fileOrPath && typeof fileOrPath === 'object' && typeof fileOrPath._savedVolume === 'number') {
+    return clamp(fileOrPath._savedVolume, 0, MAX_TILE_VOLUME);
+  }
+  const keys = fileVolumeKeys(fileOrPath);
+  for (const k of keys) {
+    if (fileVolumes.has(k)) return fileVolumes.get(k);
+  }
+  // Other windows may have saved since our last load — refresh and retry.
+  refreshFileVolumesFromStorage();
+  for (const k of keys) {
+    if (fileVolumes.has(k)) return fileVolumes.get(k);
+  }
+  return null;
+}
+
+function rememberFileVolume(fileOrPath, volume) {
   const vol = clamp(volume, 0, MAX_TILE_VOLUME);
-  // Refresh insertion order (LRU-ish) so oldest entries can be trimmed.
-  if (fileVolumes.has(path)) fileVolumes.delete(path);
-  fileVolumes.set(path, vol);
+  if (fileOrPath && typeof fileOrPath === 'object') {
+    fileOrPath._savedVolume = vol;
+  }
+  const keys = fileVolumeKeys(fileOrPath);
+  if (!keys.length) return;
+  for (const k of keys) {
+    // Refresh insertion order (LRU-ish) so oldest entries can be trimmed.
+    if (fileVolumes.has(k)) fileVolumes.delete(k);
+    fileVolumes.set(k, vol);
+  }
   while (fileVolumes.size > MAX_FILE_VOLUME_ENTRIES) {
     const oldest = fileVolumes.keys().next().value;
     if (oldest == null) break;
     fileVolumes.delete(oldest);
   }
-  schedulePersistFileVolumes();
+  // Write through immediately so a quick clip change cannot lose the value,
+  // and other All Displays windows can pick it up via the storage event.
+  clearTimeout(fileVolumesSaveTimer);
+  persistFileVolumes();
 }
 
 /**
  * Apply per-file volume for the current clip. Clips with no remembered level
  * always start at 100% (do not inherit the previous clip’s volume).
+ * Pass `file` explicitly when swapping so a mid-swap index change cannot miss.
  */
-function applyRememberedFileVolume(leaf) {
-  if (!leaf || !leaf.files || !leaf.files.length) return;
-  const cur = leaf.files[leaf.index];
-  if (!cur || !cur.path) return;
-  const remembered = lookupFileVolume(cur.path);
+function applyRememberedFileVolume(leaf, file) {
+  if (!leaf) return;
+  const cur = file || (leaf.files && leaf.files[leaf.index]);
+  if (!cur) {
+    leaf.volume = 1;
+    return;
+  }
+  const remembered = lookupFileVolume(cur);
   leaf.volume = remembered == null ? 1 : remembered;
+  if (remembered != null) cur._savedVolume = remembered;
 }
+
+// Other renderer windows share localStorage — keep our Map in sync.
+window.addEventListener('storage', (e) => {
+  if (e.key === FILE_VOLUMES_KEY) loadFileVolumes();
+});
 
 /** While the user is scrubbing volume, suppress seek-style A/V repairs. */
 let volumeAdjustUntil = 0;
@@ -993,7 +1072,7 @@ function setTileVolume(leaf, volume, opts = {}) {
   applyTileAudio(leaf);
   // Persist against the clip the user is actually hearing/adjusting.
   const cur = leaf.files && leaf.files[leaf.index];
-  if (cur && cur.path) rememberFileVolume(cur.path, leaf.volume);
+  if (cur) rememberFileVolume(cur, leaf.volume);
   // Volume-only save: never piggy-back currentTime sync (that was seeking peers).
   if (!opts.skipSave) saveState({ volumesOnly: true });
 }
@@ -1085,13 +1164,6 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     let audioDirty = false;
     let mediaDirty = false;
 
-    if (typeof remoteNode.volume === 'number') {
-      const nextVol = clamp(remoteNode.volume, 0, MAX_TILE_VOLUME);
-      if (nextVol !== localNode.volume) {
-        localNode.volume = nextVol;
-        audioDirty = true;
-      }
-    }
     if (remoteNode.muted != null && !!remoteNode.muted !== !!localNode.muted) {
       localNode.muted = !!remoteNode.muted;
       audioDirty = true;
@@ -1127,8 +1199,26 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
       if (idx !== localNode.index || (cur && !sourcesMatch(localNode.video, cur.url))) {
         localNode.index = idx;
         // Load without autoplay when we may batch-resume below.
+        // loadCurrent applies per-file volume memory for the new clip.
         loadCurrent(localNode, false, { force: true });
         mediaDirty = true;
+      }
+    }
+
+    // Apply remote volume only when this clip has no local per-file memory —
+    // otherwise a peer's tile-level volume (often 100%) would wipe the restore.
+    const curFile = localNode.files && localNode.files[localNode.index];
+    const remembered = curFile ? lookupFileVolume(curFile) : null;
+    if (remembered != null) {
+      if (localNode.volume !== remembered) {
+        localNode.volume = remembered;
+        audioDirty = true;
+      }
+    } else if (typeof remoteNode.volume === 'number') {
+      const nextVol = clamp(remoteNode.volume, 0, MAX_TILE_VOLUME);
+      if (nextVol !== localNode.volume) {
+        localNode.volume = nextVol;
+        audioDirty = true;
       }
     }
 
@@ -1893,10 +1983,11 @@ async function deleteCurrentVideo(leaf) {
 
   const removedPath = current.path;
   // Drop remembered volume for a file that no longer exists.
-  if (fileVolumes.has(removedPath)) {
-    fileVolumes.delete(removedPath);
-    schedulePersistFileVolumes();
+  for (const k of fileVolumeKeys(current)) {
+    if (fileVolumes.has(k)) fileVolumes.delete(k);
   }
+  if (current) delete current._savedVolume;
+  persistFileVolumes();
   leaf.files = leaf.files.filter((f) => f.path !== removedPath);
   if (leaf.index >= leaf.files.length) leaf.index = Math.max(0, leaf.files.length - 1);
 
@@ -1937,6 +2028,9 @@ async function finishLoadAndPlay(leaf, gen, autoplay) {
   if (!video) return;
   await waitVideoReady(video, 2200);
   if (!leaf.video || leaf.video !== video || leaf._loadGen !== gen) return;
+  // Re-assert per-file volume after the async gap (sync/peers may have raced).
+  const cur = leaf.files && leaf.files[leaf.index];
+  if (cur && sourcesMatch(video, cur.url)) applyRememberedFileVolume(leaf, cur);
   leaf._holdSilence = false;
   applyTileAudio(leaf);
   if (autoplay && leaf._wantPlaying && leafShouldPlay(leaf) && leafMayDecode(leaf)) {
@@ -1967,7 +2061,7 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   }
 
   // Restore this clip’s last volume (or 100% default) before starting playback.
-  applyRememberedFileVolume(leaf);
+  applyRememberedFileVolume(leaf, current);
 
   if (sameSource && !opts.hardSwap) {
     leaf._holdSilence = false;
@@ -2029,7 +2123,9 @@ async function swapLeafClip(leaf, current, gen, autoplay, opts = {}) {
   const video = leaf.video;
   if (!video || !current) return;
 
-  applyRememberedFileVolume(leaf);
+  // Re-apply against the captured file object (not leaf.index) so a concurrent
+  // sync cannot point us at the wrong clip's memory.
+  applyRememberedFileVolume(leaf, current);
   try { video.muted = true; } catch (_) { /* ignore */ }
   video.src = current.url;
   video.load();
