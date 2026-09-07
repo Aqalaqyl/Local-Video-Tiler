@@ -259,6 +259,15 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
   border-color: var(--accent-2);
   background: rgba(56,224,196,0.16);
 }
+.tile-toolbar .fav.active {
+  color: #f5c542;
+  border-color: rgba(245,197,66,0.65);
+  background: rgba(245,197,66,0.16);
+}
+.tile-toolbar .fav:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 .tile-toolbar .title {
   flex: 1 1 auto;
   min-width: 0;

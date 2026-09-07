@@ -46,9 +46,12 @@ picture you see.
   - **Clear Folders** (`C`) — unlink every tile from its media folder while
     keeping the current layout splits, so you can re-assign folders without
     rebuilding the grid.
-  - **Random / shuffle playback** — a tile starts on a random clip and, when a
-    clip finishes, automatically shuffles to another random clip from its folder.
+  - **Random / shuffle playback** — a tile starts on a weighted-random clip and,
+    when a clip finishes, automatically shuffles to another clip from its folder.
     (Next / Previous still step through in order for manual control.)
+  - **Favorites (☆ / ★)** — mark clips you like; shuffle picks favorites about
+    **4× as often** as normal clips, with a discovery chance so unfavorited
+    videos still appear so you can find new favorites.
   - **Per-tile loop** (🔁) — keep the current video on screen by repeating it.
     Loop is independent per tile, so one pane can hold on a clip while the others
     keep shuffling.

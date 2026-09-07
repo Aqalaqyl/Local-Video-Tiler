@@ -19,10 +19,19 @@ const LS_KEY = 'lvt.state.v1';
 const PRESETS_KEY = 'lvt.presets.v1';
 /** Remembered per-file volume levels (path → 0..MAX_TILE_VOLUME). */
 const FILE_VOLUMES_KEY = 'lvt.fileVolumes.v1';
+/** Favorited file identities (normalized path/url keys). */
+const FAVORITES_KEY = 'lvt.favorites.v1';
 /** Per-tile volume ceiling (2.0 = 200% boost, VLC-style). */
 const MAX_TILE_VOLUME = 2;
 /** Cap remembered file volumes so localStorage cannot grow without bound. */
 const MAX_FILE_VOLUME_ENTRIES = 4000;
+/** How much more often a favorite is chosen vs a normal clip in weighted shuffle. */
+const FAVORITE_WEIGHT = 4;
+/**
+ * Chance to force-pick among non-favorites (when any exist) so shuffle keeps
+ * surfacing undiscovered clips even when many files are favorited.
+ */
+const DISCOVERY_CHANCE = 0.28;
 
 // ---------------------------------------------------------------- DOM handles
 const stage = document.getElementById('stage');
@@ -1056,7 +1065,136 @@ function applyRememberedFileVolume(leaf, file) {
 // Other renderer windows share localStorage — keep our Map in sync.
 window.addEventListener('storage', (e) => {
   if (e.key === FILE_VOLUMES_KEY) loadFileVolumes();
+  if (e.key === FAVORITES_KEY) {
+    loadFavorites();
+    forEachLeaf(root, (leaf) => {
+      stampFolderFavorites(leaf.files);
+      applyFavoriteButton(leaf);
+    });
+  }
 });
+
+// ----------------------------------------------------------- Favorites / weighted shuffle
+// Favorited clips get higher weight in shuffle so they play more often, while a
+// discovery chance keeps non-favorites in rotation.
+/** @type {Set<string>} */
+const favoriteKeys = new Set();
+
+function loadFavorites() {
+  favoriteKeys.clear();
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(FAVORITES_KEY) || 'null'); } catch (_) { /* ignore */ }
+  if (!Array.isArray(data)) return;
+  for (const raw of data) {
+    if (typeof raw !== 'string' || !raw) continue;
+    const key = normalizeVolKey(raw) || raw;
+    favoriteKeys.add(key);
+  }
+}
+
+function persistFavorites() {
+  try { localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favoriteKeys])); } catch (_) { /* ignore */ }
+}
+
+function refreshFavoritesFromStorage() {
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(FAVORITES_KEY) || 'null'); } catch (_) { /* ignore */ }
+  if (!Array.isArray(data)) return;
+  for (const raw of data) {
+    if (typeof raw !== 'string' || !raw) continue;
+    favoriteKeys.add(normalizeVolKey(raw) || raw);
+  }
+}
+
+function isFileFavorite(fileOrPath) {
+  if (fileOrPath && typeof fileOrPath === 'object' && fileOrPath._favorite) return true;
+  const keys = fileVolumeKeys(fileOrPath);
+  for (const k of keys) {
+    if (favoriteKeys.has(k)) return true;
+  }
+  // Peer windows may have toggled favorites since our last load.
+  if (keys.length) {
+    refreshFavoritesFromStorage();
+    for (const k of keys) {
+      if (favoriteKeys.has(k)) {
+        if (fileOrPath && typeof fileOrPath === 'object') fileOrPath._favorite = true;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function setFileFavorite(fileOrPath, on) {
+  if (!fileOrPath) return;
+  if (typeof fileOrPath === 'object') fileOrPath._favorite = !!on;
+  const keys = fileVolumeKeys(fileOrPath);
+  if (!keys.length) return;
+  for (const k of keys) {
+    if (on) favoriteKeys.add(k);
+    else favoriteKeys.delete(k);
+  }
+  persistFavorites();
+}
+
+function toggleFileFavorite(fileOrPath) {
+  const next = !isFileFavorite(fileOrPath);
+  setFileFavorite(fileOrPath, next);
+  return next;
+}
+
+function stampFolderFavorites(files) {
+  if (!files || !files.length) return;
+  for (const f of files) {
+    f._favorite = isFileFavorite(f);
+  }
+}
+
+function clearFavoriteForFile(fileOrPath) {
+  if (!fileOrPath) return;
+  if (typeof fileOrPath === 'object') delete fileOrPath._favorite;
+  for (const k of fileVolumeKeys(fileOrPath)) favoriteKeys.delete(k);
+  persistFavorites();
+}
+
+/**
+ * Weighted shuffle pick: favorites are FAVORITE_WEIGHT× more likely than normal
+ * clips. With probability DISCOVERY_CHANCE, pick uniformly among non-favorites
+ * (when any exist) so new videos keep surfacing.
+ */
+function pickWeightedIndex(leaf, opts = {}) {
+  const files = leaf && leaf.files;
+  const n = files ? files.length : 0;
+  if (n <= 0) return 0;
+  if (n === 1) return 0;
+
+  const avoid = opts.avoidCurrent === false ? -1 : leaf.index;
+  const candidates = [];
+  for (let i = 0; i < n; i++) {
+    if (i === avoid) continue;
+    candidates.push(i);
+  }
+  if (!candidates.length) return clamp(leaf.index || 0, 0, n - 1);
+
+  const nonFav = candidates.filter((i) => !isFileFavorite(files[i]));
+  const discover = nonFav.length > 0 && Math.random() < DISCOVERY_CHANCE;
+  const pool = discover ? nonFav : candidates;
+
+  let total = 0;
+  const weights = new Array(pool.length);
+  for (let k = 0; k < pool.length; k++) {
+    const w = (!discover && isFileFavorite(files[pool[k]])) ? FAVORITE_WEIGHT : 1;
+    weights[k] = w;
+    total += w;
+  }
+
+  let r = Math.random() * total;
+  for (let k = 0; k < pool.length; k++) {
+    r -= weights[k];
+    if (r <= 0) return pool[k];
+  }
+  return pool[pool.length - 1];
+}
 
 /** While the user is scrubbing volume, suppress seek-style A/V repairs. */
 let volumeAdjustUntil = 0;
@@ -1650,6 +1788,7 @@ function ensureLeafEl(leaf) {
     <button class="play" title="Play / Pause">▶</button>
     <button class="next" title="Next">⏭</button>
     <button class="loop" title="Loop this video (per tile)">🔁</button>
+    <button class="fav" type="button" title="Favorite — play more often in shuffle">☆</button>
     <button class="trash" title="Delete current video from disk">🗑</button>
     <input class="seek" type="range" min="0" max="1000" value="0" title="Seek" />
     <span class="time">0:00 / 0:00</span>
@@ -1681,6 +1820,7 @@ function ensureLeafEl(leaf) {
     play: toolbar.querySelector('.play'),
     next: toolbar.querySelector('.next'),
     loop: toolbar.querySelector('.loop'),
+    fav: toolbar.querySelector('.fav'),
     trash: toolbar.querySelector('.trash'),
     seek: toolbar.querySelector('.seek'),
     time: toolbar.querySelector('.time'),
@@ -1721,6 +1861,7 @@ function updateLeaf(leaf) {
   refs.close.style.display = settings.editMode ? 'inline-block' : 'none';
   if (refs.trash) refs.trash.disabled = !hasFiles;
   applyLoop(leaf);
+  applyFavoriteButton(leaf);
 
   const current = hasFiles ? leaf.files[leaf.index] : null;
   refs.title.textContent = current ? `${leaf.index + 1}/${leaf.files.length} · ${current.name}` : '';
@@ -1853,6 +1994,7 @@ function wireLeafEvents(leaf) {
   refs.prev.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, -1); });
   refs.next.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, 1); });
   refs.loop.addEventListener('click', (e) => { e.stopPropagation(); toggleLoop(leaf); });
+  if (refs.fav) refs.fav.addEventListener('click', (e) => { e.stopPropagation(); toggleFavorite(leaf); });
   refs.trash.addEventListener('click', (e) => { e.stopPropagation(); deleteCurrentVideo(leaf); });
   refs.close.addEventListener('click', (e) => { e.stopPropagation(); closeLeaf(leaf); });
   refs.del.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -1982,12 +2124,13 @@ async function deleteCurrentVideo(leaf) {
   }
 
   const removedPath = current.path;
-  // Drop remembered volume for a file that no longer exists.
+  // Drop remembered volume / favorite for a file that no longer exists.
   for (const k of fileVolumeKeys(current)) {
     if (fileVolumes.has(k)) fileVolumes.delete(k);
   }
   if (current) delete current._savedVolume;
   persistFileVolumes();
+  clearFavoriteForFile(current);
   leaf.files = leaf.files.filter((f) => f.path !== removedPath);
   if (leaf.index >= leaf.files.length) leaf.index = Math.max(0, leaf.files.length - 1);
 
@@ -2013,6 +2156,7 @@ async function loadFolder(leaf, folder, index = 0, autoplay = false) {
   const res = await window.api.readFolder(folder);
   leaf.folder = res.folder;
   leaf.files = res.files || [];
+  stampFolderFavorites(leaf.files);
   leaf.index = clamp(index, 0, Math.max(0, leaf.files.length - 1));
   loadCurrent(leaf, autoplay);
   updateLeaf(leaf);
@@ -2346,20 +2490,16 @@ function step(leaf, dir, autoplay = false) {
 
 /** Pick a random file index, avoiding an immediate repeat when possible. */
 function pickRandomIndex(leaf) {
-  const n = leaf.files.length;
-  if (n <= 1) return 0;
-  let i = leaf.index;
-  while (i === leaf.index) i = Math.floor(Math.random() * n);
-  return i;
+  return pickWeightedIndex(leaf, { avoidCurrent: true });
 }
 
-/** Auto-advance to a random clip from the folder (the default shuffle playback). */
+/** Auto-advance with weighted shuffle (favorites play more; discovery continues). */
 function advanceRandom(leaf, initial = false) {
   if (!leaf.files.length) return;
   // Never clear a user pause via ended/advance — that caused ghost background audio.
   if (leaf.userPaused && !initial) return;
   if (initial) leaf.userPaused = false;
-  leaf.index = initial ? Math.floor(Math.random() * leaf.files.length) : pickRandomIndex(leaf);
+  leaf.index = pickWeightedIndex(leaf, { avoidCurrent: !initial });
   loadCurrent(leaf, leafShouldPlay(leaf) || initial);
   saveState();
 }
@@ -2377,6 +2517,36 @@ function applyLoop(leaf) {
     leaf.refs.loop.classList.toggle('active', !!leaf.loop);
     leaf.refs.loop.title = leaf.loop ? 'Looping this video — click to stop' : 'Loop this video (per tile)';
   }
+}
+
+/** Favorite / unfavorite the clip currently showing on this tile. */
+function toggleFavorite(leaf) {
+  if (!leaf || !leaf.files.length) {
+    flash('No video to favorite');
+    return;
+  }
+  const cur = leaf.files[leaf.index];
+  if (!cur) {
+    flash('No video to favorite');
+    return;
+  }
+  const on = toggleFileFavorite(cur);
+  applyFavoriteButton(leaf);
+  flash(on
+    ? 'Favorited “' + cur.name + '” — plays more often'
+    : 'Removed favorite “' + cur.name + '”');
+}
+
+function applyFavoriteButton(leaf) {
+  if (!leaf.refs || !leaf.refs.fav) return;
+  const cur = leaf.files && leaf.files[leaf.index];
+  const on = !!(cur && isFileFavorite(cur));
+  leaf.refs.fav.disabled = !cur;
+  leaf.refs.fav.classList.toggle('active', on);
+  leaf.refs.fav.textContent = on ? '★' : '☆';
+  leaf.refs.fav.title = on
+    ? 'Favorited — plays more often in shuffle (click to unfavorite)'
+    : 'Favorite — play more often in shuffle (still discovers other clips)';
 }
 
 function fmtTime(s) {
@@ -2944,6 +3114,7 @@ function saveState(opts = {}) {
 
 function loadState() {
   loadFileVolumes();
+  loadFavorites();
   let data = null;
   try { data = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (_) {}
   if (data && data.settings) {
