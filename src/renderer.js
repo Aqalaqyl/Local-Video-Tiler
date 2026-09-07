@@ -26,12 +26,12 @@ const MAX_TILE_VOLUME = 2;
 /** Cap remembered file volumes so localStorage cannot grow without bound. */
 const MAX_FILE_VOLUME_ENTRIES = 4000;
 /** How much more often a favorite is chosen vs a normal clip in weighted shuffle. */
-const FAVORITE_WEIGHT = 4;
+const FAVORITE_WEIGHT = 5;
 /**
  * Chance to force-pick among non-favorites (when any exist) so shuffle keeps
  * surfacing undiscovered clips even when many files are favorited.
  */
-const DISCOVERY_CHANCE = 0.28;
+const DISCOVERY_CHANCE = 0.22;
 
 // ---------------------------------------------------------------- DOM handles
 const stage = document.getElementById('stage');
