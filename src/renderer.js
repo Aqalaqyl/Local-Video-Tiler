@@ -2990,6 +2990,38 @@ function serializePresetTree(node) {
   };
 }
 
+/** Ordered folder paths for non-spacer leaves (null = unassigned). */
+function collectPresetLeafFolders(node, acc = []) {
+  if (!node) return acc;
+  if (node.kind === 'leaf') {
+    if (!node.spacer) acc.push(node.folder || null);
+    return acc;
+  }
+  collectPresetLeafFolders(node.children[0], acc);
+  collectPresetLeafFolders(node.children[1], acc);
+  return acc;
+}
+
+/**
+ * Re-apply a saved folder list onto a preset tree (leaf order). Fills in any
+ * leaf whose tree entry lost its path so Load still restores assignments.
+ */
+function applyFolderListToTree(node, folders, index = { i: 0 }, opts = {}) {
+  if (!node || !folders || !folders.length) return;
+  const force = !!opts.force;
+  if (node.kind === 'leaf') {
+    if (!node.spacer) {
+      const saved = folders[index.i++];
+      if (typeof saved === 'string' && saved && (force || !node.folder)) {
+        node.folder = saved;
+      }
+    }
+    return;
+  }
+  applyFolderListToTree(node.children[0], folders, index, opts);
+  applyFolderListToTree(node.children[1], folders, index, opts);
+}
+
 function countPresetFolders(node, acc = { tiles: 0, folders: 0 }) {
   if (node.kind === 'leaf') {
     if (!node.spacer) {
@@ -3003,17 +3035,45 @@ function countPresetFolders(node, acc = { tiles: 0, folders: 0 }) {
   return acc;
 }
 
+function folderBasename(folderPath) {
+  if (!folderPath || typeof folderPath !== 'string') return '';
+  const parts = folderPath.replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : folderPath;
+}
+
+/** Ensure every preset has a `folders` backup list derived from its tree. */
+function normalizePreset(preset) {
+  if (!preset || typeof preset !== 'object') return preset;
+  if (!preset.tree) return preset;
+  const fromTree = collectPresetLeafFolders(preset.tree);
+  const saved = Array.isArray(preset.folders) ? preset.folders : null;
+  // Prefer whichever list remembers more real paths (repairs older / partial saves).
+  const savedCount = saved ? saved.filter((f) => typeof f === 'string' && f).length : 0;
+  const treeCount = fromTree.filter((f) => typeof f === 'string' && f).length;
+  if (saved && savedCount > treeCount) {
+    applyFolderListToTree(preset.tree, saved, { i: 0 }, { force: true });
+    preset.folders = collectPresetLeafFolders(preset.tree);
+  } else {
+    preset.folders = fromTree;
+  }
+  return preset;
+}
+
 function readPresets() {
   try {
     const raw = JSON.parse(localStorage.getItem(PRESETS_KEY) || '[]');
-    return Array.isArray(raw) ? raw : [];
+    if (!Array.isArray(raw)) return [];
+    return raw.map((p) => normalizePreset(p)).filter(Boolean);
   } catch (_) {
     return [];
   }
 }
 
 function writePresets(list) {
-  try { localStorage.setItem(PRESETS_KEY, JSON.stringify(list)); } catch (_) { /* ignore */ }
+  try {
+    const normalized = (list || []).map((p) => normalizePreset(p));
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(normalized));
+  } catch (_) { /* ignore */ }
 }
 
 function isPresetsPanelOpen() {
@@ -3044,7 +3104,11 @@ function renderPresetsList() {
   const list = readPresets().slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   presetsList.textContent = '';
   for (const preset of list) {
-    const stats = countPresetFolders(preset.tree || { kind: 'leaf' });
+    const tree = preset.tree || { kind: 'leaf' };
+    const stats = countPresetFolders(tree);
+    const folderNames = collectPresetLeafFolders(tree)
+      .filter((f) => typeof f === 'string' && f)
+      .map(folderBasename);
     const li = document.createElement('li');
     li.className = 'preset-item';
     li.dataset.id = preset.id;
@@ -3057,7 +3121,15 @@ function renderPresetsList() {
     nameEl.title = preset.name || 'Untitled';
     const sub = document.createElement('div');
     sub.className = 'preset-sub';
-    sub.textContent = `${stats.tiles} tile${stats.tiles === 1 ? '' : 's'} · ${stats.folders} folder${stats.folders === 1 ? '' : 's'}`;
+    let subText = `${stats.tiles} tile${stats.tiles === 1 ? '' : 's'} · ${stats.folders} folder${stats.folders === 1 ? '' : 's'}`;
+    if (folderNames.length) {
+      const shown = folderNames.slice(0, 3).join(', ');
+      subText += ` · ${shown}${folderNames.length > 3 ? '…' : ''}`;
+    }
+    sub.textContent = subText;
+    sub.title = folderNames.length
+      ? collectPresetLeafFolders(tree).filter((f) => f).join('\n')
+      : 'No folders saved in this preset';
     meta.appendChild(nameEl);
     meta.appendChild(sub);
 
@@ -3067,7 +3139,9 @@ function renderPresetsList() {
     loadBtn.type = 'button';
     loadBtn.className = 'tool';
     loadBtn.textContent = 'Load';
-    loadBtn.title = 'Apply this preset';
+    loadBtn.title = stats.folders
+      ? `Apply layout and restore ${stats.folders} folder assignment${stats.folders === 1 ? '' : 's'}`
+      : 'Apply this layout preset';
     loadBtn.addEventListener('click', () => applyPreset(preset.id));
     const renBtn = document.createElement('button');
     renBtn.type = 'button';
@@ -3099,51 +3173,85 @@ function saveCurrentPreset() {
     return;
   }
   const tree = serializePresetTree(root);
+  const folders = collectPresetLeafFolders(tree);
+  const newStats = countPresetFolders(tree);
   const list = readPresets();
   const existing = list.find((p) => p.name.toLowerCase() === name.toLowerCase());
   const now = Date.now();
   if (existing) {
+    const oldStats = countPresetFolders(existing.tree || { kind: 'leaf' });
+    // Avoid silently wiping remembered folders by re-saving after Clear Folders.
+    if (oldStats.folders > 0 && newStats.folders < oldStats.folders) {
+      const ok = window.confirm(
+        `Update preset “${existing.name}”?\n\n` +
+        `This will drop folder assignments from ${oldStats.folders} to ${newStats.folders}.\n` +
+        `Cancel to keep the folders already saved in the preset.`
+      );
+      if (!ok) {
+        flash('Preset not updated — saved folders kept');
+        return;
+      }
+    }
     existing.tree = tree;
+    existing.folders = folders;
     existing.updatedAt = now;
     writePresets(list);
-    flash('Updated preset “' + existing.name + '”');
+    flash(`Updated preset “${existing.name}” · ${newStats.folders} folder${newStats.folders === 1 ? '' : 's'}`);
   } else {
     list.push({
       id: 'p' + now.toString(36) + Math.floor(Math.random() * 1e4).toString(36),
       name,
       createdAt: now,
       updatedAt: now,
-      tree
+      tree,
+      folders
     });
     writePresets(list);
-    flash('Saved preset “' + name + '”');
+    flash(`Saved preset “${name}” · ${newStats.folders} folder${newStats.folders === 1 ? '' : 's'}`);
   }
   if (presetNameInput) presetNameInput.value = '';
   renderPresetsList();
 }
 
 async function applyPreset(id) {
-  const preset = readPresets().find((p) => p.id === id);
+  const preset = normalizePreset(readPresets().find((p) => p.id === id));
   if (!preset || !preset.tree) {
     flash('Preset not found');
     return;
   }
+  // Deep-clone so hydration cannot mutate the stored preset object in place oddly.
+  let tree;
+  try {
+    tree = JSON.parse(JSON.stringify(preset.tree));
+  } catch (_) {
+    tree = preset.tree;
+  }
+  if (Array.isArray(preset.folders) && preset.folders.some((f) => typeof f === 'string' && f)) {
+    applyFolderListToTree(tree, preset.folders);
+  }
+
   forEachLeaf(root, disposeLeaf);
-  root = deserialize(preset.tree);
+  root = deserialize(tree);
   focusedLeaf = null;
   selectedLeaves.clear();
   render();
 
-  const loads = [];
+  const folderLeaves = [];
   forEachLeaf(root, (leaf) => {
-    if (leaf.folder) {
-      loads.push(loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf, true)));
-    }
+    if (leaf.folder) folderLeaves.push(leaf);
   });
+  const loads = folderLeaves.map((leaf) =>
+    loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf, true))
+  );
   await Promise.all(loads);
   saveState();
   setPresetsPanelOpen(false);
-  flash('Loaded preset “' + (preset.name || 'Untitled') + '”');
+  const n = folderLeaves.length;
+  flash(
+    n
+      ? `Loaded preset “${preset.name || 'Untitled'}” · restored ${n} folder${n === 1 ? '' : 's'}`
+      : `Loaded preset “${preset.name || 'Untitled'}”`
+  );
 }
 
 function renamePreset(id) {

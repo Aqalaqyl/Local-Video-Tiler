@@ -94,6 +94,10 @@ picture you see.
   the neighbouring tile.
 - **Autoplay on launch** — tiles with an assigned folder start playing as soon as
   the program opens.
+- **Layout presets** (`P` / **Presets**) — save named snapshots of the tile split
+  layout **and each tile’s assigned media folder**, then Load to restore both in
+  one click. Re-saving under the same name updates the preset (you’ll be asked
+  before an update that would drop folder assignments, e.g. after Clear Folders).
 - **Layout persistence** — your layout, folder assignments and settings are
   remembered between sessions.
 
