@@ -431,6 +431,22 @@ function sourcesMatch(video, url) {
 }
 
 /**
+ * File actually on the tile's <video> right now (by src), not merely leaf.index.
+ * Index can lead the element during async swaps — delete/favorite/volume must
+ * follow the picture the user sees/hears.
+ */
+function resolvePlayingFile(leaf) {
+  if (!leaf || !leaf.files || !leaf.files.length) return null;
+  const video = leaf.video;
+  if (video && videoSourceUrl(video)) {
+    for (const f of leaf.files) {
+      if (f && sourcesMatch(video, f.url)) return f;
+    }
+  }
+  return leaf.files[leaf.index] || null;
+}
+
+/**
  * Projection playback:
  * - Controller owns audible output for every non-paused tile.
  * - Mirrors stay muted and only decode tiles on their slice.
@@ -856,8 +872,8 @@ function applyTileAudio(leaf) {
   // the element into the Web Audio clock and is a common A/V desync source —
   // only build it when this tile actually needs >100% boost.
   const needsBoost = !muted && vol > 1;
-  if (needsBoost || leaf._audioGraph) {
-    const graph = needsBoost ? ensureTileAudioGraph(leaf) : leaf._audioGraph;
+  if (needsBoost) {
+    const graph = ensureTileAudioGraph(leaf);
     if (graph) {
       resumeAudioContext();
       try { leaf.video.volume = 1; } catch (_) { /* ignore */ }
@@ -867,6 +883,12 @@ function applyTileAudio(leaf) {
       leaf.video.volume = Math.min(vol, 1);
       leaf.video.muted = muted;
     }
+  } else if (leaf._audioGraph) {
+    // Leaving boost: mute the captured graph immediately. setTileVolume will
+    // rebuild the <video> onto the native clock so A/V stay locked.
+    try { leaf._audioGraph.gain.gain.value = 0; } catch (_) { /* ignore */ }
+    leaf.video.volume = Math.min(vol, 1);
+    leaf.video.muted = muted;
   } else {
     leaf.video.volume = Math.min(vol, 1);
     leaf.video.muted = muted;
@@ -1205,14 +1227,71 @@ function markVolumeAdjusting() {
 function setTileVolume(leaf, volume, opts = {}) {
   if (!leaf) return;
   markVolumeAdjusting();
+  const hadBoostGraph = !!leaf._audioGraph;
   leaf.volume = clamp(volume, 0, MAX_TILE_VOLUME);
   if (leaf.volume > 0 && !opts.keepMuted) leaf.muted = false;
   applyTileAudio(leaf);
   // Persist against the clip the user is actually hearing/adjusting.
-  const cur = leaf.files && leaf.files[leaf.index];
+  const cur = resolvePlayingFile(leaf);
   if (cur) rememberFileVolume(cur, leaf.volume);
+  // Dropping boost: leave the Web Audio clock so picture/sound stay locked.
+  if (hadBoostGraph && leaf.volume <= 1 && !opts.skipNativeRestore) {
+    restoreNativeAvClock(leaf);
+  }
   // Volume-only save: never piggy-back currentTime sync (that was seeking peers).
   if (!opts.skipSave) saveState({ volumesOnly: true });
+}
+
+/**
+ * Rebuild the tile's <video> on the native media path after Web Audio capture.
+ * MediaElementSource cannot cleanly return to element.volume without drift.
+ */
+function restoreNativeAvClock(leaf) {
+  if (!leaf || !leaf.video || !leaf.files || !leaf.files.length) {
+    detachTileAudioGraph(leaf);
+    return;
+  }
+  const file = resolvePlayingFile(leaf) || leaf.files[leaf.index];
+  if (!file) {
+    detachTileAudioGraph(leaf);
+    return;
+  }
+  const wantPlay = leafShouldPlay(leaf);
+  let resumeAt = NaN;
+  try {
+    if (leaf.video && isFinite(leaf.video.currentTime)) resumeAt = leaf.video.currentTime;
+  } catch (_) { /* ignore */ }
+  const idx = leaf.files.indexOf(file);
+  if (idx >= 0) leaf.index = idx;
+  detachTileAudioGraph(leaf);
+  replaceLeafVideoElement(leaf);
+  const video = leaf.video;
+  if (!video) return;
+  applyRememberedFileVolume(leaf, file);
+  try { video.muted = true; } catch (_) { /* ignore */ }
+  video.src = file.url;
+  video.loop = !!leaf.loop;
+  video.load();
+  updateLeaf(leaf);
+  const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
+  leaf._holdSilence = true;
+  leaf._wantPlaying = wantPlay;
+  void (async () => {
+    await waitVideoReady(video, 2200);
+    if (!leaf.video || leaf.video !== video || leaf._loadGen !== gen) return;
+    if (isFinite(resumeAt) && resumeAt > 0) {
+      try { video.currentTime = resumeAt; } catch (_) { /* ignore */ }
+    }
+    leaf._holdSilence = false;
+    applyTileAudio(leaf);
+    if (wantPlay && leafShouldPlay(leaf) && leafMayDecode(leaf)) {
+      resumeAudioContext();
+      video.play().catch(() => {});
+      armVideoFrameWatch(leaf);
+    }
+    resetLeafSyncClock(leaf);
+    updateLeaf(leaf);
+  })();
 }
 
 function adjustTileVolume(leaf, delta) {
@@ -1245,9 +1324,17 @@ function applySettingsFromPayload(s) {
 
 // Push the current layout + settings to peer windows (deduped to avoid echoes).
 // `volumesOnly` omits currentTime so volume tweaks cannot seek other tiles.
+/** @type {string[]} Paths deleted locally; included once in the next layout push. */
+let pendingRemovedPaths = [];
+
 function broadcastLayout(opts = {}) {
-  if (!projection.active) return;
+  if (!projection.active) {
+    pendingRemovedPaths = [];
+    return;
+  }
   const volumesOnly = !!opts.volumesOnly;
+  const removedPaths = pendingRemovedPaths.length ? pendingRemovedPaths.slice() : undefined;
+  pendingRemovedPaths = [];
   const payload = {
     tree: serializeTree(root, true, !volumesOnly),
     settings: snapshotSettings(),
@@ -1255,6 +1342,7 @@ function broadcastLayout(opts = {}) {
     from: projection.role || (IS_MIRROR ? 'mirror' : 'controller'),
     volumesOnly
   };
+  if (removedPaths && removedPaths.length) payload.removedPaths = removedPaths;
   const json = JSON.stringify(payload);
   if (json === lastSyncJSON) return;
   lastSyncJSON = json;
@@ -1332,6 +1420,9 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     }
 
     if (!volumesOnly && applyIdentity && typeof remoteNode.index === 'number' && localNode.files.length) {
+      if (localNode._deleteLock) {
+        // Confirm dialog open — don't let peer identity steal the clip under trash.
+      } else {
       const idx = clamp(remoteNode.index, 0, localNode.files.length - 1);
       const cur = localNode.files[idx];
       if (idx !== localNode.index || (cur && !sourcesMatch(localNode.video, cur.url))) {
@@ -1340,6 +1431,7 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
         // loadCurrent applies per-file volume memory for the new clip.
         loadCurrent(localNode, false, { force: true });
         mediaDirty = true;
+      }
       }
     }
 
@@ -1407,6 +1499,43 @@ function applyPendingSyncIdentity(leaf) {
   delete leaf._pendingSyncTime;
 }
 
+/**
+ * Remove deleted paths from every tile playlist (peer sync after trash).
+ * If the clip on screen was removed, hard-swap to another remaining file.
+ */
+function applyRemovedPathsLocally(paths) {
+  if (!paths || !paths.length) return;
+  const removed = new Set(paths.filter((p) => typeof p === 'string' && p));
+  if (!removed.size) return;
+  forEachLeaf(root, (leaf) => {
+    if (!leaf || leaf.spacer || !leaf.files || !leaf.files.length) return;
+    const playingBefore = resolvePlayingFile(leaf);
+    const nextFiles = leaf.files.filter((f) => f && !removed.has(f.path));
+    if (nextFiles.length === leaf.files.length) return;
+    leaf.files = nextFiles;
+    const stillPlaying = playingBefore && nextFiles.some((f) => f.path === playingBefore.path);
+    if (!stillPlaying) {
+      if (leaf.files.length) {
+        leaf.index = pickWeightedIndex(leaf, { avoidCurrent: false });
+        loadCurrent(leaf, leafShouldPlay(leaf), { hardSwap: true });
+      } else {
+        leaf.index = 0;
+        leaf._wantPlaying = false;
+        leaf._holdSilence = false;
+        detachTileAudioGraph(leaf);
+        stopVideoElement(leaf.video);
+        replaceLeafVideoElement(leaf);
+        if (leaf.el) leaf.el.classList.remove('playing');
+        updateLeaf(leaf);
+      }
+    } else {
+      const idx = leaf.files.findIndex((f) => f.path === playingBefore.path);
+      if (idx >= 0) leaf.index = idx;
+      updateLeaf(leaf);
+    }
+  });
+}
+
 // Apply a layout pushed from another window onto this display's slice.
 // Reconciles against the existing tree, REUSING leaves (and their live <video>
 // playback) that still have the same folder, so an edit on another display
@@ -1417,7 +1546,8 @@ function applyIncomingLayout(payload) {
     tree: payload.tree,
     settings: payload.settings,
     from: payload.from,
-    volumesOnly: !!payload.volumesOnly
+    volumesOnly: !!payload.volumesOnly,
+    removedPaths: payload.removedPaths || null
   });
   if (json === lastSyncJSON) return;
   lastSyncJSON = json;
@@ -1425,12 +1555,18 @@ function applyIncomingLayout(payload) {
   try {
     applySettingsFromPayload(payload.settings);
 
+    // Drop files peers deleted so index identity stays aligned across windows.
+    if (payload.removedPaths && payload.removedPaths.length) {
+      applyRemovedPathsLocally(payload.removedPaths);
+    }
+
     // Fast path: same tile structure → just realign clip identity / pause / volume.
-    // Mirrors no longer auto-shuffle on ended, so index/time from any peer is safe.
+    // Only the controller is authoritative for which clip/time each tile shows —
+    // mirror broadcasts can still carry pause/volume, but must not rewrite identity.
     // Do not schedule span recovery here — that was re-playing every tile every sync.
     if (sameLayoutStructure(root, payload.tree)) {
       applyIncomingPlayback(root, payload.tree, {
-        applyIdentity: true,
+        applyIdentity: payload.from === 'controller',
         volumesOnly: !!payload.volumesOnly
       });
       return;
@@ -2105,18 +2241,32 @@ async function assignFolderToSelection() {
   clearSelection();
 }
 
-/** Permanently delete the currently playing video from disk and advance. */
+/** Permanently delete the video currently showing on this tile from disk. */
 async function deleteCurrentVideo(leaf) {
   if (!leaf || !leaf.files.length || !leaf.folder) {
     flash('No video to delete');
     return;
   }
-  const current = leaf.files[leaf.index];
+  if (leaf._deleteLock) return;
+
+  // Resolve by what's actually on <video>, not leaf.index (index can lead mid-swap).
+  const current = resolvePlayingFile(leaf);
   if (!current || !current.path) {
     flash('No video to delete');
     return;
   }
-  const res = await window.api.deleteFile(current.path, leaf.folder);
+
+  leaf._deleteLock = true;
+  // Freeze auto-advance / peer identity while the confirm dialog is open.
+  const idxAtStart = leaf.files.indexOf(current);
+  if (idxAtStart >= 0) leaf.index = idxAtStart;
+
+  let res;
+  try {
+    res = await window.api.deleteFile(current.path, leaf.folder);
+  } finally {
+    leaf._deleteLock = false;
+  }
   if (!res || res.cancelled) return;
   if (!res.ok) {
     flash(res.error || 'Could not delete video');
@@ -2131,15 +2281,20 @@ async function deleteCurrentVideo(leaf) {
   if (current) delete current._savedVolume;
   persistFileVolumes();
   clearFavoriteForFile(current);
+
   leaf.files = leaf.files.filter((f) => f.path !== removedPath);
-  if (leaf.index >= leaf.files.length) leaf.index = Math.max(0, leaf.files.length - 1);
+  // Tell peer windows to drop the same path so playlists stay aligned.
+  pendingRemovedPaths.push(removedPath);
 
   if (leaf.files.length > 0) {
+    // Pick the next clip deliberately (weighted shuffle); don't reuse a stale index.
+    leaf.index = pickWeightedIndex(leaf, { avoidCurrent: false });
     leaf.userPaused = false;
     // Hard clip swap: kill old audio pipeline, replace <video>, then load next.
     loadCurrent(leaf, true, { hardSwap: true });
     flash('Deleted ' + current.name);
   } else {
+    leaf.index = 0;
     leaf._wantPlaying = false;
     leaf._holdSilence = false;
     detachTileAudioGraph(leaf);
@@ -2350,11 +2505,13 @@ function prepareLeafForUnpause(leaf) {
   leaf.video.loop = !!leaf.loop;
   leaf.video.preload = 'auto';
 
-  const cur = leaf.files[leaf.index];
-  if (cur && !sourcesMatch(leaf.video, cur.url)) {
-    try { leaf.video.pause(); } catch (_) { /* ignore */ }
-    leaf.video.src = cur.url;
-    try { leaf.video.load(); } catch (_) { /* ignore */ }
+  const cur = resolvePlayingFile(leaf) || leaf.files[leaf.index];
+  const needsSwap = !!leaf._audioGraph || (cur && !sourcesMatch(leaf.video, cur.url));
+  if (needsSwap && cur) {
+    const idx = leaf.files.indexOf(cur);
+    if (idx >= 0) leaf.index = idx;
+    // Hard path: drop any captured Web Audio graph and load the correct src.
+    loadCurrent(leaf, false, { hardSwap: true, force: true });
   }
 
   // Hold silence until every tile is ready — then unmute together.
@@ -2498,6 +2655,8 @@ function advanceRandom(leaf, initial = false) {
   if (!leaf.files.length) return;
   // Never clear a user pause via ended/advance — that caused ghost background audio.
   if (leaf.userPaused && !initial) return;
+  // Don't reshuffle while a delete confirm is open for this tile.
+  if (leaf._deleteLock && !initial) return;
   if (initial) leaf.userPaused = false;
   leaf.index = pickWeightedIndex(leaf, { avoidCurrent: !initial });
   loadCurrent(leaf, leafShouldPlay(leaf) || initial);
@@ -2525,11 +2684,13 @@ function toggleFavorite(leaf) {
     flash('No video to favorite');
     return;
   }
-  const cur = leaf.files[leaf.index];
+  const cur = resolvePlayingFile(leaf);
   if (!cur) {
     flash('No video to favorite');
     return;
   }
+  const idx = leaf.files.indexOf(cur);
+  if (idx >= 0) leaf.index = idx;
   const on = toggleFileFavorite(cur);
   applyFavoriteButton(leaf);
   flash(on
@@ -2539,7 +2700,7 @@ function toggleFavorite(leaf) {
 
 function applyFavoriteButton(leaf) {
   if (!leaf.refs || !leaf.refs.fav) return;
-  const cur = leaf.files && leaf.files[leaf.index];
+  const cur = resolvePlayingFile(leaf) || (leaf.files && leaf.files[leaf.index]);
   const on = !!(cur && isFileFavorite(cur));
   leaf.refs.fav.disabled = !cur;
   leaf.refs.fav.classList.toggle('active', on);
@@ -2547,6 +2708,7 @@ function applyFavoriteButton(leaf) {
   leaf.refs.fav.title = on
     ? 'Favorited — plays more often in shuffle (click to unfavorite)'
     : 'Favorite — play more often in shuffle (still discovers other clips)';
+  if (leaf.el) leaf.el.classList.toggle('has-favorite', on);
 }
 
 function fmtTime(s) {
