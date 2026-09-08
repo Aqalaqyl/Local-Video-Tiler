@@ -51,8 +51,8 @@ picture you see.
     (Next / Previous still step through in order for manual control.)
   - **Favorites (☆ / ★)** — hover a tile to show the gold star on the media
     toolbar (favorited clips also keep a ★ badge in the corner). Shuffle picks
-    favorites several times more often than normal clips, with a discovery chance
-    so unfavorited videos still appear so you can find new favorites.
+    favorites about **5× as often** as unmarked clips, and about **1 in 5**
+    shuffles still force a non-favorite so you keep discovering new videos.
   - **Per-tile loop** (🔁) — keep the current video on screen by repeating it.
     Loop is independent per tile, so one pane can hold on a clip while the others
     keep shuffling.
