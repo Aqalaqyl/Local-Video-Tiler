@@ -259,6 +259,34 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
   border-color: var(--accent-2);
   background: rgba(56,224,196,0.16);
 }
+.tile-toolbar .fav {
+  color: #e6c35c;
+  border-color: rgba(230, 195, 92, 0.45);
+  min-width: 2em;
+  font-size: 14px;
+}
+.tile-toolbar .fav.active {
+  color: #f5c542;
+  border-color: rgba(245,197,66,0.85);
+  background: rgba(245,197,66,0.18);
+}
+.tile-toolbar .fav:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* Corner badge so favorited clips stay visible when the toolbar is hidden. */
+.node-leaf.has-favorite::after {
+  content: '★';
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 4;
+  font-size: 14px;
+  line-height: 1;
+  color: #f5c542;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+  pointer-events: none;
+}
 .tile-toolbar .title {
   flex: 1 1 auto;
   min-width: 0;
