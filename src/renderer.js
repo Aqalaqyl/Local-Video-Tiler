@@ -1119,43 +1119,47 @@ function persistFavorites() {
 }
 
 function refreshFavoritesFromStorage() {
-  let data = null;
-  try { data = JSON.parse(localStorage.getItem(FAVORITES_KEY) || 'null'); } catch (_) { /* ignore */ }
-  if (!Array.isArray(data)) return;
-  for (const raw of data) {
-    if (typeof raw !== 'string' || !raw) continue;
-    favoriteKeys.add(normalizeVolKey(raw) || raw);
-  }
+  // Full reload so unfavorite in another window cannot leave stale keys behind.
+  loadFavorites();
 }
 
+/**
+ * Favorites are global by file identity (path keys), shared by every tile —
+ * including multiple tiles pointed at the same folder.
+ */
 function isFileFavorite(fileOrPath) {
-  if (fileOrPath && typeof fileOrPath === 'object' && fileOrPath._favorite) return true;
+  if (!fileOrPath) return false;
   const keys = fileVolumeKeys(fileOrPath);
   for (const k of keys) {
-    if (favoriteKeys.has(k)) return true;
+    if (favoriteKeys.has(k)) {
+      if (typeof fileOrPath === 'object') fileOrPath._favorite = true;
+      return true;
+    }
   }
   // Peer windows may have toggled favorites since our last load.
   if (keys.length) {
     refreshFavoritesFromStorage();
     for (const k of keys) {
       if (favoriteKeys.has(k)) {
-        if (fileOrPath && typeof fileOrPath === 'object') fileOrPath._favorite = true;
+        if (typeof fileOrPath === 'object') fileOrPath._favorite = true;
         return true;
       }
     }
   }
+  if (typeof fileOrPath === 'object') fileOrPath._favorite = false;
   return false;
 }
 
 function setFileFavorite(fileOrPath, on) {
   if (!fileOrPath) return;
-  if (typeof fileOrPath === 'object') fileOrPath._favorite = !!on;
   const keys = fileVolumeKeys(fileOrPath);
   if (!keys.length) return;
   for (const k of keys) {
     if (on) favoriteKeys.add(k);
     else favoriteKeys.delete(k);
   }
+  // Keep every in-memory file object (all tiles) aligned with the shared set.
+  syncFavoriteFlagsForKeys(keys, !!on);
   persistFavorites();
 }
 
@@ -1172,11 +1176,38 @@ function stampFolderFavorites(files) {
   }
 }
 
+/** Update `_favorite` on every tile’s file objects that match these identity keys. */
+function syncFavoriteFlagsForKeys(keys, on) {
+  if (!keys || !keys.length) return;
+  const want = new Set(keys);
+  forEachLeaf(root, (leaf) => {
+    if (!leaf.files || !leaf.files.length) return;
+    for (const f of leaf.files) {
+      const fk = fileVolumeKeys(f);
+      if (fk.some((k) => want.has(k))) f._favorite = !!on;
+    }
+  });
+}
+
+/**
+ * After a favorite change, restamp playlists and refresh ★ UI on every tile so
+ * same-folder (and same-file) tiles stay in lockstep for display + shuffle.
+ */
+function refreshFavoritesOnAllTiles() {
+  forEachLeaf(root, (leaf) => {
+    if (leaf.files && leaf.files.length) stampFolderFavorites(leaf.files);
+    applyFavoriteButton(leaf);
+  });
+}
+
 function clearFavoriteForFile(fileOrPath) {
   if (!fileOrPath) return;
+  const keys = fileVolumeKeys(fileOrPath);
+  for (const k of keys) favoriteKeys.delete(k);
+  syncFavoriteFlagsForKeys(keys, false);
   if (typeof fileOrPath === 'object') delete fileOrPath._favorite;
-  for (const k of fileVolumeKeys(fileOrPath)) favoriteKeys.delete(k);
   persistFavorites();
+  refreshFavoritesOnAllTiles();
 }
 
 /**
@@ -2692,9 +2723,10 @@ function toggleFavorite(leaf) {
   const idx = leaf.files.indexOf(cur);
   if (idx >= 0) leaf.index = idx;
   const on = toggleFileFavorite(cur);
-  applyFavoriteButton(leaf);
+  // Same folder on other tiles must show the same ★ and use the same shuffle weights.
+  refreshFavoritesOnAllTiles();
   flash(on
-    ? 'Favorited “' + cur.name + '” — plays more often'
+    ? 'Favorited “' + cur.name + '” — plays more often on every tile'
     : 'Removed favorite “' + cur.name + '”');
 }
 
