@@ -42,7 +42,8 @@ picture you see.
   - **Delete current video** (toolbar 🗑) — permanently removes the playing file
     from disk (with confirmation), then advances the tile.
   - **Ctrl/Cmd+click multi-select** — select several tiles, then assign one folder
-    to all of them.
+    to all of them (top-bar **📁 Folder**, or 📁 on any selected tile). A tile’s
+    own 📁 button always assigns to that tile unless it is part of a multi-select.
   - **Clear Folders** (`C`) — unlink every tile from its media folder while
     keeping the current layout splits, so you can re-assign folders without
     rebuilding the grid.
@@ -162,7 +163,7 @@ npm start
 | Horizontal split | `Shift` + left-click a tile (in edit mode) |
 | Resize tiles | Drag the divider between them |
 | Delete / merge a tile | The **🗑** badge on the tile (in edit mode), the toolbar **✕**, or `Delete` / `Backspace` on the hovered/focused tile |
-| Assign a folder | The **📁** button on a tile, or the *Choose media folder…* button |
+| Assign a folder | The **📁** button on that tile, or *Choose media folder…*. Ctrl/Cmd+click several tiles first (or use the top-bar **📁 Folder**) to assign the same folder to all of them |
 | Play / pause focused tile | `Space` |
 | Pause / play all videos | **⏸ All** / **▶ All**, or `Shift`+`Space` |
 | Pause / play videos on this display | **⏸ Display** / **▶ Display** (also on secondary displays when spanning) |
