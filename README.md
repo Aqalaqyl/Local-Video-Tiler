@@ -51,9 +51,17 @@ picture you see.
     when a clip finishes, automatically shuffles to another clip from its folder.
     (Next / Previous still step through in order for manual control.)
   - **Favorites (☆ / ★)** — hover a tile to show the gold star on the media
+## cursor/shared-folder-favorites-89a6
+    toolbar (favorited clips also keep a ★ badge in the corner). Favorites are
+    shared by file across every tile — if several tiles use the same folder,
+    starring a clip on one applies on all of them. Shuffle picks favorites
+    several times more often than normal clips, with a discovery chance so
+    unfavorited videos still appear so you can find new favorites.
+
     toolbar (favorited clips also keep a ★ badge in the corner). Shuffle picks
     favorites about **5× as often** as unmarked clips, and about **1 in 5**
     shuffles still force a non-favorite so you keep discovering new videos.
+##main
   - **Per-tile loop** (🔁) — keep the current video on screen by repeating it.
     Loop is independent per tile, so one pane can hold on a clip while the others
     keep shuffling.
