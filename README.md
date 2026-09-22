@@ -184,10 +184,10 @@ npm start
 
 Playback uses the Chromium media stack, so well-supported containers/codecs such
 as **MP4 (H.264/AAC)**, **WebM** and **Ogg** play reliably. **Animated GIFs**
-(`.gif`) are also supported — they play in the tile like video (loop, pause,
-shuffle). Other extensions (`.mkv`, `.avi`, `.mov`, `.wmv`, `.flv`, …) are listed
-and will play if the underlying codec is supported by your system's Chromium
-build.
+(`.gif`) play **once** by default, then shuffle to another random file in the
+same folder (GIF or video). The tile’s loop button repeats a GIF. Other
+extensions (`.mkv`, `.avi`, `.mov`, `.wmv`, `.flv`, …) are listed and will play
+if the underlying codec is supported by your system's Chromium build.
 
 ## Project structure
 

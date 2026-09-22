@@ -462,9 +462,9 @@ function resolvePlayingFile(leaf) {
 }
 
 // ----------------------------------------------------------- Animated GIF tiles
-// Chromium <video> cannot decode GIF. Tiles show GIFs as <img> (same object-fit
-// as video), freeze to a canvas on pause, and use frame-delay duration so
-// shuffle still advances when the tile is not looping.
+// Chromium <video> cannot decode GIF. Tiles show GIFs as <img>. By default a GIF
+// plays once (Netscape loop count 1), then shuffle picks any other file in the
+// folder — GIF or video. The per-tile loop button opts into infinite repeat.
 
 function parseGifDurationMs(u8) {
   if (!u8 || u8.length < 13) return GIF_DEFAULT_MS;
@@ -524,6 +524,57 @@ async function ensureGifDuration(file) {
   return file._gifDurationMs;
 }
 
+/**
+ * Browsers loop <img> GIFs forever. Rewrite the Netscape loop count so a GIF
+ * plays once unless the tile’s loop button is on (0 = infinite, 1 = once).
+ */
+function patchGifLoopCount(bytes, infinite) {
+  const src = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const count = infinite ? 0 : 1;
+  const sig = [0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x30];
+  for (let i = 0; i + 16 < src.length; i++) {
+    let ok = true;
+    for (let k = 0; k < sig.length; k++) {
+      if (src[i + k] !== sig[k]) { ok = false; break; }
+    }
+    if (!ok) continue;
+    if (src[i + 11] === 0x03 && src[i + 12] === 0x01) {
+      const out = new Uint8Array(src);
+      out[i + 13] = count & 0xff;
+      out[i + 14] = (count >> 8) & 0xff;
+      return out;
+    }
+  }
+  let insertAt = 13;
+  if (src.length > 13 && (src[10] & 0x80)) insertAt += 3 * (2 << (src[10] & 7));
+  const ext = new Uint8Array([
+    0x21, 0xFF, 0x0B,
+    0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x30,
+    0x03, 0x01, count & 0xff, (count >> 8) & 0xff, 0x00
+  ]);
+  const out = new Uint8Array(src.length + ext.length);
+  out.set(src.subarray(0, insertAt), 0);
+  out.set(ext, insertAt);
+  out.set(src.subarray(insertAt), insertAt + ext.length);
+  return out;
+}
+
+/** Blob URL for this GIF: one play by default, infinite only when `infinite`. */
+async function gifPlaybackUrl(file, infinite) {
+  if (!file) return '';
+  if (!file._gifUrls) file._gifUrls = {};
+  const key = infinite ? 'inf' : 'once';
+  if (file._gifUrls[key]) return file._gifUrls[key];
+  const res = await fetch(file.url);
+  const buf = await res.arrayBuffer();
+  const u8 = new Uint8Array(buf);
+  file._gifDurationMs = parseGifDurationMs(u8);
+  const patched = patchGifLoopCount(u8, !!infinite);
+  const url = URL.createObjectURL(new Blob([patched], { type: 'image/gif' }));
+  file._gifUrls[key] = url;
+  return url;
+}
+
 function clearGifCycle(leaf) {
   if (!leaf || !leaf._gifCycleTimer) return;
   clearTimeout(leaf._gifCycleTimer);
@@ -534,7 +585,7 @@ function armGifCycle(leaf) {
   clearGifCycle(leaf);
   if (!leaf || !leaf._gifActive || leaf.loop || leaf.userPaused) return;
   if (projection.active && projection.role === 'mirror') return;
-  const ms = leaf._gifDurationMs || GIF_DEFAULT_MS;
+  const ms = (leaf._gifDurationMs || GIF_DEFAULT_MS) + 200;
   leaf._gifCycleTimer = window.setTimeout(() => {
     leaf._gifCycleTimer = 0;
     if (!leaf._gifActive || leaf.userPaused || leaf.loop) return;
@@ -647,13 +698,20 @@ async function loadGifCurrent(leaf, file, autoplay, opts = {}) {
     updateLeaf(leaf);
     return;
   }
-  const same = sourcesMatch(leaf.gif, file.url);
-  if (!same || opts.hardSwap) {
-    leaf.gif.src = file.url;
-  }
+  // Default: play the GIF once, then shuffle to any other file (GIF or video).
+  // The loop button opts into the browser’s infinite GIF repeat.
+  const infinite = !!leaf.loop;
+  let playbackUrl = file.url;
+  try {
+    playbackUrl = await gifPlaybackUrl(file, infinite);
+  } catch (_) { /* fall back to the original file URL */ }
+  if (leaf._loadGen !== gen) return;
+  leaf._gifLoopInfinite = infinite;
+  const same = leaf.gif.src === playbackUrl;
+  if (!same || opts.hardSwap) leaf.gif.src = playbackUrl;
   leaf._holdSilence = false;
   leaf._wantPlaying = !!autoplay && !leaf.userPaused;
-  const ms = await ensureGifDuration(file);
+  const ms = file._gifDurationMs || await ensureGifDuration(file);
   if (leaf._loadGen !== gen) return;
   leaf._gifDurationMs = ms;
   paintGifChrome(leaf);
@@ -3041,7 +3099,7 @@ function pickRandomIndex(leaf) {
   return pickWeightedIndex(leaf, { avoidCurrent: true });
 }
 
-/** Auto-advance with weighted shuffle (favorites play more; discovery continues). */
+/** Auto-advance with weighted shuffle across every file in the folder (GIF and video). */
 function advanceRandom(leaf, initial = false) {
   if (!leaf.files.length) return;
   // Never clear a user pause via ended/advance — that caused ghost background audio.
@@ -3062,10 +3120,20 @@ function toggleLoop(leaf) {
 }
 
 function applyLoop(leaf) {
-  if (leaf.video) leaf.video.loop = !!leaf.loop;
+  if (leaf.video && !leaf._gifActive) leaf.video.loop = !!leaf.loop;
   if (leaf._gifActive) {
-    if (leaf.loop) clearGifCycle(leaf);
-    else if (leafShouldPlay(leaf)) armGifCycle(leaf);
+    const wantInf = !!leaf.loop;
+    const cur = resolvePlayingFile(leaf) || (leaf.files && leaf.files[leaf.index]);
+    // Switching loop rewrites the GIF’s Netscape repeat count (once vs forever).
+    if (cur && isGifFile(cur) && leaf._gifLoopInfinite !== wantInf && !leaf._gifLoopReload) {
+      leaf._gifLoopReload = true;
+      void loadGifCurrent(leaf, cur, leafShouldPlay(leaf), { hardSwap: true, force: true })
+        .finally(() => { leaf._gifLoopReload = false; });
+    } else if (wantInf) {
+      clearGifCycle(leaf);
+    } else if (leafShouldPlay(leaf)) {
+      armGifCycle(leaf);
+    }
   }
   if (leaf.refs && leaf.refs.loop) {
     leaf.refs.loop.classList.toggle('active', !!leaf.loop);
