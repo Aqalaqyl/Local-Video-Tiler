@@ -1401,9 +1401,11 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     }
 
     // Folder link changes (including Clear Folders) without rebuilding splits.
+    // Skip while this tile is mid-assign so a peer snapshot cannot overwrite
+    // the folder the user just picked (or leave the tile empty).
     const remoteFolder = remoteNode.folder || null;
     const localFolder = localNode.folder || null;
-    if (remoteFolder !== localFolder) {
+    if (remoteFolder !== localFolder && !localNode._assignLock && !localNode._pendingFolder) {
       if (!remoteFolder) {
         clearLeafFolder(localNode);
         mediaDirty = true;
@@ -2204,41 +2206,141 @@ function pruneSelection() {
   }
 }
 
+function leafStillInTree(leaf) {
+  if (!leaf || leaf.spacer) return false;
+  let found = false;
+  forEachLeaf(root, (l) => { if (l === leaf) found = true; });
+  return found;
+}
+
+function uniqueLiveLeaves(leaves) {
+  const seen = new Set();
+  const out = [];
+  for (const l of leaves || []) {
+    if (!l || seen.has(l) || l.spacer || !leafStillInTree(l)) continue;
+    seen.add(l);
+    out.push(l);
+  }
+  return out;
+}
+
+/**
+ * Resolve which tiles a folder pick should apply to.
+ * Per-tile 📁 / “Choose media folder…” always targets that tile, unless it is
+ * part of a Ctrl/Cmd multi-select (then the whole selection is used).
+ * A leftover single-tile focus must NOT steal assignment from another tile —
+ * that was sending folders to the wrong pane (or leaving the clicked one empty).
+ */
 function getAssignmentTargets(leaf) {
   pruneSelection();
-  if (selectedLeaves.size > 0) return [...selectedLeaves];
-  return leaf ? [leaf] : [];
+  if (leaf) {
+    if (leaf.spacer) return [];
+    if (selectedLeaves.size > 1 && selectedLeaves.has(leaf)) {
+      return uniqueLiveLeaves([...selectedLeaves]);
+    }
+    return leafStillInTree(leaf) ? [leaf] : [];
+  }
+  if (selectedLeaves.size > 0) return uniqueLiveLeaves([...selectedLeaves]);
+  if (focusedLeaf && !focusedLeaf.spacer && leafStillInTree(focusedLeaf)) return [focusedLeaf];
+  return [];
+}
+
+function resolveLeavesById(ids) {
+  const want = new Set((ids || []).filter(Boolean));
+  const found = new Map();
+  forEachLeaf(root, (l) => {
+    if (want.has(l.id) && !l.spacer) found.set(l.id, l);
+  });
+  return (ids || []).map((id) => found.get(id)).filter(Boolean);
+}
+
+function markLeavesAssigning(leaves, folder) {
+  for (const leaf of leaves) {
+    if (!leaf) continue;
+    leaf._assignLock = true;
+    leaf._pendingFolder = folder || true;
+    leaf._folderLoadGen = (leaf._folderLoadGen || 0) + 1;
+  }
+}
+
+function clearLeavesAssigning(leaves) {
+  for (const leaf of leaves) {
+    if (!leaf) continue;
+    leaf._assignLock = false;
+    if (leaf._pendingFolder === true) delete leaf._pendingFolder;
+  }
+}
+
+async function applyFolderToLeaves(leaves, folder) {
+  const targets = uniqueLiveLeaves(leaves);
+  if (!targets.length || !folder) return 0;
+  markLeavesAssigning(targets, folder);
+  let applied = 0;
+  try {
+    for (const t of targets) {
+      if (!leafStillInTree(t)) continue;
+      const res = await loadFolder(t, folder, 0, false);
+      if (res && res.ok !== false && !res.superseded) {
+        advanceRandom(t, true);
+        applied++;
+      }
+    }
+  } finally {
+    clearLeavesAssigning(targets);
+  }
+  return applied;
 }
 
 async function assignFolder(leaf) {
   const targets = getAssignmentTargets(leaf);
   if (!targets.length) return;
-  const folder = await window.api.pickFolder();
-  if (!folder) return;
-  for (const t of targets) {
-    await loadFolder(t, folder, 0, false);
-    advanceRandom(t, true);
-  }
-  if (targets.length > 1) {
-    flash(`Assigned folder to ${targets.length} tiles`);
-    clearSelection();
+  const ids = targets.map((t) => t.id);
+  markLeavesAssigning(targets, true);
+  let folder = null;
+  try {
+    folder = await window.api.pickFolder();
+  } finally {
+    // Re-resolve after the native dialog — splits/deletes may have happened.
+    const still = resolveLeavesById(ids);
+    clearLeavesAssigning(still.length ? still : targets);
+    if (!folder) return;
+    const applied = await applyFolderToLeaves(still, folder);
+    if (!applied) {
+      flash(still.length ? 'Could not assign that folder' : 'Tile is gone — folder not assigned');
+      return;
+    }
+    if (applied > 1) {
+      flash(`Assigned folder to ${applied} tiles`);
+      clearSelection();
+    } else {
+      flash('Assigned folder');
+    }
   }
 }
 
 async function assignFolderToSelection() {
   const targets = getAssignmentTargets(null);
   if (!targets.length) {
-    flash('Ctrl+click tiles to select them, then assign a folder');
+    flash('Click a tile, or Ctrl+click several, then assign a folder');
     return;
   }
-  const folder = await window.api.pickFolder();
-  if (!folder) return;
-  for (const t of targets) {
-    await loadFolder(t, folder, 0, false);
-    advanceRandom(t, true);
+  const ids = targets.map((t) => t.id);
+  markLeavesAssigning(targets, true);
+  let folder = null;
+  try {
+    folder = await window.api.pickFolder();
+  } finally {
+    const still = resolveLeavesById(ids);
+    clearLeavesAssigning(still.length ? still : targets);
+    if (!folder) return;
+    const applied = await applyFolderToLeaves(still, folder);
+    if (!applied) {
+      flash(still.length ? 'Could not assign that folder' : 'Selected tiles are gone — folder not assigned');
+      return;
+    }
+    flash(`Assigned folder to ${applied} tile${applied === 1 ? '' : 's'}`);
+    clearSelection();
   }
-  flash(`Assigned folder to ${targets.length} tile${targets.length === 1 ? '' : 's'}`);
-  clearSelection();
 }
 
 /** Permanently delete the video currently showing on this tile from disk. */
@@ -2308,14 +2410,27 @@ async function deleteCurrentVideo(leaf) {
 }
 
 async function loadFolder(leaf, folder, index = 0, autoplay = false) {
-  const res = await window.api.readFolder(folder);
-  leaf.folder = res.folder;
-  leaf.files = res.files || [];
+  if (!leaf || leaf.spacer || !folder) return { ok: false };
+  const requested = folder;
+  const gen = (leaf._folderLoadGen = (leaf._folderLoadGen || 0) + 1);
+  leaf._pendingFolder = requested;
+  const res = await window.api.readFolder(requested);
+  // A newer assign / peer load won — do not clobber the tile.
+  if (leaf._folderLoadGen !== gen) return { ok: false, superseded: true };
+  if (!leafStillInTree(leaf)) return { ok: false };
+  const assigned = (res && res.folder) || requested;
+  leaf.folder = assigned;
+  leaf.files = (res && res.files) || [];
+  if (leaf._pendingFolder === requested) delete leaf._pendingFolder;
   stampFolderFavorites(leaf.files);
   leaf.index = clamp(index, 0, Math.max(0, leaf.files.length - 1));
   loadCurrent(leaf, autoplay);
   updateLeaf(leaf);
   saveState();
+  if (res && res.error && !leaf.files.length) {
+    flash('Folder assigned but no playable videos found');
+  }
+  return { ok: true, folder: assigned, files: leaf.files.length };
 }
 
 /**
