@@ -524,33 +524,63 @@ async function ensureGifDuration(file) {
   return file._gifDurationMs;
 }
 
+/** "NETSCAPE2.0" and "ANIMEXTS1.0" — both carry the GIF loop sub-block. */
+const GIF_LOOP_SIGS = [
+  [0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2E, 0x30],
+  [0x41, 0x4E, 0x49, 0x4D, 0x45, 0x58, 0x54, 0x53, 0x31, 0x2E, 0x30],
+];
+
+function bytesMatchAt(src, i, sig) {
+  if (i < 0 || i + sig.length > src.length) return false;
+  for (let k = 0; k < sig.length; k++) {
+    if (src[i + k] !== sig[k]) return false;
+  }
+  return true;
+}
+
 /**
- * Browsers loop <img> GIFs forever. Rewrite the Netscape loop count so a GIF
- * plays once unless the tile’s loop button is on (0 = infinite, 1 = once).
+ * Index of the 16-bit Netscape loop count, or -1 when the GIF has no loop block.
+ * The id is 11 bytes ("NETSCAPE2.0", including the '.'), then sub-block 03 01 LL LL.
+ */
+function gifLoopCountOffset(src) {
+  const limit = Math.min(src.length, 4096);
+  for (let i = 0; i + 16 < limit; i++) {
+    for (const sig of GIF_LOOP_SIGS) {
+      if (!bytesMatchAt(src, i, sig)) continue;
+      const from = i + sig.length;
+      const to = Math.min(src.length - 4, from + 8);
+      for (let j = from; j <= to; j++) {
+        if (src[j] === 0x03 && src[j + 1] === 0x01) return j + 2;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
+ * Browsers loop <img> GIFs forever when the Netscape count is 0. Rewrite it so a
+ * GIF plays once unless the tile’s loop button is on (0 = infinite, 1 = once).
  */
 function patchGifLoopCount(bytes, infinite) {
   const src = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   const count = infinite ? 0 : 1;
-  const sig = [0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x30];
-  for (let i = 0; i + 16 < src.length; i++) {
-    let ok = true;
-    for (let k = 0; k < sig.length; k++) {
-      if (src[i + k] !== sig[k]) { ok = false; break; }
-    }
-    if (!ok) continue;
-    if (src[i + 11] === 0x03 && src[i + 12] === 0x01) {
-      const out = new Uint8Array(src);
-      out[i + 13] = count & 0xff;
-      out[i + 14] = (count >> 8) & 0xff;
-      return out;
-    }
+  const off = gifLoopCountOffset(src);
+  if (off >= 0) {
+    const out = new Uint8Array(src);
+    out[off] = count & 0xff;
+    out[off + 1] = (count >> 8) & 0xff;
+    return out;
   }
+  // No loop block: decoders already play once. Only insert a block to opt into
+  // infinite repeat when the tile loop button is on.
+  if (!infinite) return src;
   let insertAt = 13;
   if (src.length > 13 && (src[10] & 0x80)) insertAt += 3 * (2 << (src[10] & 7));
+  if (insertAt > src.length) insertAt = src.length;
   const ext = new Uint8Array([
     0x21, 0xFF, 0x0B,
-    0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x30,
-    0x03, 0x01, count & 0xff, (count >> 8) & 0xff, 0x00
+    0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2E, 0x30,
+    0x03, 0x01, 0x00, 0x00, 0x00,
   ]);
   const out = new Uint8Array(src.length + ext.length);
   out.set(src.subarray(0, insertAt), 0);
@@ -582,9 +612,17 @@ function clearGifCycle(leaf) {
 }
 
 function armGifCycle(leaf) {
-  clearGifCycle(leaf);
-  if (!leaf || !leaf._gifActive || leaf.loop || leaf.userPaused) return;
-  if (projection.active && projection.role === 'mirror') return;
+  if (!leaf || !leaf._gifActive || leaf.loop || leaf.userPaused) {
+    clearGifCycle(leaf);
+    return;
+  }
+  if (projection.active && projection.role === 'mirror') {
+    clearGifCycle(leaf);
+    return;
+  }
+  // Playback audit calls this on a short interval. Restarting the timer there
+  // postponed the shuffle forever, so an in-flight countdown must stay put.
+  if (leaf._gifCycleTimer) return;
   const ms = (leaf._gifDurationMs || GIF_DEFAULT_MS) + 200;
   leaf._gifCycleTimer = window.setTimeout(() => {
     leaf._gifCycleTimer = 0;
@@ -2436,6 +2474,7 @@ function wireVideoElement(leaf) {
   // so on-screen video and controller audio never drift onto different clips.
   video.addEventListener('ended', () => {
     if (leaf.video !== video) return;
+    if (leaf._gifActive) return;
     if (leaf.userPaused) return;
     if (projection.active && projection.role === 'mirror') return;
     advanceRandom(leaf);
