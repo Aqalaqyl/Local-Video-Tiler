@@ -14,7 +14,9 @@
  * neat, symmetric layouts effortless.
  * ========================================================================== */
 
-const VIDEO_EXTS_HINT = 'mp4, webm, mov, mkv, avi, …';
+const VIDEO_EXTS_HINT = 'mp4, webm, gif, mov, mkv, avi, …';
+/** Fallback play length when a GIF’s frame delays cannot be read. */
+const GIF_DEFAULT_MS = 4000;
 const LS_KEY = 'lvt.state.v1';
 const PRESETS_KEY = 'lvt.presets.v1';
 /** Remembered per-file volume levels (path → 0..MAX_TILE_VOLUME). */
@@ -350,7 +352,12 @@ function leafShouldPlay(leaf) {
  * glitch cannot immediately re-pause the tile.
  */
 function applyPlaybackIntent(leaf, opts = {}) {
-  if (!leaf || leaf.spacer || !leaf.video) return;
+  if (!leaf || leaf.spacer) return;
+  if (leaf._gifActive) {
+    applyGifPlayback(leaf);
+    return;
+  }
+  if (!leaf.video) return;
   leaf.video.loop = !!leaf.loop;
 
   // User/peer pause always wins — silence and stop.
@@ -418,6 +425,14 @@ function leafMayDecode(leaf, opts = {}) {
   return isLeafInViewport(leaf) || isLeafVisible(leaf);
 }
 
+function isGifFile(fileOrPath) {
+  if (!fileOrPath) return false;
+  const name = typeof fileOrPath === 'string'
+    ? fileOrPath
+    : (fileOrPath.path || fileOrPath.name || fileOrPath.url || '');
+  return /\.gif(?:$|[?#])/i.test(String(name));
+}
+
 function videoSourceUrl(video) {
   if (!video) return '';
   return video.currentSrc || video.getAttribute('src') || '';
@@ -437,13 +452,235 @@ function sourcesMatch(video, url) {
  */
 function resolvePlayingFile(leaf) {
   if (!leaf || !leaf.files || !leaf.files.length) return null;
-  const video = leaf.video;
-  if (video && videoSourceUrl(video)) {
+  const media = (leaf._gifActive && leaf.gif) ? leaf.gif : leaf.video;
+  if (media && videoSourceUrl(media)) {
     for (const f of leaf.files) {
-      if (f && sourcesMatch(video, f.url)) return f;
+      if (f && sourcesMatch(media, f.url)) return f;
     }
   }
   return leaf.files[leaf.index] || null;
+}
+
+// ----------------------------------------------------------- Animated GIF tiles
+// Chromium <video> cannot decode GIF. Tiles show GIFs as <img> (same object-fit
+// as video), freeze to a canvas on pause, and use frame-delay duration so
+// shuffle still advances when the tile is not looping.
+
+function parseGifDurationMs(u8) {
+  if (!u8 || u8.length < 13) return GIF_DEFAULT_MS;
+  if (u8[0] !== 0x47 || u8[1] !== 0x49 || u8[2] !== 0x46) return GIF_DEFAULT_MS;
+  let i = 13;
+  if (u8[10] & 0x80) i += 3 * (2 << (u8[10] & 7));
+  let delayCs = 0;
+  let frames = 0;
+  const n = u8.length;
+  while (i < n) {
+    const marker = u8[i];
+    if (marker === 0x3B) break;
+    if (marker === 0x21) {
+      const label = u8[i + 1];
+      i += 2;
+      if (label === 0xF9 && i < n && u8[i] === 4 && i + 5 <= n) {
+        const delay = u8[i + 2] | (u8[i + 3] << 8);
+        delayCs += delay === 0 ? 10 : delay;
+        frames++;
+      }
+      while (i < n) {
+        const sz = u8[i++];
+        if (!sz) break;
+        i += sz;
+      }
+      continue;
+    }
+    if (marker === 0x2C) {
+      if (i + 10 > n) break;
+      const packed = u8[i + 9];
+      i += 10;
+      if (packed & 0x80) i += 3 * (2 << (packed & 7));
+      i += 1;
+      while (i < n) {
+        const sz = u8[i++];
+        if (!sz) break;
+        i += sz;
+      }
+      continue;
+    }
+    break;
+  }
+  if (frames <= 0) return GIF_DEFAULT_MS;
+  return Math.max(500, Math.min(120000, delayCs * 10));
+}
+
+async function ensureGifDuration(file) {
+  if (!file) return GIF_DEFAULT_MS;
+  if (file._gifDurationMs > 0) return file._gifDurationMs;
+  try {
+    const res = await fetch(file.url);
+    const buf = await res.arrayBuffer();
+    file._gifDurationMs = parseGifDurationMs(new Uint8Array(buf));
+  } catch (_) {
+    file._gifDurationMs = GIF_DEFAULT_MS;
+  }
+  return file._gifDurationMs;
+}
+
+function clearGifCycle(leaf) {
+  if (!leaf || !leaf._gifCycleTimer) return;
+  clearTimeout(leaf._gifCycleTimer);
+  leaf._gifCycleTimer = 0;
+}
+
+function armGifCycle(leaf) {
+  clearGifCycle(leaf);
+  if (!leaf || !leaf._gifActive || leaf.loop || leaf.userPaused) return;
+  if (projection.active && projection.role === 'mirror') return;
+  const ms = leaf._gifDurationMs || GIF_DEFAULT_MS;
+  leaf._gifCycleTimer = window.setTimeout(() => {
+    leaf._gifCycleTimer = 0;
+    if (!leaf._gifActive || leaf.userPaused || leaf.loop) return;
+    if (projection.active && projection.role === 'mirror') return;
+    advanceRandom(leaf);
+  }, ms);
+}
+
+function showGifLayer(leaf, on) {
+  if (!leaf) return;
+  leaf._gifActive = !!on;
+  if (leaf.el) leaf.el.classList.toggle('showing-gif', !!on);
+  if (leaf.gif) leaf.gif.style.display = on ? 'block' : 'none';
+  if (leaf._gifFreeze) leaf._gifFreeze.style.display = 'none';
+  if (leaf.gif) leaf.gif.style.visibility = on ? 'visible' : 'hidden';
+  if (leaf.video) {
+    if (on) leaf.video.style.display = 'none';
+  }
+}
+
+function teardownGif(leaf) {
+  if (!leaf) return;
+  clearGifCycle(leaf);
+  if (leaf.gif) {
+    try { leaf.gif.removeAttribute('src'); } catch (_) { /* ignore */ }
+    leaf.gif.style.display = 'none';
+  }
+  if (leaf._gifFreeze) leaf._gifFreeze.style.display = 'none';
+  leaf._gifActive = false;
+  leaf._gifDurationMs = 0;
+  if (leaf.el) leaf.el.classList.remove('showing-gif');
+}
+
+function freezeGif(leaf) {
+  const img = leaf && leaf.gif;
+  if (!img || !leaf._gifActive) return;
+  let canvas = leaf._gifFreeze;
+  if (!canvas && leaf.el) {
+    canvas = document.createElement('canvas');
+    canvas.className = 'tile-video tile-gif-freeze';
+    canvas.setAttribute('aria-hidden', 'true');
+    leaf.el.insertBefore(canvas, img.nextSibling);
+    leaf._gifFreeze = canvas;
+  }
+  if (canvas && img.naturalWidth) {
+    try {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      canvas.style.display = 'block';
+      img.style.visibility = 'hidden';
+    } catch (_) {
+      img.style.visibility = 'visible';
+    }
+  }
+}
+
+function unfreezeGif(leaf, restart) {
+  if (!leaf) return;
+  if (leaf._gifFreeze) leaf._gifFreeze.style.display = 'none';
+  const img = leaf.gif;
+  if (!img) return;
+  img.style.visibility = 'visible';
+  img.style.display = 'block';
+  if (restart && img.src) {
+    const src = img.src;
+    img.src = '';
+    img.src = src;
+  }
+}
+
+function applyGifPlayback(leaf) {
+  if (!leaf || !leaf._gifActive) return;
+  const should = leafShouldPlay(leaf) && leafMayDecode(leaf);
+  if (!should) {
+    leaf._wantPlaying = false;
+    clearGifCycle(leaf);
+    freezeGif(leaf);
+    if (leaf.refs && leaf.refs.play) leaf.refs.play.textContent = '▶';
+    if (leaf.el) leaf.el.classList.remove('playing');
+    return;
+  }
+  leaf._wantPlaying = true;
+  unfreezeGif(leaf, false);
+  armGifCycle(leaf);
+  if (leaf.refs && leaf.refs.play) leaf.refs.play.textContent = '⏸';
+  if (leaf.el) leaf.el.classList.add('playing');
+}
+
+function paintGifChrome(leaf) {
+  if (!leaf || !leaf.refs) return;
+  const ms = leaf._gifDurationMs || GIF_DEFAULT_MS;
+  const dur = ms / 1000;
+  if (leaf.refs.time) leaf.refs.time.textContent = `GIF · ${fmtTime(dur)}`;
+  if (leaf.refs.seek) {
+    leaf.refs.seek.value = '0';
+    leaf.refs.seek.disabled = true;
+    leaf.refs.seek.title = 'Seek is not available for GIF';
+  }
+}
+
+async function loadGifCurrent(leaf, file, autoplay, opts = {}) {
+  if (!leaf || !file) return;
+  const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
+  clearGifCycle(leaf);
+  detachTileAudioGraph(leaf);
+  stopVideoElement(leaf.video);
+  showGifLayer(leaf, true);
+  if (!leaf.gif) {
+    updateLeaf(leaf);
+    return;
+  }
+  const same = sourcesMatch(leaf.gif, file.url);
+  if (!same || opts.hardSwap) {
+    leaf.gif.src = file.url;
+  }
+  leaf._holdSilence = false;
+  leaf._wantPlaying = !!autoplay && !leaf.userPaused;
+  const ms = await ensureGifDuration(file);
+  if (leaf._loadGen !== gen) return;
+  leaf._gifDurationMs = ms;
+  paintGifChrome(leaf);
+  if (!leafMayDecode(leaf, opts) && !opts.force) {
+    applyGifPlayback(leaf);
+    updateLeaf(leaf);
+    return;
+  }
+  if (leaf._wantPlaying && leafShouldPlay(leaf)) {
+    unfreezeGif(leaf, !same || opts.hardSwap);
+    armGifCycle(leaf);
+    if (leaf.refs && leaf.refs.play) leaf.refs.play.textContent = '⏸';
+    if (leaf.el) leaf.el.classList.add('playing');
+  } else {
+    // Wait for decode so freeze captures a frame.
+    if (!leaf.gif.complete) {
+      await new Promise((resolve) => {
+        const done = () => { leaf.gif.removeEventListener('load', done); resolve(); };
+        leaf.gif.addEventListener('load', done);
+        setTimeout(done, 800);
+      });
+    }
+    if (leaf._loadGen !== gen) return;
+    freezeGif(leaf);
+    if (leaf.refs && leaf.refs.play) leaf.refs.play.textContent = '▶';
+  }
+  updateLeaf(leaf);
 }
 
 /**
@@ -458,12 +695,14 @@ function reconcileProjectionPlayback() {
   resumeAudioContext();
 
   forEachLeaf(root, (leaf) => {
-    if (leaf.spacer || !leaf.video || !leaf.files.length) return;
+    if (leaf.spacer || !leaf.files.length) return;
     const cur = leaf.files[leaf.index];
     const shouldPlay = leafShouldPlay(leaf);
+    const media = (leaf._gifActive && leaf.gif) ? leaf.gif : leaf.video;
+    if (!media) return;
 
     if (projection.role === 'controller') {
-      if (cur && !sourcesMatch(leaf.video, cur.url)) {
+      if (cur && !sourcesMatch(media, cur.url)) {
         loadCurrent(leaf, shouldPlay, { force: true });
       } else {
         applyPlaybackIntent(leaf);
@@ -474,13 +713,14 @@ function reconcileProjectionPlayback() {
     const visible = isLeafInViewport(leaf) || isLeafVisible(leaf);
     if (!visible) {
       leaf._wantPlaying = false;
-      pauseVideoElement(leaf.video);
+      if (leaf._gifActive) applyGifPlayback(leaf);
+      else pauseVideoElement(leaf.video);
       applyTileAudio(leaf);
       resetLeafSyncClock(leaf);
       return;
     }
 
-    if (cur && !sourcesMatch(leaf.video, cur.url)) {
+    if (cur && !sourcesMatch(media, cur.url)) {
       loadCurrent(leaf, shouldPlay);
     } else {
       applyPlaybackIntent(leaf);
@@ -685,7 +925,12 @@ function countPlayingLeaves() {
 }
 
 function auditLeafPlayback(leaf) {
-  if (!leaf || leaf.spacer || !leaf.video || !leaf.files.length) return;
+  if (!leaf || leaf.spacer || !leaf.files.length) return;
+  if (leaf._gifActive) {
+    applyGifPlayback(leaf);
+    return;
+  }
+  if (!leaf.video) return;
   const video = leaf.video;
   const cur = leaf.files[leaf.index];
 
@@ -1910,6 +2155,12 @@ function ensureLeafEl(leaf) {
   video.className = 'tile-video';
   configureVideoElement(video);
 
+  const gif = document.createElement('img');
+  gif.className = 'tile-video tile-gif';
+  gif.alt = '';
+  gif.draggable = false;
+  gif.style.display = 'none';
+
   const empty = document.createElement('div');
   empty.className = 'tile-empty';
   empty.innerHTML = `
@@ -1945,6 +2196,7 @@ function ensureLeafEl(leaf) {
   del.textContent = '🗑';
 
   el.appendChild(video);
+  el.appendChild(gif);
   el.appendChild(empty);
   el.appendChild(toolbar);
   el.appendChild(del);
@@ -1972,6 +2224,7 @@ function ensureLeafEl(leaf) {
 
   leaf.el = el;
   leaf.video = video;
+  leaf.gif = gif;
   leaf.refs = refs;
 
   wireLeafEvents(leaf);
@@ -1984,7 +2237,15 @@ function updateLeaf(leaf) {
   const { refs, video } = leaf;
   const hasFiles = leaf.files.length > 0;
   const emptyMsg = refs.empty.querySelector('div:nth-child(2)');
-  video.style.display = hasFiles ? 'block' : 'none';
+  const cur = hasFiles ? leaf.files[leaf.index] : null;
+  const gifOn = !!(cur && isGifFile(cur) && leaf._gifActive);
+  if (video) video.style.display = hasFiles && !gifOn ? 'block' : 'none';
+  if (leaf.gif) leaf.gif.style.display = gifOn ? 'block' : 'none';
+  if (gifOn) paintGifChrome(leaf);
+  else if (refs.seek) {
+    refs.seek.disabled = false;
+    refs.seek.title = 'Seek';
+  }
 
   if (!leaf.folder) {
     refs.empty.style.display = 'flex';
@@ -2024,6 +2285,7 @@ function clearLeafFolder(leaf) {
   leaf.userPaused = false;
   leaf._wantPlaying = false;
   leaf._holdSilence = false;
+  teardownGif(leaf);
   detachTileAudioGraph(leaf);
   stopVideoElement(leaf.video);
   if (leaf.el) {
@@ -2140,6 +2402,7 @@ function wireLeafEvents(leaf) {
 
   refs.seek.addEventListener('input', (e) => {
     e.stopPropagation();
+    if (leaf._gifActive) return;
     const v = leaf.video;
     if (v && v.duration) v.currentTime = (refs.seek.value / 1000) * v.duration;
   });
@@ -2399,6 +2662,7 @@ async function deleteCurrentVideo(leaf) {
     leaf.index = 0;
     leaf._wantPlaying = false;
     leaf._holdSilence = false;
+    teardownGif(leaf);
     detachTileAudioGraph(leaf);
     stopVideoElement(leaf.video);
     replaceLeafVideoElement(leaf);
@@ -2461,6 +2725,13 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   const current = leaf.files[leaf.index];
   const mayDecode = leafMayDecode(leaf, opts);
   const video = leaf.video;
+
+  if (current && isGifFile(current)) {
+    void loadGifCurrent(leaf, current, autoplay, opts);
+    return;
+  }
+  teardownGif(leaf);
+
   const sameSource = current && sourcesMatch(video, current.url);
 
   if (!current || !mayDecode) {
@@ -2614,13 +2885,18 @@ function waitVideoReady(video, timeoutMs = 2200) {
  * source is loaded, keep it silent/paused until the unison play barrier.
  */
 function prepareLeafForUnpause(leaf) {
-  if (!leaf || !leaf.video || !leaf.files.length) return false;
+  if (!leaf || !leaf.files.length) return false;
   leaf.userPaused = false;
   leaf._wantPlaying = true;
+  const cur = resolvePlayingFile(leaf) || leaf.files[leaf.index];
+  if (cur && isGifFile(cur)) {
+    void loadGifCurrent(leaf, cur, true, { force: true });
+    return true;
+  }
+  if (!leaf.video) return false;
   leaf.video.loop = !!leaf.loop;
   leaf.video.preload = 'auto';
 
-  const cur = resolvePlayingFile(leaf) || leaf.files[leaf.index];
   const needsSwap = !!leaf._audioGraph || (cur && !sourcesMatch(leaf.video, cur.url));
   if (needsSwap && cur) {
     const idx = leaf.files.indexOf(cur);
@@ -2787,9 +3063,15 @@ function toggleLoop(leaf) {
 
 function applyLoop(leaf) {
   if (leaf.video) leaf.video.loop = !!leaf.loop;
+  if (leaf._gifActive) {
+    if (leaf.loop) clearGifCycle(leaf);
+    else if (leafShouldPlay(leaf)) armGifCycle(leaf);
+  }
   if (leaf.refs && leaf.refs.loop) {
     leaf.refs.loop.classList.toggle('active', !!leaf.loop);
-    leaf.refs.loop.title = leaf.loop ? 'Looping this video — click to stop' : 'Loop this video (per tile)';
+    leaf.refs.loop.title = leaf.loop
+      ? (leaf._gifActive ? 'Looping this GIF — click to stop' : 'Looping this video — click to stop')
+      : (leaf._gifActive ? 'Loop this GIF (per tile)' : 'Loop this video (per tile)');
   }
 }
 
@@ -2901,6 +3183,7 @@ function closeLeaf(leaf) {
 }
 
 function disposeLeaf(leaf) {
+  teardownGif(leaf);
   detachTileAudioGraph(leaf);
   if (leaf.video) stopVideoElement(leaf.video);
   leaf.userPaused = true;

@@ -183,9 +183,11 @@ npm start
 ## Supported formats
 
 Playback uses the Chromium media stack, so well-supported containers/codecs such
-as **MP4 (H.264/AAC)**, **WebM** and **Ogg** play reliably. Other extensions
-(`.mkv`, `.avi`, `.mov`, `.wmv`, `.flv`, …) are listed and will play if the
-underlying codec is supported by your system's Chromium build.
+as **MP4 (H.264/AAC)**, **WebM** and **Ogg** play reliably. **Animated GIFs**
+(`.gif`) are also supported — they play in the tile like video (loop, pause,
+shuffle). Other extensions (`.mkv`, `.avi`, `.mov`, `.wmv`, `.flv`, …) are listed
+and will play if the underlying codec is supported by your system's Chromium
+build.
 
 ## Project structure
 
