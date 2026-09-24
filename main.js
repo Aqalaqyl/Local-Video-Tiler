@@ -41,7 +41,8 @@ configureHardwareAcceleration();
 
 const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.m4v', '.webm', '.ogv', '.ogg', '.mov', '.mkv', '.avi',
-  '.wmv', '.flv', '.mpg', '.mpeg', '.3gp', '.ts', '.m2ts', '.gif'
+  '.wmv', '.flv', '.mpg', '.mpeg', '.3gp', '.ts', '.m2ts', '.gif',
+  '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.avif'
 ]);
 
 /** @type {BrowserWindow | null} */

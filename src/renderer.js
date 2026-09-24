@@ -14,9 +14,13 @@
  * neat, symmetric layouts effortless.
  * ========================================================================== */
 
-const VIDEO_EXTS_HINT = 'mp4, webm, gif, mov, mkv, avi, …';
+const VIDEO_EXTS_HINT = 'mp4, webm, gif, jpg, png, webp, …';
 /** Fallback play length when a GIF’s frame delays cannot be read. */
 const GIF_DEFAULT_MS = 4000;
+/** Still images stay on screen this long before shuffle, unless Settings changes it. */
+const DEFAULT_IMAGE_SECONDS = 5;
+/** GIF and video play counts before shuffle. 1 = once. The tile loop button is infinite. */
+const DEFAULT_MEDIA_LOOPS = 1;
 const LS_KEY = 'lvt.state.v1';
 const PRESETS_KEY = 'lvt.presets.v1';
 /** Remembered per-file volume levels (path → 0..MAX_TILE_VOLUME). */
@@ -82,8 +86,27 @@ const settings = {
   cellSize: 80,
   guideOn: false,
   /** Scaled multi-monitor desk in the window for editing without fullscreen. */
-  desktopPreview: true
+  desktopPreview: true,
+  /** Seconds a still image stays up before the tile shuffles. */
+  imageSeconds: DEFAULT_IMAGE_SECONDS,
+  /** How many times a GIF plays before shuffle (1 = once). */
+  gifLoops: DEFAULT_MEDIA_LOOPS,
+  /** How many times a video plays before shuffle (1 = once). */
+  videoLoops: DEFAULT_MEDIA_LOOPS
 };
+
+function imageHoldMs() {
+  const sec = clamp(Math.round(Number(settings.imageSeconds) || DEFAULT_IMAGE_SECONDS), 1, 600);
+  return sec * 1000;
+}
+
+function gifLoopCount() {
+  return clamp(Math.round(Number(settings.gifLoops) || DEFAULT_MEDIA_LOOPS), 1, 99);
+}
+
+function videoLoopCount() {
+  return clamp(Math.round(Number(settings.videoLoops) || DEFAULT_MEDIA_LOOPS), 1, 99);
+}
 
 // Latest window/display geometry pushed from the main process. Used to draw the
 // screen-split guide and to build a layout that matches the physical displays.
@@ -357,6 +380,10 @@ function applyPlaybackIntent(leaf, opts = {}) {
     applyGifPlayback(leaf);
     return;
   }
+  if (leaf._stillActive) {
+    applyStillPlayback(leaf);
+    return;
+  }
   if (!leaf.video) return;
   leaf.video.loop = !!leaf.loop;
 
@@ -425,12 +452,18 @@ function leafMayDecode(leaf, opts = {}) {
   return isLeafInViewport(leaf) || isLeafVisible(leaf);
 }
 
+function mediaName(fileOrPath) {
+  if (!fileOrPath) return '';
+  if (typeof fileOrPath === 'string') return fileOrPath;
+  return fileOrPath.path || fileOrPath.name || fileOrPath.url || '';
+}
+
 function isGifFile(fileOrPath) {
-  if (!fileOrPath) return false;
-  const name = typeof fileOrPath === 'string'
-    ? fileOrPath
-    : (fileOrPath.path || fileOrPath.name || fileOrPath.url || '');
-  return /\.gif(?:$|[?#])/i.test(String(name));
+  return /\.gif(?:$|[?#])/i.test(String(mediaName(fileOrPath)));
+}
+
+function isStillImage(fileOrPath) {
+  return /\.(?:jpe?g|png|webp|bmp|avif)(?:$|[?#])/i.test(String(mediaName(fileOrPath)));
 }
 
 function videoSourceUrl(video) {
@@ -558,12 +591,12 @@ function gifLoopCountOffset(src) {
 }
 
 /**
- * Browsers loop <img> GIFs forever when the Netscape count is 0. Rewrite it so a
- * GIF plays once unless the tile’s loop button is on (0 = infinite, 1 = once).
+ * Browsers loop <img> GIFs forever when the Netscape count is 0.
+ * `plays` is how many times to play (0 = infinite).
  */
-function patchGifLoopCount(bytes, infinite) {
+function patchGifLoopCount(bytes, plays) {
   const src = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  const count = infinite ? 0 : 1;
+  const count = plays > 0 ? (plays & 0xffff) : 0;
   const off = gifLoopCountOffset(src);
   if (off >= 0) {
     const out = new Uint8Array(src);
@@ -571,16 +604,15 @@ function patchGifLoopCount(bytes, infinite) {
     out[off + 1] = (count >> 8) & 0xff;
     return out;
   }
-  // No loop block: decoders already play once. Only insert a block to opt into
-  // infinite repeat when the tile loop button is on.
-  if (!infinite) return src;
+  // No loop block already plays once. Insert a block only to repeat or loop forever.
+  if (count === 1) return src;
   let insertAt = 13;
   if (src.length > 13 && (src[10] & 0x80)) insertAt += 3 * (2 << (src[10] & 7));
   if (insertAt > src.length) insertAt = src.length;
   const ext = new Uint8Array([
     0x21, 0xFF, 0x0B,
     0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2E, 0x30,
-    0x03, 0x01, 0x00, 0x00, 0x00,
+    0x03, 0x01, count & 0xff, (count >> 8) & 0xff, 0x00,
   ]);
   const out = new Uint8Array(src.length + ext.length);
   out.set(src.subarray(0, insertAt), 0);
@@ -589,17 +621,17 @@ function patchGifLoopCount(bytes, infinite) {
   return out;
 }
 
-/** Blob URL for this GIF: one play by default, infinite only when `infinite`. */
-async function gifPlaybackUrl(file, infinite) {
+/** Blob URL whose Netscape count matches `plays` (0 = infinite). */
+async function gifPlaybackUrl(file, plays) {
   if (!file) return '';
   if (!file._gifUrls) file._gifUrls = {};
-  const key = infinite ? 'inf' : 'once';
+  const key = String(plays > 0 ? plays : 0);
   if (file._gifUrls[key]) return file._gifUrls[key];
   const res = await fetch(file.url);
   const buf = await res.arrayBuffer();
   const u8 = new Uint8Array(buf);
   file._gifDurationMs = parseGifDurationMs(u8);
-  const patched = patchGifLoopCount(u8, !!infinite);
+  const patched = patchGifLoopCount(u8, plays > 0 ? plays : 0);
   const url = URL.createObjectURL(new Blob([patched], { type: 'image/gif' }));
   file._gifUrls[key] = url;
   return url;
@@ -623,7 +655,8 @@ function armGifCycle(leaf) {
   // Playback audit calls this on a short interval. Restarting the timer there
   // postponed the shuffle forever, so an in-flight countdown must stay put.
   if (leaf._gifCycleTimer) return;
-  const ms = (leaf._gifDurationMs || GIF_DEFAULT_MS) + 200;
+  const plays = gifLoopCount();
+  const ms = (leaf._gifDurationMs || GIF_DEFAULT_MS) * plays + 200;
   leaf._gifCycleTimer = window.setTimeout(() => {
     leaf._gifCycleTimer = 0;
     if (!leaf._gifActive || leaf.userPaused || leaf.loop) return;
@@ -736,15 +769,15 @@ async function loadGifCurrent(leaf, file, autoplay, opts = {}) {
     updateLeaf(leaf);
     return;
   }
-  // Default: play the GIF once, then shuffle to any other file (GIF or video).
-  // The loop button opts into the browser’s infinite GIF repeat.
-  const infinite = !!leaf.loop;
+  // Play the GIF `gifLoops` times (Settings), then shuffle. The loop button is infinite.
+  const plays = leaf.loop ? 0 : gifLoopCount();
   let playbackUrl = file.url;
   try {
-    playbackUrl = await gifPlaybackUrl(file, infinite);
+    playbackUrl = await gifPlaybackUrl(file, plays);
   } catch (_) { /* fall back to the original file URL */ }
   if (leaf._loadGen !== gen) return;
-  leaf._gifLoopInfinite = infinite;
+  leaf._gifLoopInfinite = plays === 0;
+  leaf._gifLoopCount = plays;
   const same = leaf.gif.src === playbackUrl;
   if (!same || opts.hardSwap) leaf.gif.src = playbackUrl;
   leaf._holdSilence = false;
@@ -775,6 +808,121 @@ async function loadGifCurrent(leaf, file, autoplay, opts = {}) {
     if (leaf._loadGen !== gen) return;
     freezeGif(leaf);
     if (leaf.refs && leaf.refs.play) leaf.refs.play.textContent = '▶';
+  }
+  updateLeaf(leaf);
+}
+
+function clearImageCycle(leaf) {
+  if (!leaf || !leaf._imageCycleTimer) return;
+  clearTimeout(leaf._imageCycleTimer);
+  leaf._imageCycleTimer = 0;
+}
+
+function armImageCycle(leaf) {
+  if (!leaf || !leaf._stillActive || leaf.loop || leaf.userPaused) {
+    clearImageCycle(leaf);
+    return;
+  }
+  if (projection.active && projection.role === 'mirror') {
+    clearImageCycle(leaf);
+    return;
+  }
+  if (leaf._imageCycleTimer) return;
+  const ms = imageHoldMs();
+  leaf._imageCycleTimer = window.setTimeout(() => {
+    leaf._imageCycleTimer = 0;
+    if (!leaf._stillActive || leaf.userPaused || leaf.loop) return;
+    if (projection.active && projection.role === 'mirror') return;
+    advanceRandom(leaf);
+  }, ms);
+}
+
+function showStillLayer(leaf, on) {
+  if (!leaf) return;
+  leaf._stillActive = !!on;
+  if (on) {
+    leaf._gifActive = false;
+    clearGifCycle(leaf);
+  }
+  if (leaf.el) leaf.el.classList.toggle('showing-still', !!on);
+  if (leaf.gif) {
+    leaf.gif.style.display = on ? 'block' : 'none';
+    leaf.gif.style.visibility = on ? 'visible' : 'hidden';
+  }
+  if (leaf._gifFreeze) leaf._gifFreeze.style.display = 'none';
+  if (on && leaf.video) leaf.video.style.display = 'none';
+}
+
+function teardownStill(leaf) {
+  if (!leaf) return;
+  clearImageCycle(leaf);
+  leaf._stillActive = false;
+  if (leaf.el) leaf.el.classList.remove('showing-still');
+  if (leaf.gif && !leaf._gifActive) {
+    try { leaf.gif.removeAttribute('src'); } catch (_) { /* ignore */ }
+    leaf.gif.style.display = 'none';
+  }
+}
+
+function paintStillChrome(leaf) {
+  if (!leaf || !leaf.refs) return;
+  const sec = imageHoldMs() / 1000;
+  if (leaf.refs.time) leaf.refs.time.textContent = `Image · ${fmtTime(sec)}`;
+  if (leaf.refs.seek) {
+    leaf.refs.seek.value = '0';
+    leaf.refs.seek.disabled = true;
+    leaf.refs.seek.title = 'Seek is not available for pictures';
+  }
+}
+
+function applyStillPlayback(leaf) {
+  if (!leaf || !leaf._stillActive) return;
+  const should = leafShouldPlay(leaf) && leafMayDecode(leaf);
+  if (!should || leaf.loop) {
+    if (!should) {
+      leaf._wantPlaying = false;
+      clearImageCycle(leaf);
+      if (leaf.refs && leaf.refs.play) leaf.refs.play.textContent = '▶';
+      if (leaf.el) leaf.el.classList.remove('playing');
+    } else {
+      clearImageCycle(leaf);
+      if (leaf.refs && leaf.refs.play) leaf.refs.play.textContent = '⏸';
+      if (leaf.el) leaf.el.classList.add('playing');
+    }
+    return;
+  }
+  leaf._wantPlaying = true;
+  armImageCycle(leaf);
+  if (leaf.refs && leaf.refs.play) leaf.refs.play.textContent = '⏸';
+  if (leaf.el) leaf.el.classList.add('playing');
+}
+
+async function loadImageCurrent(leaf, file, autoplay, opts = {}) {
+  if (!leaf || !file) return;
+  const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
+  clearGifCycle(leaf);
+  clearImageCycle(leaf);
+  detachTileAudioGraph(leaf);
+  stopVideoElement(leaf.video);
+  leaf._gifActive = false;
+  showStillLayer(leaf, true);
+  if (!leaf.gif) {
+    updateLeaf(leaf);
+    return;
+  }
+  const same = leaf.gif.src === file.url;
+  if (!same || opts.hardSwap) leaf.gif.src = file.url;
+  leaf._holdSilence = false;
+  leaf._wantPlaying = !!autoplay && !leaf.userPaused;
+  leaf._videoPlays = 0;
+  if (leaf._loadGen !== gen) return;
+  paintStillChrome(leaf);
+  if (leaf._wantPlaying && leafShouldPlay(leaf)) {
+    armImageCycle(leaf);
+    if (leaf.refs && leaf.refs.play) leaf.refs.play.textContent = '⏸';
+    if (leaf.el) leaf.el.classList.add('playing');
+  } else if (leaf.refs && leaf.refs.play) {
+    leaf.refs.play.textContent = '▶';
   }
   updateLeaf(leaf);
 }
@@ -1024,6 +1172,10 @@ function auditLeafPlayback(leaf) {
   if (!leaf || leaf.spacer || !leaf.files.length) return;
   if (leaf._gifActive) {
     applyGifPlayback(leaf);
+    return;
+  }
+  if (leaf._stillActive) {
+    applyStillPlayback(leaf);
     return;
   }
   if (!leaf.video) return;
@@ -2335,9 +2487,11 @@ function updateLeaf(leaf) {
   const emptyMsg = refs.empty.querySelector('div:nth-child(2)');
   const cur = hasFiles ? leaf.files[leaf.index] : null;
   const gifOn = !!(cur && isGifFile(cur) && leaf._gifActive);
-  if (video) video.style.display = hasFiles && !gifOn ? 'block' : 'none';
-  if (leaf.gif) leaf.gif.style.display = gifOn ? 'block' : 'none';
+  const stillOn = !!(cur && isStillImage(cur) && leaf._stillActive);
+  if (video) video.style.display = hasFiles && !gifOn && !stillOn ? 'block' : 'none';
+  if (leaf.gif) leaf.gif.style.display = (gifOn || stillOn) ? 'block' : 'none';
   if (gifOn) paintGifChrome(leaf);
+  else if (stillOn) paintStillChrome(leaf);
   else if (refs.seek) {
     refs.seek.disabled = false;
     refs.seek.title = 'Seek';
@@ -2382,6 +2536,7 @@ function clearLeafFolder(leaf) {
   leaf._wantPlaying = false;
   leaf._holdSilence = false;
   teardownGif(leaf);
+  teardownStill(leaf);
   detachTileAudioGraph(leaf);
   stopVideoElement(leaf.video);
   if (leaf.el) {
@@ -2474,9 +2629,19 @@ function wireVideoElement(leaf) {
   // so on-screen video and controller audio never drift onto different clips.
   video.addEventListener('ended', () => {
     if (leaf.video !== video) return;
-    if (leaf._gifActive) return;
+    if (leaf._gifActive || leaf._stillActive) return;
     if (leaf.userPaused) return;
+    if (leaf.loop) return;
     if (projection.active && projection.role === 'mirror') return;
+    leaf._videoPlays = (leaf._videoPlays || 0) + 1;
+    if (leaf._videoPlays < videoLoopCount()) {
+      try {
+        video.currentTime = 0;
+        video.play().catch(() => {});
+      } catch (_) { /* ignore */ }
+      return;
+    }
+    leaf._videoPlays = 0;
     advanceRandom(leaf);
   });
 }
@@ -2499,7 +2664,7 @@ function wireLeafEvents(leaf) {
 
   refs.seek.addEventListener('input', (e) => {
     e.stopPropagation();
-    if (leaf._gifActive) return;
+    if (leaf._gifActive || leaf._stillActive) return;
     const v = leaf.video;
     if (v && v.duration) v.currentTime = (refs.seek.value / 1000) * v.duration;
   });
@@ -2789,7 +2954,7 @@ async function loadFolder(leaf, folder, index = 0, autoplay = false) {
   updateLeaf(leaf);
   saveState();
   if (res && res.error && !leaf.files.length) {
-    flash('Folder assigned but no playable videos found');
+    flash('Folder assigned but no playable media found');
   }
   return { ok: true, folder: assigned, files: leaf.files.length };
 }
@@ -2824,10 +2989,20 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   const video = leaf.video;
 
   if (current && isGifFile(current)) {
+    teardownStill(leaf);
+    leaf._videoPlays = 0;
     void loadGifCurrent(leaf, current, autoplay, opts);
     return;
   }
+  if (current && isStillImage(current)) {
+    teardownGif(leaf);
+    leaf._videoPlays = 0;
+    void loadImageCurrent(leaf, current, autoplay, opts);
+    return;
+  }
   teardownGif(leaf);
+  teardownStill(leaf);
+  leaf._videoPlays = 0;
 
   const sameSource = current && sourcesMatch(video, current.url);
 
@@ -3159,26 +3334,30 @@ function toggleLoop(leaf) {
 }
 
 function applyLoop(leaf) {
-  if (leaf.video && !leaf._gifActive) leaf.video.loop = !!leaf.loop;
+  if (leaf.video && !leaf._gifActive && !leaf._stillActive) leaf.video.loop = !!leaf.loop;
+  if (leaf._stillActive) {
+    if (leaf.loop) clearImageCycle(leaf);
+    else if (leafShouldPlay(leaf)) armImageCycle(leaf);
+  }
   if (leaf._gifActive) {
-    const wantInf = !!leaf.loop;
+    const wantPlays = leaf.loop ? 0 : gifLoopCount();
     const cur = resolvePlayingFile(leaf) || (leaf.files && leaf.files[leaf.index]);
-    // Switching loop rewrites the GIF’s Netscape repeat count (once vs forever).
-    if (cur && isGifFile(cur) && leaf._gifLoopInfinite !== wantInf && !leaf._gifLoopReload) {
+    if (cur && isGifFile(cur) && leaf._gifLoopCount !== wantPlays && !leaf._gifLoopReload) {
       leaf._gifLoopReload = true;
       void loadGifCurrent(leaf, cur, leafShouldPlay(leaf), { hardSwap: true, force: true })
         .finally(() => { leaf._gifLoopReload = false; });
-    } else if (wantInf) {
+    } else if (wantPlays === 0) {
       clearGifCycle(leaf);
     } else if (leafShouldPlay(leaf)) {
       armGifCycle(leaf);
     }
   }
   if (leaf.refs && leaf.refs.loop) {
+    const kind = leaf._stillActive ? 'picture' : (leaf._gifActive ? 'GIF' : 'video');
     leaf.refs.loop.classList.toggle('active', !!leaf.loop);
     leaf.refs.loop.title = leaf.loop
-      ? (leaf._gifActive ? 'Looping this GIF — click to stop' : 'Looping this video — click to stop')
-      : (leaf._gifActive ? 'Loop this GIF (per tile)' : 'Loop this video (per tile)');
+      ? `Looping this ${kind} — click to stop`
+      : `Loop this ${kind} until you stop it`;
   }
 }
 
@@ -3291,6 +3470,7 @@ function closeLeaf(leaf) {
 
 function disposeLeaf(leaf) {
   teardownGif(leaf);
+  teardownStill(leaf);
   detachTileAudioGraph(leaf);
   if (leaf.video) stopVideoElement(leaf.video);
   leaf.userPaused = true;
@@ -3798,6 +3978,10 @@ function loadState() {
   setGuide(!!settings.guideOn);
   if (settings.desktopPreview == null) settings.desktopPreview = true;
   if (btnPreview) btnPreview.classList.toggle('active', !!settings.desktopPreview);
+  settings.imageSeconds = clamp(Math.round(Number(settings.imageSeconds) || DEFAULT_IMAGE_SECONDS), 1, 600);
+  settings.gifLoops = gifLoopCount();
+  settings.videoLoops = videoLoopCount();
+  syncPlaybackSettingsInputs();
 
   render();
   applyDesktopPreview();
@@ -3935,6 +4119,54 @@ function setPresetsPanelOpen(open) {
 
 function togglePresetsPanel() {
   setPresetsPanelOpen(!isPresetsPanelOpen());
+  if (isPresetsPanelOpen()) setSettingsPanelOpen(false);
+}
+
+const settingsPanel = document.getElementById('settings-panel');
+const btnSettings = document.getElementById('btn-settings');
+const setImageSeconds = document.getElementById('set-image-seconds');
+const setGifLoops = document.getElementById('set-gif-loops');
+const setVideoLoops = document.getElementById('set-video-loops');
+
+function syncPlaybackSettingsInputs() {
+  if (setImageSeconds) setImageSeconds.value = String(settings.imageSeconds);
+  if (setGifLoops) setGifLoops.value = String(settings.gifLoops);
+  if (setVideoLoops) setVideoLoops.value = String(settings.videoLoops);
+}
+
+function setSettingsPanelOpen(open) {
+  if (!settingsPanel) return;
+  settingsPanel.hidden = !open;
+  settingsPanel.setAttribute('aria-hidden', open ? 'false' : 'true');
+  if (btnSettings) btnSettings.classList.toggle('active', open);
+  if (open) {
+    wake();
+    syncPlaybackSettingsInputs();
+    setPresetsPanelOpen(false);
+  }
+}
+
+function applyPlaybackSettingsFromInputs() {
+  settings.imageSeconds = clamp(Math.round(Number(setImageSeconds && setImageSeconds.value) || DEFAULT_IMAGE_SECONDS), 1, 600);
+  settings.gifLoops = clamp(Math.round(Number(setGifLoops && setGifLoops.value) || DEFAULT_MEDIA_LOOPS), 1, 99);
+  settings.videoLoops = clamp(Math.round(Number(setVideoLoops && setVideoLoops.value) || DEFAULT_MEDIA_LOOPS), 1, 99);
+  syncPlaybackSettingsInputs();
+  saveState();
+  forEachLeaf(root, (leaf) => {
+    if (leaf._stillActive) {
+      clearImageCycle(leaf);
+      paintStillChrome(leaf);
+      if (leafShouldPlay(leaf) && !leaf.loop) armImageCycle(leaf);
+    } else if (leaf._gifActive && !leaf.loop) {
+      const cur = leaf.files && leaf.files[leaf.index];
+      if (cur && isGifFile(cur) && leaf._gifLoopCount !== gifLoopCount()) {
+        void loadGifCurrent(leaf, cur, leafShouldPlay(leaf), { hardSwap: true, force: true });
+      } else {
+        clearGifCycle(leaf);
+        if (leafShouldPlay(leaf)) armGifCycle(leaf);
+      }
+    }
+  });
 }
 
 function renderPresetsList() {
@@ -4459,11 +4691,17 @@ function isTypingTarget(t) {
 }
 
 document.addEventListener('mousedown', (e) => {
-  if (!isPresetsPanelOpen()) return;
   const t = e.target;
-  if (presetsPanel && presetsPanel.contains(t)) return;
-  if (btnPresets && (btnPresets === t || btnPresets.contains(t))) return;
-  setPresetsPanelOpen(false);
+  if (isPresetsPanelOpen()) {
+    if (presetsPanel && presetsPanel.contains(t)) return;
+    if (btnPresets && (btnPresets === t || btnPresets.contains(t))) return;
+    setPresetsPanelOpen(false);
+  }
+  if (settingsPanel && !settingsPanel.hidden) {
+    if (settingsPanel.contains(t)) return;
+    if (btnSettings && (btnSettings === t || btnSettings.contains(t))) return;
+    setSettingsPanelOpen(false);
+  }
 });
 
 document.addEventListener('mousemove', onGlobalMouseMove);
@@ -4538,6 +4776,13 @@ btnTileDisplays.addEventListener('click', () => tileToDisplays());
 if (btnAssign) btnAssign.addEventListener('click', () => assignFolderToSelection());
 if (btnClearFolders) btnClearFolders.addEventListener('click', () => clearAllFolders());
 if (btnPresets) btnPresets.addEventListener('click', () => togglePresetsPanel());
+if (btnSettings) btnSettings.addEventListener('click', () => setSettingsPanelOpen(!(settingsPanel && !settingsPanel.hidden)));
+const btnSettingsClose = document.getElementById('btn-settings-close');
+if (btnSettingsClose) btnSettingsClose.addEventListener('click', () => setSettingsPanelOpen(false));
+for (const input of [setImageSeconds, setGifLoops, setVideoLoops]) {
+  if (!input) continue;
+  input.addEventListener('change', () => applyPlaybackSettingsFromInputs());
+}
 const btnPresetsClose = document.getElementById('btn-presets-close');
 if (btnPresetsClose) btnPresetsClose.addEventListener('click', () => setPresetsPanelOpen(false));
 if (btnPresetSave) btnPresetSave.addEventListener('click', () => saveCurrentPreset());
