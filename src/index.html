@@ -14,30 +14,71 @@
       <span class="brand">▦ Local Video Tiler</span>
     </div>
     <div class="bar-tools">
-      <button id="btn-edit" class="tool" title="Toggle edit mode (E)">Edit</button>
-      <button id="btn-grid" class="tool" title="Toggle alignment grid (G)">Grid</button>
-      <button id="btn-snap" class="tool" title="Toggle snap to grid (S)">Snap</button>
-      <label class="tool gridsize" title="Grid cell size">
-        <span>Cell</span>
-        <input id="grid-size" type="range" min="20" max="320" step="10" value="80" />
-        <span id="grid-size-val">80</span>
-      </label>
-      <span class="sep"></span>
-      <button id="btn-assign" class="tool" type="button" disabled title="Ctrl+click tiles to select, then assign a shared folder">📁 Folder</button>
-      <button id="btn-clear-folders" class="tool" type="button" title="Clear every tile’s folder assignment but keep the current layout splits (C)">Clear Folders</button>
-      <button id="btn-presets" class="tool" type="button" title="Save and load layout presets">Presets</button>
-      <button id="btn-settings" class="tool" type="button" title="Image time and how many times GIFs and videos play">Settings</button>
-      <button id="btn-preview" class="tool" type="button" title="Miniature multi-monitor layout for editing (V)">Preview</button>
-      <button id="btn-reset-display" class="tool" type="button" disabled title="Reset the focused tile's display to one empty tile (R)">Reset Display</button>
-      <button id="btn-reset" class="tool" title="Reset entire layout to a single tile">Reset All</button>
-      <span class="sep"></span>
-      <button id="btn-pause-all" class="tool" type="button" title="Pause or play every video (Shift+Space)">⏸ All</button>
-      <button id="btn-pause-display" class="tool" type="button" title="Pause or play videos on this display only">⏸ Display</button>
-      <span class="sep"></span>
-      <button id="btn-fs" class="tool" title="Fullscreen on current display (F)">Fullscreen</button>
-      <button id="btn-fs-all" class="tool" title="Span / fullscreen across ALL displays (A)">All Displays</button>
-      <button id="btn-guide" class="tool" title="Toggle the screen-split guide showing each display (D)">Guide</button>
-      <button id="btn-tile-displays" class="tool" title="Split the layout to match your displays (T)">Tile to Displays</button>
+      <div class="menu" data-menu="layout">
+        <button type="button" class="tool menu-toggle" aria-expanded="false" aria-haspopup="true">Layout</button>
+        <div class="menu-pop" hidden>
+          <p class="menu-label">Edit</p>
+          <button id="btn-edit" class="tool menu-item" title="Toggle edit mode (E)">Edit mode</button>
+          <button id="btn-preview" class="tool menu-item" type="button" title="Miniature multi-monitor layout for editing (V)">Desktop preview</button>
+          <p class="menu-label">Grid</p>
+          <button id="btn-grid" class="tool menu-item" title="Toggle alignment grid (G)">Alignment grid</button>
+          <button id="btn-snap" class="tool menu-item" title="Toggle snap to grid (S)">Snap to grid</button>
+          <label class="menu-field" title="Grid cell size">
+            <span>Cell size <span id="grid-size-val">80</span></span>
+            <input id="grid-size" type="range" min="20" max="320" step="10" value="80" />
+          </label>
+          <p class="menu-label">Reset</p>
+          <button id="btn-reset-display" class="tool menu-item" type="button" disabled title="Reset the focused tile's display to one empty tile (R)">Reset this display</button>
+          <button id="btn-reset" class="tool menu-item" title="Reset entire layout to a single tile">Reset all tiles</button>
+        </div>
+      </div>
+
+      <div class="menu" data-menu="media">
+        <button type="button" class="tool menu-toggle" aria-expanded="false" aria-haspopup="true">Media</button>
+        <div class="menu-pop" hidden>
+          <p class="menu-label">Folders</p>
+          <button id="btn-assign" class="tool menu-item" type="button" disabled title="Ctrl+click tiles to select, then assign a shared folder">Assign folder</button>
+          <button id="btn-clear-folders" class="tool menu-item" type="button" title="Clear every tile’s folder assignment but keep the current layout splits (C)">Clear folders</button>
+          <p class="menu-label">Saved layouts</p>
+          <button id="btn-presets" class="tool menu-item" type="button" title="Save and load layout presets">Presets…</button>
+        </div>
+      </div>
+
+      <div class="menu" data-menu="playback">
+        <button type="button" class="tool menu-toggle" aria-expanded="false" aria-haspopup="true">Playback</button>
+        <div class="menu-pop" hidden>
+          <p class="menu-label">Transport</p>
+          <button id="btn-pause-all" class="tool menu-item" type="button" title="Pause or play every video (Shift+Space)">Pause all</button>
+          <button id="btn-pause-display" class="tool menu-item" type="button" title="Pause or play videos on this display only">Pause this display</button>
+          <p class="menu-label">Timing</p>
+          <label class="menu-field">
+            <span>Image on screen</span>
+            <span class="menu-num"><input id="set-image-seconds" type="number" min="1" max="600" step="1" value="5" /> sec</span>
+          </label>
+          <label class="menu-field">
+            <span>GIF plays</span>
+            <input id="set-gif-loops" class="menu-num-input" type="number" min="1" max="99" step="1" value="1" />
+          </label>
+          <label class="menu-field">
+            <span>Video plays</span>
+            <input id="set-video-loops" class="menu-num-input" type="number" min="1" max="99" step="1" value="1" />
+          </label>
+          <p class="menu-note">1 plays once, then shuffle. A tile’s loop button still holds that file.</p>
+        </div>
+      </div>
+
+      <div class="menu" data-menu="displays">
+        <button type="button" class="tool menu-toggle" aria-expanded="false" aria-haspopup="true">Displays</button>
+        <div class="menu-pop" hidden>
+          <p class="menu-label">Fullscreen</p>
+          <button id="btn-fs" class="tool menu-item" title="Fullscreen on current display (F)">This display</button>
+          <button id="btn-fs-all" class="tool menu-item" title="Span / fullscreen across ALL displays (A)">All displays</button>
+          <p class="menu-label">Arrange</p>
+          <button id="btn-guide" class="tool menu-item" title="Toggle the screen-split guide showing each display (D)">Screen guide</button>
+          <button id="btn-tile-displays" class="tool menu-item" title="Split the layout to match your displays (T)">Tile to displays</button>
+        </div>
+      </div>
+
       <span id="display-pill" class="pill" title="Connected displays">1 display</span>
       <span class="sep"></span>
       <button id="btn-min" class="tool win" title="Minimize">—</button>
@@ -95,27 +136,6 @@
       <button type="button" id="btn-preset-save" class="tool">Save</button>
     </div>
     <ul id="presets-list" class="presets-list"></ul>
-  </div>
-
-  <div id="settings-panel" class="presets-panel" hidden aria-hidden="true">
-    <div class="presets-head">
-      <strong>Playback settings</strong>
-      <button type="button" id="btn-settings-close" class="presets-close" title="Close">✕</button>
-    </div>
-    <p class="presets-hint">These apply to every tile. A tile’s loop button still holds that one file until you turn it off.</p>
-    <label class="settings-row">
-      <span>How long an image stays on screen</span>
-      <span class="settings-val"><input id="set-image-seconds" type="number" min="1" max="600" step="1" value="5" /> sec</span>
-    </label>
-    <label class="settings-row">
-      <span>How many times a GIF loops</span>
-      <span class="settings-val"><input id="set-gif-loops" type="number" min="1" max="99" step="1" value="1" /></span>
-    </label>
-    <label class="settings-row">
-      <span>How many times a video loops</span>
-      <span class="settings-val"><input id="set-video-loops" type="number" min="1" max="99" step="1" value="1" /></span>
-    </label>
-    <p class="presets-hint">1 plays once, then shuffle picks another file in the folder (picture, GIF, or video).</p>
   </div>
 
   <script src="renderer.js"></script>

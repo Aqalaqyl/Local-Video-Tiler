@@ -57,9 +57,10 @@ picture you see.
   - **Per-tile loop** (🔁) — keep the current file on screen by repeating it.
     Loop is independent per tile, so one pane can hold on a clip while the others
     keep shuffling.
-  - **Settings** — how long a picture stays up (default **5 seconds**), and how
-    many times a GIF or video plays before shuffle (default **1**, then the next
-    random file). The tile loop button still overrides that and holds one file.
+  - **Menus** — the top bar groups controls into **Layout**, **Media**,
+    **Playback**, and **Displays**. Playback includes how long a picture stays
+    up (default **5 seconds**) and how many times a GIF or video plays before
+    shuffle (default **1**). The tile loop button still holds one file.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
   - **Fullscreen across ALL displays at once** (`A`) — each monitor gets its own
@@ -173,7 +174,7 @@ npm start
 | Reset one display’s tiles | **Reset Display** or `R` (needs 2+ monitors) |
 | Reset entire layout | **Reset All** |
 | Loop the current file (per tile) | The **🔁** button on the tile |
-| Image time, GIF loops, video loops | **Settings** |
+| Image time, GIF loops, video loops | **Playback** menu |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |
 | Adjust grid cell size | The **Cell** slider |
@@ -188,10 +189,10 @@ npm start
 
 Playback uses the Chromium media stack, so well-supported containers/codecs such
 as **MP4 (H.264/AAC)**, **WebM** and **Ogg** play reliably. **Animated GIFs**
-(`.gif`) play as many times as **Settings → GIF loops** (default once), then
+(`.gif`) play as many times as **Playback → GIF plays** (default once), then
 shuffle to another random file in the same folder. **Pictures** (`.jpg`, `.png`,
 `.webp`, `.bmp`, `.avif`) stay on screen for **5 seconds** by default
-(**Settings → image time**), then shuffle the same way. The tile’s loop button
+(**Playback → Image on screen**), then shuffle the same way. The tile’s loop button
 holds the current file. Other
 extensions (`.mkv`, `.avi`, `.mov`, `.wmv`, `.flv`, …) are listed and will play
 if the underlying codec is supported by your system's Chromium build.

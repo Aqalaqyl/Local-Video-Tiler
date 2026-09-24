@@ -4690,6 +4690,39 @@ function isTypingTarget(t) {
   return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
 }
 
+function closeMenus() {
+  document.querySelectorAll('.menu').forEach((menu) => {
+    menu.classList.remove('open');
+    const pop = menu.querySelector('.menu-pop');
+    const toggle = menu.querySelector('.menu-toggle');
+    if (pop) pop.hidden = true;
+    if (toggle) toggle.setAttribute('aria-expanded', 'false');
+  });
+}
+
+function toggleMenu(menu) {
+  const pop = menu && menu.querySelector('.menu-pop');
+  const toggle = menu && menu.querySelector('.menu-toggle');
+  if (!pop || !toggle) return;
+  const willOpen = pop.hidden;
+  closeMenus();
+  if (!willOpen) return;
+  menu.classList.add('open');
+  pop.hidden = false;
+  toggle.setAttribute('aria-expanded', 'true');
+  wake();
+}
+
+document.querySelectorAll('.menu-toggle').forEach((toggle) => {
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMenu(toggle.closest('.menu'));
+  });
+});
+document.querySelectorAll('.menu-item').forEach((item) => {
+  item.addEventListener('click', () => closeMenus());
+});
+
 document.addEventListener('mousedown', (e) => {
   const t = e.target;
   if (isPresetsPanelOpen()) {
@@ -4697,11 +4730,8 @@ document.addEventListener('mousedown', (e) => {
     if (btnPresets && (btnPresets === t || btnPresets.contains(t))) return;
     setPresetsPanelOpen(false);
   }
-  if (settingsPanel && !settingsPanel.hidden) {
-    if (settingsPanel.contains(t)) return;
-    if (btnSettings && (btnSettings === t || btnSettings.contains(t))) return;
-    setSettingsPanelOpen(false);
-  }
+  if (t && t.closest && t.closest('.menu')) return;
+  closeMenus();
 });
 
 document.addEventListener('mousemove', onGlobalMouseMove);
