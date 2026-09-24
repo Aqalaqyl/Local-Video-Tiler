@@ -198,6 +198,17 @@ body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.8)
   transform: translateZ(0);
   backface-visibility: hidden;
 }
+.tile-gif,
+.tile-gif-freeze {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  pointer-events: none;
+}
+.tile-gif-freeze { display: none; }
 
 .tile-empty {
   position: absolute;
