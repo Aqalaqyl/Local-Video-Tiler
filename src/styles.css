@@ -108,6 +108,69 @@ body.span-all .hintbox {
 .gridsize input[type="range"] { width: 90px; -webkit-app-region: no-drag; }
 #grid-size-val { width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
 
+.menu { position: relative; }
+.menu-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 90;
+  min-width: 240px;
+  max-height: min(70vh, 520px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  background: rgba(16, 17, 22, 0.98);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+}
+.menu-pop[hidden] { display: none !important; }
+.menu-label {
+  margin: 6px 4px 2px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.menu-pop .menu-label:first-child { margin-top: 2px; }
+.menu-item { text-align: left; width: 100%; }
+.menu-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  color: var(--text);
+  font-size: 12px;
+}
+.menu-field input[type="range"] { width: 110px; }
+.menu-num, .menu-num-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+.menu-num input, .menu-num-input {
+  width: 64px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 5px 6px;
+  font-size: 12px;
+}
+.menu-num input:focus, .menu-num-input:focus { outline: none; border-color: var(--accent); }
+.menu-note {
+  margin: 4px 4px 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.menu-toggle[aria-expanded="true"] { border-color: var(--accent); color: #fff; }
+
 .sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
 .pill {
   font-size: 11px;
