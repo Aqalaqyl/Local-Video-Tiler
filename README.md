@@ -54,9 +54,12 @@ picture you see.
     toolbar (favorited clips also keep a ★ badge in the corner). Shuffle picks
     favorites about **5× as often** as unmarked clips, and about **1 in 5**
     shuffles still force a non-favorite so you keep discovering new videos.
-  - **Per-tile loop** (🔁) — keep the current video on screen by repeating it.
+  - **Per-tile loop** (🔁) — keep the current file on screen by repeating it.
     Loop is independent per tile, so one pane can hold on a clip while the others
     keep shuffling.
+  - **Settings** — how long a picture stays up (default **5 seconds**), and how
+    many times a GIF or video plays before shuffle (default **1**, then the next
+    random file). The tile loop button still overrides that and holds one file.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
   - **Fullscreen across ALL displays at once** (`A`) — each monitor gets its own
@@ -169,7 +172,8 @@ npm start
 | Pause / play videos on this display | **⏸ Display** / **▶ Display** (also on secondary displays when spanning) |
 | Reset one display’s tiles | **Reset Display** or `R` (needs 2+ monitors) |
 | Reset entire layout | **Reset All** |
-| Loop the current video (per tile) | The **🔁** button on the tile |
+| Loop the current file (per tile) | The **🔁** button on the tile |
+| Image time, GIF loops, video loops | **Settings** |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |
 | Adjust grid cell size | The **Cell** slider |
@@ -184,8 +188,11 @@ npm start
 
 Playback uses the Chromium media stack, so well-supported containers/codecs such
 as **MP4 (H.264/AAC)**, **WebM** and **Ogg** play reliably. **Animated GIFs**
-(`.gif`) play **once** by default, then shuffle to another random file in the
-same folder (GIF or video). The tile’s loop button repeats a GIF. Other
+(`.gif`) play as many times as **Settings → GIF loops** (default once), then
+shuffle to another random file in the same folder. **Pictures** (`.jpg`, `.png`,
+`.webp`, `.bmp`, `.avif`) stay on screen for **5 seconds** by default
+(**Settings → image time**), then shuffle the same way. The tile’s loop button
+holds the current file. Other
 extensions (`.mkv`, `.avi`, `.mov`, `.wmv`, `.flv`, …) are listed and will play
 if the underlying codec is supported by your system's Chromium build.
 

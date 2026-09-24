@@ -26,6 +26,7 @@
       <button id="btn-assign" class="tool" type="button" disabled title="Ctrl+click tiles to select, then assign a shared folder">📁 Folder</button>
       <button id="btn-clear-folders" class="tool" type="button" title="Clear every tile’s folder assignment but keep the current layout splits (C)">Clear Folders</button>
       <button id="btn-presets" class="tool" type="button" title="Save and load layout presets">Presets</button>
+      <button id="btn-settings" class="tool" type="button" title="Image time and how many times GIFs and videos play">Settings</button>
       <button id="btn-preview" class="tool" type="button" title="Miniature multi-monitor layout for editing (V)">Preview</button>
       <button id="btn-reset-display" class="tool" type="button" disabled title="Reset the focused tile's display to one empty tile (R)">Reset Display</button>
       <button id="btn-reset" class="tool" title="Reset entire layout to a single tile">Reset All</button>
@@ -94,6 +95,27 @@
       <button type="button" id="btn-preset-save" class="tool">Save</button>
     </div>
     <ul id="presets-list" class="presets-list"></ul>
+  </div>
+
+  <div id="settings-panel" class="presets-panel" hidden aria-hidden="true">
+    <div class="presets-head">
+      <strong>Playback settings</strong>
+      <button type="button" id="btn-settings-close" class="presets-close" title="Close">✕</button>
+    </div>
+    <p class="presets-hint">These apply to every tile. A tile’s loop button still holds that one file until you turn it off.</p>
+    <label class="settings-row">
+      <span>How long an image stays on screen</span>
+      <span class="settings-val"><input id="set-image-seconds" type="number" min="1" max="600" step="1" value="5" /> sec</span>
+    </label>
+    <label class="settings-row">
+      <span>How many times a GIF loops</span>
+      <span class="settings-val"><input id="set-gif-loops" type="number" min="1" max="99" step="1" value="1" /></span>
+    </label>
+    <label class="settings-row">
+      <span>How many times a video loops</span>
+      <span class="settings-val"><input id="set-video-loops" type="number" min="1" max="99" step="1" value="1" /></span>
+    </label>
+    <p class="presets-hint">1 plays once, then shuffle picks another file in the folder (picture, GIF, or video).</p>
   </div>
 
   <script src="renderer.js"></script>
