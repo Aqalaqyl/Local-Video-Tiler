@@ -1833,7 +1833,9 @@ function broadcastLayout(opts = {}) {
     settings: snapshotSettings(),
     // Controller is the authority for which clip/time each tile is on.
     from: projection.role || (IS_MIRROR ? 'mirror' : 'controller'),
-    volumesOnly
+    volumesOnly,
+    // Leaf ids differ per window; selection is shared by tree path.
+    selectedPaths: selectedLeafPaths()
   };
   if (removedPaths && removedPaths.length) payload.removedPaths = removedPaths;
   const json = JSON.stringify(payload);
@@ -1898,7 +1900,12 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     // the folder the user just picked (or leave the tile empty).
     const remoteFolder = remoteNode.folder || null;
     const localFolder = localNode.folder || null;
-    if (remoteFolder !== localFolder && !localNode._assignLock && !localNode._pendingFolder) {
+    const remoteRev = remoteNode.folderRev || 0;
+    const localRev = localNode._folderRev || 0;
+    // A peer still showing the pre-assign layout must not wipe a newer folder,
+    // which happened when the pick was made on another fullscreen display.
+    if (remoteFolder !== localFolder && remoteRev >= localRev && !localNode._assignLock && !localNode._pendingFolder) {
+      localNode._folderRev = remoteRev;
       if (!remoteFolder) {
         clearLeafFolder(localNode);
         mediaDirty = true;
@@ -2042,7 +2049,8 @@ function applyIncomingLayout(payload) {
     settings: payload.settings,
     from: payload.from,
     volumesOnly: !!payload.volumesOnly,
-    removedPaths: payload.removedPaths || null
+    removedPaths: payload.removedPaths || null,
+    selectedPaths: payload.selectedPaths || null
   });
   if (json === lastSyncJSON) return;
   lastSyncJSON = json;
@@ -2064,6 +2072,7 @@ function applyIncomingLayout(payload) {
         applyIdentity: payload.from === 'controller',
         volumesOnly: !!payload.volumesOnly
       });
+      if (Array.isArray(payload.selectedPaths)) setSelectionFromPaths(payload.selectedPaths);
       return;
     }
 
@@ -2086,6 +2095,7 @@ function applyIncomingLayout(payload) {
         const spacer = node ? !!node.spacer : false;
         const leaf = takeLeaf(folder, spacer) || makeLeaf();
         leaf.folder = folder;
+        leaf._folderRev = node && node.folderRev ? node.folderRev : (leaf._folderRev || 0);
         leaf.loop = node ? !!node.loop : false;
         leaf.spacer = spacer;
         if (node) {
@@ -2108,8 +2118,9 @@ function applyIncomingLayout(payload) {
     for (const l of pool) { if (!used.has(l)) disposeLeaf(l); }
     root = newRoot;
     focusedLeaf = null;
-    selectedLeaves.clear();
     render();
+    if (Array.isArray(payload.selectedPaths)) setSelectionFromPaths(payload.selectedPaths);
+    else selectedLeaves.clear();
     // Start media for brand-new tiles; honor synced clip identity when present.
     forEachLeaf(root, (leaf) => {
       if (leaf.folder && leaf.files.length === 0) {
@@ -2315,6 +2326,56 @@ function makeSplit(direction, a, b, ratio) {
 }
 
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+/** Path from root to a leaf, e.g. "0.1". Empty string is the root leaf. */
+function leafPath(leaf) {
+  const parts = [];
+  let node = leaf;
+  let parent = findParent(root, node);
+  while (parent) {
+    parts.push(parent.children[0] === node ? '0' : '1');
+    node = parent;
+    parent = findParent(root, node);
+  }
+  parts.reverse();
+  return parts.join('.');
+}
+
+function leafByPath(path) {
+  if (path == null || path === '') return root && root.kind === 'leaf' ? root : null;
+  let node = root;
+  for (const part of String(path).split('.')) {
+    if (!node || node.kind !== 'split') return null;
+    node = node.children[part === '1' ? 1 : 0];
+  }
+  return node && node.kind === 'leaf' ? node : null;
+}
+
+function selectedLeafPaths() {
+  const paths = [];
+  for (const leaf of selectedLeaves) {
+    if (leaf && !leaf.spacer && leafStillInTree(leaf)) paths.push(leafPath(leaf));
+  }
+  return paths;
+}
+
+function setSelectionFromPaths(paths) {
+  selectedLeaves.clear();
+  focusedLeaf = null;
+  for (const p of paths || []) {
+    const leaf = leafByPath(p);
+    if (leaf && !leaf.spacer) {
+      selectedLeaves.add(leaf);
+      focusedLeaf = leaf;
+    }
+  }
+  applySelection();
+}
+
+function publishSelection() {
+  if (applyingRemote || !projection.active) return;
+  broadcastLayout();
+}
 
 function findParent(node, target, parent = null) {
   if (node === target) return parent;
@@ -2535,6 +2596,7 @@ function clearLeafFolder(leaf) {
   leaf.folder = null;
   leaf.files = [];
   leaf.index = 0;
+  leaf._folderRev = (leaf._folderRev || 0) + 1;
   leaf.savedIndex = 0;
   leaf.loop = false;
   leaf.userPaused = false;
@@ -2953,6 +3015,7 @@ async function loadFolder(leaf, folder, index = 0, autoplay = false) {
   leaf.folder = assigned;
   leaf.files = (res && res.files) || [];
   if (leaf._pendingFolder === requested) delete leaf._pendingFolder;
+  leaf._folderRev = (leaf._folderRev || 0) + 1;
   stampFolderFavorites(leaf.files);
   leaf.index = clamp(index, 0, Math.max(0, leaf.files.length - 1));
   loadCurrent(leaf, autoplay);
@@ -3806,6 +3869,7 @@ function setSelectionSingle(leaf) {
   selectedLeaves.add(leaf);
   focusedLeaf = leaf;
   applySelection();
+  publishSelection();
 }
 
 function toggleSelection(leaf) {
@@ -3813,11 +3877,13 @@ function toggleSelection(leaf) {
   else selectedLeaves.add(leaf);
   focusedLeaf = leaf;
   applySelection();
+  publishSelection();
 }
 
 function clearSelection() {
   selectedLeaves.clear();
   applySelection();
+  publishSelection();
 }
 
 function setFocus(leaf) {
@@ -3901,7 +3967,7 @@ function setCellSize(px) {
 // is voicing (independent shuffle across displays caused unattributable audio).
 function serializeTree(node, withIndex, withTime) {
   if (node.kind === 'leaf') {
-    const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop };
+    const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop, folderRev: node._folderRev || 0 };
     if (node.spacer) o.spacer = true;
     if (withIndex) o.index = node.index || 0;
     if (withTime && node.video && isFinite(node.video.currentTime)) {
@@ -3931,6 +3997,7 @@ function deserialize(obj) {
   if (obj.kind === 'leaf') {
     const l = obj.spacer ? makeSpacerLeaf() : makeLeaf();
     l.folder = obj.folder || null;
+    l._folderRev = obj.folderRev || 0;
     l.index = l.savedIndex = obj.index || 0;
     l.loop = !!obj.loop;
     l.volume = typeof obj.volume === 'number' ? clamp(obj.volume, 0, MAX_TILE_VOLUME) : 1;
