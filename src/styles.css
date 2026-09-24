@@ -256,10 +256,10 @@ body.editing .node-leaf:hover { box-shadow: inset 0 0 0 2px rgba(91,140,255,0.8)
   display: block;
   background: #000;
   object-fit: contain;
-  /* Promote every video plane to its own compositor layer so Chromium can use
-     hardware overlays / zero-copy when the GPU path is available. */
-  transform: translateZ(0);
-  backface-visibility: hidden;
+  /* Do not promote each <video> to its own layer. Chromium then assigns a
+     hardware overlay plane, and most GPUs only have one — extra tiles keep
+     their audio but the picture stays black. Hardware decode still runs;
+     frames are composited with the rest of the tile. */
 }
 .tile-gif,
 .tile-gif-freeze {

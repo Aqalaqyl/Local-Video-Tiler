@@ -2486,8 +2486,13 @@ function updateLeaf(leaf) {
   const hasFiles = leaf.files.length > 0;
   const emptyMsg = refs.empty.querySelector('div:nth-child(2)');
   const cur = hasFiles ? leaf.files[leaf.index] : null;
+  // A leftover GIF/picture layer sits on top of the <video> (and can hide it
+  // while audio keeps playing) after several tiles load different file types.
+  if (leaf._gifActive && !(cur && isGifFile(cur))) teardownGif(leaf);
+  if (leaf._stillActive && !(cur && isStillImage(cur))) teardownStill(leaf);
   const gifOn = !!(cur && isGifFile(cur) && leaf._gifActive);
   const stillOn = !!(cur && isStillImage(cur) && leaf._stillActive);
+  if (leaf._gifFreeze && !gifOn) leaf._gifFreeze.style.display = 'none';
   if (video) video.style.display = hasFiles && !gifOn && !stillOn ? 'block' : 'none';
   if (leaf.gif) leaf.gif.style.display = (gifOn || stillOn) ? 'block' : 'none';
   if (gifOn) paintGifChrome(leaf);
