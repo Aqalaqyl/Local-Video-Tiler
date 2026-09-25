@@ -49,8 +49,10 @@ picture you see.
   - **Clear Folders** (`C`) — unlink every tile from its media folder while
     keeping the current layout splits, so you can re-assign folders without
     rebuilding the grid.
-  - **Tile-sized bitrate** — each video is scaled to the pixels its tile actually
-    shows, so a small pane does not decode a full-size file. Favorites keep a
+  - **Tile-sized bitrate** — a scaled copy is built in the background for the
+    pixels a tile actually shows. The clip you are watching keeps playing the
+    original file until that copy is finished, so a stall never starts the video
+    over. The next play of that clip uses the smaller file. Favorites keep a
     higher bitrate (about **2.5×**) and a larger frame than other clips in the
     same size of tile. This needs `ffmpeg` on your PATH; without it, files play
     at their original size.
