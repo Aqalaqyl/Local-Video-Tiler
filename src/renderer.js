@@ -1377,10 +1377,10 @@ function auditLeafPlayback(leaf) {
   }
 
   // Under heavy multi-tile load, or while the user is adjusting volume, skip
-  // seek-style repairs — they make other tiles visibly jump.
+  // seek-style repairs — a seek resets the decoder and makes the stall worse.
   const playingCount = countPlayingLeaves();
   const volumeBusy = performance.now() < volumeAdjustUntil;
-  if (volumeBusy || (playingCount >= 4 && document.body.classList.contains('idle'))) {
+  if (volumeBusy || playingCount >= 4) {
     resetLeafSyncClock(leaf);
     return;
   }
