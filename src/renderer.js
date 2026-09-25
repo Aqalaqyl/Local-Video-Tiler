@@ -118,10 +118,9 @@ let winState = {
 };
 
 // ---------------------------------------------------------- Projection / wall
-// Spanning all displays puts a real fullscreen window on every monitor. Those
-// windows load this same page and share one renderer, so the wall is still one
-// program. Each window shows its own slice of the canvas (the union of the
-// displays). The primary window keeps the controls.
+// Spanning all displays is one window — one GPU surface — stretched over the
+// whole desktop in fullscreen. The canvas is the union of the monitors, so
+// each screen shows the slice of that window that lands on it.
 const projection = {
   active: false,
   role: 'controller',

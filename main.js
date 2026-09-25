@@ -71,9 +71,8 @@ let mainWindow = null;
 let savedBounds = null;
 let spanningAllDisplays = false;
 
-// While spanning, every NON-primary display gets its own fullscreen "mirror"
-// window showing that display's slice of the global canvas. The primary display
-// is covered by the main window (which keeps the controls).
+// Left empty. Spanning uses the main window only so the GPU has one surface.
+// closeProjectionWindows still clears this if an older session created any.
 /** @type {BrowserWindow[]} */
 let projectionWindows = [];
 
@@ -182,50 +181,6 @@ function sharedWebPreferences() {
   };
 }
 
-/**
- * Fullscreen mirror pinned to one display. Same site as the main window, so
- * Chromium keeps it in that renderer (`process-per-site`) instead of starting
- * another program for the screen.
- */
-function createProjectionWindow(display, union) {
-  const b = display.bounds;
-  const win = new BrowserWindow({
-    x: b.x,
-    y: b.y,
-    width: b.width,
-    height: b.height,
-    frame: false,
-    show: false,
-    backgroundColor: '#000000',
-    enableLargerThanScreen: true,
-    skipTaskbar: true,
-    title: 'Local Video Tiler',
-    webPreferences: sharedWebPreferences()
-  });
-  win.removeMenu();
-  try { win.webContents.setBackgroundThrottling(false); } catch (_) { /* ignore */ }
-  win.loadFile(path.join(__dirname, 'src', 'index.html'), {
-    query: {
-      role: 'mirror',
-      vx: String(b.x), vy: String(b.y), vw: String(b.width), vh: String(b.height),
-      ux: String(union.x), uy: String(union.y), uw: String(union.width), uh: String(union.height)
-    }
-  });
-  win.once('ready-to-show', () => {
-    if (win.isDestroyed()) return;
-    win.show();
-    win.setBounds(b);
-    win.setAlwaysOnTop(true, 'screen-saver');
-    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    setWindowFullscreen(win, true);
-    setTimeout(() => syncProjectionViewport(win, 'mirror', union, null, b), 80);
-  });
-  win.on('closed', () => {
-    projectionWindows = projectionWindows.filter((w) => w !== win);
-  });
-  return win;
-}
-
 function closeProjectionWindows() {
   for (const w of projectionWindows.slice()) {
     try { if (!w.isDestroyed()) w.destroy(); } catch (_) { /* ignore */ }
@@ -244,6 +199,8 @@ function spanAllDisplays() {
   const primary = screen.getPrimaryDisplay();
   const union = getAllDisplaysBounds();
   spanningAllDisplays = true;
+  // One OS window is one GPU surface. Extra fullscreen windows made the other
+  // screens separate programs and the GPU only fed the focused one.
   closeProjectionWindows();
 
   mainWindow.setMenuBarVisibility(false);
@@ -252,36 +209,38 @@ function spanAllDisplays() {
   try { mainWindow.webContents.setBackgroundThrottling(false); } catch (_) { /* ignore */ }
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
 
-  // Real OS fullscreen on the primary display, and the same on every other
-  // display. The mirror windows share this renderer so they stay one program.
-  mainWindow.setBounds(primary.bounds);
-  setWindowFullscreen(mainWindow, true);
+  // A single display uses OS fullscreen. Several displays use one borderless
+  // window over the whole desktop, covering every monitor's full bounds
+  // (including the taskbar) so each screen is fullscreen inside that window.
+  const multi = displays.length >= 2;
+  const view = multi ? union : primary.bounds;
+  mainWindow.setBounds(view);
+  if (!multi) setWindowFullscreen(mainWindow, true);
+
   sendProjection(mainWindow, {
     active: true,
     role: 'controller',
-    viewport: primary.bounds,
+    viewport: view,
     union,
     displayCount: displays.length
   });
-  setTimeout(() => syncProjectionViewport(mainWindow, 'controller', union, displays.length, primary.bounds), 80);
-
-  for (const d of displays) {
-    if (d.id === primary.id) continue;
-    projectionWindows.push(createProjectionWindow(d, union));
-  }
+  setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || !spanningAllDisplays) return;
+    const list = screen.getAllDisplays();
+    const again = list.length >= 2 ? getAllDisplaysBounds() : screen.getPrimaryDisplay().bounds;
+    if (list.length >= 2) {
+      if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
+      mainWindow.setBounds(again);
+      mainWindow.setAlwaysOnTop(true, 'screen-saver');
+    }
+    syncProjectionViewport(mainWindow, 'controller', getAllDisplaysBounds(), list.length, again);
+    sendWindowState();
+  }, 80);
 
   mainWindow.moveTop();
   mainWindow.focus();
   sendWindowState();
-
-  const refocusController = () => {
-    if (!mainWindow || mainWindow.isDestroyed() || !spanningAllDisplays) return;
-    mainWindow.moveTop();
-    mainWindow.focus();
-    try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
-  };
-  setTimeout(refocusController, 300);
-  setTimeout(refocusController, 900);
+  try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
 }
 
 function restoreFromSpan() {
