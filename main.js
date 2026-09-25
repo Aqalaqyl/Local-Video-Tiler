@@ -206,10 +206,9 @@ function spanAllDisplays() {
   try { mainWindow.webContents.setBackgroundThrottling(false); } catch (_) { /* ignore */ }
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
 
-  // One display: real fullscreen covers that screen's taskbar.
-  // Several displays: one borderless window over the whole desktop. A separate
-  // fullscreen window per monitor was a separate renderer, so the OS put GPU
-  // time into whichever screen had focus and the others lagged.
+  // One display uses real fullscreen so it covers that screen's taskbar.
+  // Several displays use one borderless window over the whole desktop so every
+  // tile shares this process and its GPU budget.
   const view = displays.length < 2 ? primary.bounds : union;
   mainWindow.setBounds(view);
   if (displays.length < 2) setWindowFullscreen(mainWindow, true);
