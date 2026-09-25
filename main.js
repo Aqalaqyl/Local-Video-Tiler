@@ -32,7 +32,11 @@ function configureHardwareAcceleration() {
     features.push('PlatformHEVCDecoderSupport');
   }
   app.commandLine.appendSwitch('enable-features', features.join(','));
-  // Avoid Windows occlusion heuristics throttling background decoder windows.
+  // One window covers every display. These keep Chromium from parking that
+  // window (or any slice of it) as a background app and starving decode.
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('disable-background-timer-throttling');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
   if (process.platform === 'win32') {
     app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
   }
@@ -108,7 +112,7 @@ function createWindow() {
       sandbox: false,
       // Allow file:// media to load from the file:// page.
       webSecurity: true,
-      // Keep decoding/compositing alive when the window isn't focused (multi-tile).
+      // Keep decoding/compositing alive across every display this window covers.
       backgroundThrottling: false,
       // Let assigned folders start playing on launch without a user gesture.
       autoplayPolicy: 'no-user-gesture-required'
@@ -116,6 +120,7 @@ function createWindow() {
   });
 
   mainWindow.removeMenu();
+  mainWindow.webContents.setBackgroundThrottling(false);
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
@@ -174,58 +179,6 @@ function getAllDisplaysBounds() {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-/**
- * Create a frameless, fullscreen "mirror" window pinned to one display. It loads
- * the same UI in `role=mirror`, told its viewport (the display) and the union of
- * all displays, so it renders just that display's slice of the global canvas.
- */
-function createProjectionWindow(display, union) {
-  const b = display.bounds;
-  const win = new BrowserWindow({
-    x: b.x,
-    y: b.y,
-    width: b.width,
-    height: b.height,
-    frame: false,
-    show: false,
-    backgroundColor: '#000000',
-    enableLargerThanScreen: true,
-    skipTaskbar: true,
-    title: 'Local Video Tiler',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      webSecurity: true,
-      backgroundThrottling: false,
-      autoplayPolicy: 'no-user-gesture-required'
-    }
-  });
-  win.removeMenu();
-  win.loadFile(path.join(__dirname, 'src', 'index.html'), {
-    query: {
-      role: 'mirror',
-      vx: String(b.x), vy: String(b.y), vw: String(b.width), vh: String(b.height),
-      ux: String(union.x), uy: String(union.y), uw: String(union.width), uh: String(union.height)
-    }
-  });
-  win.once('ready-to-show', () => {
-    if (win.isDestroyed()) return;
-    win.show();
-    win.setBounds(b);
-    win.setAlwaysOnTop(true, 'screen-saver');
-    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    setWindowFullscreen(win, true);
-    // Re-sync after fullscreen using display.bounds (global coords), not getBounds().
-    setTimeout(() => syncProjectionViewport(win, 'mirror', union, null, b), 80);
-  });
-  win.on('closed', () => {
-    projectionWindows = projectionWindows.filter((w) => w !== win);
-  });
-  return win;
-}
-
 function closeProjectionWindows() {
   for (const w of projectionWindows.slice()) {
     try { if (!w.isDestroyed()) w.destroy(); } catch (_) { /* ignore */ }
@@ -244,47 +197,41 @@ function spanAllDisplays() {
   const primary = screen.getPrimaryDisplay();
   const union = getAllDisplaysBounds();
   spanningAllDisplays = true;
+  // Drop any leftover per-display windows so decode stays in this one process.
+  closeProjectionWindows();
 
-  // The main window becomes the controller, fullscreen on the PRIMARY display.
-  // Real OS fullscreen reliably covers the taskbar / dock / menu bar — that's
-  // what gives a genuinely immersive surface on each individual screen.
   mainWindow.setMenuBarVisibility(false);
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  try { mainWindow.webContents.setBackgroundThrottling(false); } catch (_) { /* ignore */ }
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
-  mainWindow.setBounds(primary.bounds);
-  setWindowFullscreen(mainWindow, true);
+
+  // One display uses real fullscreen so it covers that screen's taskbar.
+  // Several displays use one borderless window over the whole desktop so every
+  // tile shares this process and its GPU budget.
+  const view = displays.length < 2 ? primary.bounds : union;
+  mainWindow.setBounds(view);
+  if (displays.length < 2) setWindowFullscreen(mainWindow, true);
+
   sendProjection(mainWindow, {
     active: true,
     role: 'controller',
-    viewport: primary.bounds,
+    viewport: view,
     union,
     displayCount: displays.length
   });
-  // Re-sync after fullscreen using display.bounds (global coords), not getBounds().
-  setTimeout(() => syncProjectionViewport(mainWindow, 'controller', union, displays.length, primary.bounds), 80);
-
-  // Every other display gets its own fullscreen mirror window.
-  closeProjectionWindows();
-  for (const d of displays) {
-    if (d.id === primary.id) continue;
-    projectionWindows.push(createProjectionWindow(d, union));
-  }
+  setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || !spanningAllDisplays) return;
+    const again = screen.getAllDisplays().length < 2 ? screen.getPrimaryDisplay().bounds : getAllDisplaysBounds();
+    if (screen.getAllDisplays().length >= 2) mainWindow.setBounds(again);
+    syncProjectionViewport(mainWindow, 'controller', getAllDisplaysBounds(), screen.getAllDisplays().length, again);
+    sendWindowState();
+  }, 80);
 
   mainWindow.moveTop();
   mainWindow.focus();
   sendWindowState();
-
-  // Mirror windows steal focus; keep the controller focused and nudge audio resume.
-  const refocusController = () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    mainWindow.moveTop();
-    mainWindow.focus();
-    try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
-  };
-  setTimeout(refocusController, 300);
-  setTimeout(refocusController, 900);
-  setTimeout(refocusController, 1800);
+  try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
 }
 
 function restoreFromSpan() {

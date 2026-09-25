@@ -118,12 +118,9 @@ let winState = {
 };
 
 // ---------------------------------------------------------- Projection / wall
-// When spanning all displays, each monitor is covered by its own fullscreen
-// window. EVERY window is a full peer editor: it renders its display's slice of
-// the shared canvas, shows the grid + split preview, and lets you split / resize
-// / delete tiles right on that screen. Edits are broadcast so every display (and
-// the persisted layout on the controller) stays in sync. The whole canvas is
-// sized to the union of all displays and each window is shifted to show its slice.
+// Spanning all displays is one window stretched over the whole desktop, so every
+// tile shares a single renderer and GPU budget. The canvas is the union of the
+// monitors. Older mirror windows (one process per screen) are no longer opened.
 const projection = {
   active: false,
   role: 'controller',
@@ -336,8 +333,14 @@ function unionBoundsFromWinDisplays() {
 function getLeafUnionRect(leaf) {
   if (!leaf.el) return null;
   const r = leaf.el.getBoundingClientRect();
-  if (projection.active && projection.union) {
-    return { x: r.left + projOffX(), y: r.top + projOffY(), w: r.width, h: r.height };
+  if (projection.active && projection.viewport) {
+    // Window-local origin is the viewport's top-left in global desktop coordinates.
+    return {
+      x: r.left + projection.viewport.x,
+      y: r.top + projection.viewport.y,
+      w: r.width,
+      h: r.height
+    };
   }
   const stageR = stage.getBoundingClientRect();
   const u = unionBoundsFromWinDisplays();
