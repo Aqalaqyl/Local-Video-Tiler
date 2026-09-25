@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 const { app, protocol } = require('electron');
 const { planQuality } = require('./quality');
+const { deprioritizeProcess } = require('./playback-priority');
 
 /** Live encodes at once. Further tiles keep the original file until a slot frees. */
 const MAX_ENCODERS = 3;
@@ -36,6 +37,7 @@ function run(cmd, args, timeoutMs) {
     let err = '';
     let settled = false;
     const child = spawn(cmd, args, { windowsHide: true });
+    deprioritizeProcess(child.pid);
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -165,7 +167,10 @@ function ffmpegArgs(filePath, plan, start) {
     'scale=trunc(iw/2)*2:trunc(ih/2)*2';
   const args = ['-hide_banner', '-loglevel', 'error'];
   if (ss > 0.05) args.push('-ss', ss.toFixed(3));
+  // Software decode here. A hardware session spent on the proxy is one the
+  // on-screen videos cannot use.
   args.push(
+    '-hwaccel', 'none',
     '-i', filePath,
     '-vf', scale,
     '-c:v', 'libx264',
@@ -242,6 +247,7 @@ function streamEncode(job, req, res) {
   const args = ffmpegArgs(job.filePath, job.plan, job.start);
   args.push('pipe:1');
   const child = spawn('ffmpeg', args, { windowsHide: true });
+  deprioritizeProcess(child.pid);
   let released = false;
   let finished = false;
   let aborted = false;

@@ -1,11 +1,12 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, screen, protocol } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen, protocol, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const url = require('url');
 const { startQualityServer, resolveQuality } = require('./quality-server');
 const { showWindowsTaskbars, showWindowsTaskbarsSync } = require('./taskbar-win');
+const { raisePlaybackPriority } = require('./playback-priority');
 
 /**
  * Prefer GPU compositing + hardware video decode. Chromium falls back to
@@ -30,22 +31,32 @@ function configureHardwareAcceleration() {
   if (process.platform === 'linux') {
     features.push('VaapiVideoDecoder', 'VaapiVideoEncoder', 'VaapiIgnoreDriverChecks');
   } else if (process.platform === 'win32') {
-    features.push('PlatformHEVCDecoderSupport');
+    // D3D11 is the path that keeps decode and compositing on the same GPU.
+    features.push('PlatformHEVCDecoderSupport', 'D3D11VideoDecoder');
+    app.commandLine.appendSwitch('use-angle', 'd3d11');
+    app.commandLine.appendSwitch('enable-gpu-memory-buffer-video-frames');
   }
   app.commandLine.appendSwitch('enable-features', features.join(','));
-  // Every display's fullscreen window loads the same page. Keep them in one
-  // renderer so the GPU budget covers the whole wall, and don't park a
-  // display that doesn't have the pointer.
-  app.commandLine.appendSwitch('process-per-site');
+  // Each display gets its own renderer so its videos decode in parallel.
+  // The GPU process is still shared, and playback-priority.js raises it.
+  // These flags stop Windows from parking a screen that doesn't have the pointer.
   app.commandLine.appendSwitch('disable-renderer-backgrounding');
   app.commandLine.appendSwitch('disable-background-timer-throttling');
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
   if (process.platform === 'win32') {
-    app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+    app.commandLine.appendSwitch(
+      'disable-features',
+      'CalculateNativeWinOcclusion,UseEcoQoSForBackgroundProcess'
+    );
   }
 }
 
 configureHardwareAcceleration();
+// Raise the browser process before Chromium starts the GPU process.
+raisePlaybackPriority();
+app.on('browser-window-created', () => {
+  setTimeout(raisePlaybackPriority, 200);
+});
 
 // Scaled playback is served as lvtq:// so file:// pages can load it.
 protocol.registerSchemesAsPrivileged([{
@@ -73,8 +84,9 @@ let savedBounds = null;
 let spanningAllDisplays = false;
 
 // One borderless fullscreen window per monitor. Windows only covers the taskbar
-// and fills a screen when that window matches that one monitor. The windows
-// share a renderer (process-per-site) and the extras are hidden from the taskbar.
+// and fills a screen when that window matches that one monitor. Each window has
+// its own renderer so its videos decode in parallel; the GPU process is shared
+// and raised to high priority. Extra windows stay off the taskbar.
 /** @type {BrowserWindow[]} */
 let projectionWindows = [];
 let mirrorDisplayKey = '';
@@ -493,6 +505,10 @@ ipcMain.on('projection:requestLayout', () => {
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(() => {
+  // Keep the CPU/GPU clocks up for the whole session. A video wall is not idle.
+  try { powerSaveBlocker.start('prevent-app-suspension'); } catch (_) { /* ignore */ }
+  raisePlaybackPriority();
+  setTimeout(raisePlaybackPriority, 800);
   // Log GPU / video-decode status once; Chromium already chose GPU or CPU.
   try {
     const status = app.getGPUFeatureStatus();

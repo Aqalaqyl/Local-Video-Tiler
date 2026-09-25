@@ -7,7 +7,9 @@ media, and let everything play side by side.
 
 Built with [Electron](https://www.electronjs.org/) — everything runs locally,
 nothing is uploaded anywhere. Playback prefers **GPU** compositing and hardware
-video decode when available, and falls back to the **CPU** automatically. When
+video decode when available, and falls back to the **CPU** automatically. On
+Windows the GPU and each display's renderer run at high priority, with power
+throttling off, so every screen keeps full decode rate. When
 spanning all displays, the primary window is the audio authority and keeps every
 other screen on the **same clip and timeline**, so sound always matches the
 picture you see.
@@ -71,8 +73,8 @@ picture you see.
   - **Fullscreen across ALL displays at once** (`A`) — each monitor gets its
     own borderless fullscreen window, exactly the size of that screen, so the
     taskbar is covered on the main display and every other display is filled
-    edge to edge. The windows share one renderer and the extra screens do not
-    add taskbar buttons. A tile
+    edge to edge. Each screen decodes its own videos, they share one GPU process
+    at high priority, and the extra screens do not add taskbar buttons. A tile
     (or a "Tile to Displays" layout) fills the display it belongs to.
     - Your **primary** display keeps the top control bar.
     - Move the cursor to any screen and split / resize / delete tiles there.
