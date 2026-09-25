@@ -122,12 +122,20 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     closeProjectionWindows();
+    spanningAllDisplays = false;
+    stopAboveTaskbar();
     showWindowsTaskbarsSync();
     mainWindow = null;
   });
 
   // Keep the renderer informed about fullscreen state for UI affordances.
   const emitState = () => sendWindowState();
+  mainWindow.on('blur', () => {
+    if (spanningAllDisplays) assertAboveTaskbar(mainWindow);
+  });
+  mainWindow.on('show', () => {
+    if (spanningAllDisplays) assertAboveTaskbar(mainWindow);
+  });
   mainWindow.on('enter-full-screen', emitState);
   mainWindow.on('leave-full-screen', () => {
     emitState();
@@ -198,11 +206,23 @@ function closeProjectionWindows() {
   projectionWindows = [];
 }
 
-/**
- * Size the one span window to every monitor's full bounds, taskbar included.
- * Windows otherwise clamps a normal window to the work area, which leaves the
- * taskbar visible and clips the bottom of the canvas.
- */
+/** Virtual-screen rectangle in physical pixels (SetWindowPos's coordinate space). */
+function physicalUnion(win) {
+  const union = getAllDisplaysBounds();
+  try {
+    const target = win && !win.isDestroyed() ? win : null;
+    const phys = screen.dipToScreenRect(target, union);
+    if (phys && phys.width > 0 && phys.height > 0) return phys;
+  } catch (_) { /* fall back to DIP */ }
+  return union;
+}
+
+function raiseSpanWindow(win, level) {
+  try { win.setAlwaysOnTop(true, level || 'screen-saver', 1); }
+  catch (_) { try { win.setAlwaysOnTop(true); } catch (_) { /* ignore */ } }
+  try { win.moveTop(); } catch (_) { /* ignore */ }
+}
+
 function placeSpanWindow(win) {
   if (!win || win.isDestroyed() || !spanningAllDisplays) return null;
   const displays = screen.getAllDisplays();
@@ -213,12 +233,13 @@ function placeSpanWindow(win) {
 
   if (win.isMaximized()) win.unmaximize();
   win.setMenuBarVisibility(false);
-  win.setAlwaysOnTop(true, 'screen-saver');
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch (_) { /* ignore */ }
+  raiseSpanWindow(win, 'screen-saver');
 
   if (!multi) {
     try { win.setContentBounds(view); } catch (_) { win.setBounds(view); }
     setWindowFullscreen(win, true);
+    if (process.platform === 'win32') pinOverTaskbar(win, null, true);
     return view;
   }
 
@@ -226,7 +247,7 @@ function placeSpanWindow(win) {
   // taskbar. Leave fullscreen and pin this one window to the virtual screen.
   if (isWindowFullscreen(win)) setWindowFullscreen(win, false);
   if (process.platform === 'win32') {
-    pinOverTaskbar(win);
+    pinOverTaskbar(win, physicalUnion(win), true);
     return view;
   }
   try { win.setContentBounds(view); } catch (_) { win.setBounds(view); }
@@ -235,6 +256,29 @@ function placeSpanWindow(win) {
 }
 
 let spanPinTimer = null;
+let aboveTaskbarTimer = null;
+
+function assertAboveTaskbar(win) {
+  if (!spanningAllDisplays || !win || win.isDestroyed()) return;
+  raiseSpanWindow(win, 'screen-saver');
+  if (process.platform !== 'win32') return;
+  const multi = screen.getAllDisplays().length >= 2;
+  // Repeating ticks must not activate, or they close menus mid-click.
+  pinOverTaskbar(win, multi ? physicalUnion(win) : null, false);
+}
+
+function startAboveTaskbar(win) {
+  clearInterval(aboveTaskbarTimer);
+  assertAboveTaskbar(win);
+  // The shell puts the taskbar back on top unless this window keeps priority.
+  aboveTaskbarTimer = setInterval(() => assertAboveTaskbar(win), 200);
+}
+
+function stopAboveTaskbar() {
+  clearInterval(aboveTaskbarTimer);
+  aboveTaskbarTimer = null;
+}
+
 function scheduleSpanPin(win) {
   clearTimeout(spanPinTimer);
   const run = () => {
@@ -270,6 +314,7 @@ function spanAllDisplays() {
   // monitor's taskbar, then pin this single window to the full virtual screen.
   if (process.platform === 'win32' && displays.length >= 2) hideWindowsTaskbars();
   scheduleSpanPin(mainWindow);
+  startAboveTaskbar(mainWindow);
   sendProjection(mainWindow, {
     active: true,
     role: 'controller',
@@ -287,6 +332,7 @@ function restoreFromSpan() {
   if (!mainWindow) return;
   clearTimeout(spanPinTimer);
   spanningAllDisplays = false;
+  stopAboveTaskbar();
   showWindowsTaskbars();
   closeProjectionWindows();
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
@@ -483,6 +529,8 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => {
+  spanningAllDisplays = false;
+  stopAboveTaskbar();
   showWindowsTaskbarsSync();
 });
 
