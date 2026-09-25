@@ -149,22 +149,28 @@ function eachTaskbar(fn) {
   u.EnumWindows(secondaryEnum, 0);
 }
 
-function appBarBuffer(lParam) {
+function appBarBuffer(hwnd, lParam) {
   const buf = Buffer.alloc(APPBAR_BYTES);
   buf.writeUInt32LE(APPBAR_BYTES, 0);
+  const handle = typeof hwnd === 'bigint' ? hwnd : BigInt(hwnd || 0);
+  buf.writeBigUInt64LE(handle, 8);
   buf.writeBigInt64LE(BigInt(Number(lParam) || 0), 40);
   return buf;
 }
 
-function pushTaskbarAutohide() {
+function pushTaskbarAutohide(hwnd) {
   const sh = shell32();
-  if (!sh || savedAppBar != null) return;
+  if (!sh) return;
   try {
-    const probe = Buffer.alloc(APPBAR_BYTES);
-    probe.writeUInt32LE(APPBAR_BYTES, 0);
-    const state = Number(sh.SHAppBarMessage(ABM_GETSTATE, probe));
-    savedAppBar = state & (ABS_AUTOHIDE | ABS_ALWAYSONTOP);
-    sh.SHAppBarMessage(ABM_SETSTATE, appBarBuffer(ABS_AUTOHIDE));
+    if (savedAppBar == null) {
+      const probe = Buffer.alloc(APPBAR_BYTES);
+      probe.writeUInt32LE(APPBAR_BYTES, 0);
+      const state = Number(sh.SHAppBarMessage(ABM_GETSTATE, probe));
+      savedAppBar = Number.isFinite(state) ? (state & (ABS_AUTOHIDE | ABS_ALWAYSONTOP)) : ABS_ALWAYSONTOP;
+    }
+    // Re-apply every pin. The shell turns autohide back off and the work area
+    // shrinks to the top of the taskbar, which is the cutoff on every screen.
+    sh.SHAppBarMessage(ABM_SETSTATE, appBarBuffer(hwnd || 0, ABS_AUTOHIDE));
   } catch (err) {
     console.error('[Local Video Tiler] taskbar autohide', err && err.message ? err.message : err);
   }
@@ -177,7 +183,7 @@ function popTaskbarAutohide() {
   savedAppBar = null;
   if (!sh) return;
   try {
-    sh.SHAppBarMessage(ABM_SETSTATE, appBarBuffer(previous));
+    sh.SHAppBarMessage(ABM_SETSTATE, appBarBuffer(0, previous));
   } catch (err) {
     console.error('[Local Video Tiler] taskbar restore', err && err.message ? err.message : err);
   }
@@ -421,7 +427,7 @@ function pinOverTaskbar(win, screenRect, activate) {
     // Style changes and autohide are for the multi-monitor wall. A single
     // display already uses OS fullscreen, and rewriting its style drops that.
     if (screenRect) {
-      pushTaskbarAutohide();
+      pushTaskbarAutohide(hwnd);
       try { forceTopmostPopup(u, hwnd); } catch (err) {
         console.error('[Local Video Tiler] span style', err && err.message ? err.message : err);
       }
