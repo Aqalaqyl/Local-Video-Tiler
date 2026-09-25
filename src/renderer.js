@@ -593,6 +593,7 @@ async function applyQualitySrc(leaf, file, opts) {
   rememberQuality(leaf, file, q, start);
   try { video.muted = true; } catch (_) { /* ignore */ }
   video.loop = !!leaf.loop && leaf._qualitySeekable !== false;
+  leaf._suspendEnded = true;
   video.src = q.url;
   video.load();
   if (leaf._qualitySeekable !== false && start > 0.05) {
@@ -1107,7 +1108,7 @@ function reconcileProjectionPlayback() {
     if (!media) return;
 
     if (projection.role === 'controller') {
-      if (cur && !playingFileMatches(leaf, cur, media) && !leaf._holdSilence) {
+      if (cur && !leaf._holdSilence && !videoSourceUrl(media) && !leaf._gifActive && !leaf._stillActive) {
         loadCurrent(leaf, shouldPlay, { force: true });
       } else {
         applyPlaybackIntent(leaf);
@@ -1125,7 +1126,7 @@ function reconcileProjectionPlayback() {
       return;
     }
 
-    if (cur && !playingFileMatches(leaf, cur, media) && !leaf._holdSilence) {
+    if (cur && !leaf._holdSilence && !videoSourceUrl(media) && !leaf._gifActive && !leaf._stillActive) {
       loadCurrent(leaf, shouldPlay);
     } else {
       applyPlaybackIntent(leaf);
@@ -1209,29 +1210,9 @@ function configureVideoElement(video) {
   try { video.disableRemotePlayback = true; } catch (_) { /* ignore */ }
 }
 
-function armVideoFrameWatch(leaf) {
-  const video = leaf && leaf.video;
-  if (!video || typeof video.requestVideoFrameCallback !== 'function') return;
-  // Skip frame watches for tiles this window is not showing — saves main-thread work.
-  if (!isLeafVisible(leaf) && leaf !== focusedLeaf) return;
-  if (leaf._frameWatchArmed) return;
-  leaf._frameWatchArmed = true;
-  const tick = (_now, meta) => {
-    if (!leaf.video || leaf.video !== video) {
-      leaf._frameWatchArmed = false;
-      return;
-    }
-    leaf._lastFrameWall = performance.now();
-    leaf._lastFrameMedia = meta && typeof meta.mediaTime === 'number' ? meta.mediaTime : video.currentTime;
-    if (!video.paused && !video.ended) {
-      try { video.requestVideoFrameCallback(tick); }
-      catch (_) { leaf._frameWatchArmed = false; }
-    } else {
-      leaf._frameWatchArmed = false;
-    }
-  };
-  try { video.requestVideoFrameCallback(tick); }
-  catch (_) { leaf._frameWatchArmed = false; }
+function armVideoFrameWatch(_leaf) {
+  // Per-frame callbacks on every tile stall the main thread once many videos
+  // are playing. Decode is left to the GPU without a JS callback per frame.
 }
 
 /**
@@ -1255,18 +1236,7 @@ function repairLeafPlayback(leaf, reason) {
     return;
   }
 
-  const cur = leaf.files[leaf.index];
   const shouldPlay = leafShouldPlay(leaf);
-
-  if (cur && videoSourceUrl(video)) {
-    const pathOk = !leaf._playbackPath || leaf._playbackPath === cur.path;
-    const srcOk = playingFileMatches(leaf, cur, video);
-    if (!pathOk || !srcOk) {
-      loadCurrent(leaf, shouldPlay);
-      resetLeafSyncClock(leaf);
-      return;
-    }
-  }
 
   video.loop = !!leaf.loop && leaf._qualitySeekable !== false;
 
@@ -1299,7 +1269,6 @@ function auditLeafPlayback(leaf) {
   }
   if (!leaf.video) return;
   const video = leaf.video;
-  const cur = leaf.files[leaf.index];
 
   // User/peer pause must win over recovery — kill decode + GainNode output.
   if (leaf.userPaused) {
@@ -1315,12 +1284,6 @@ function auditLeafPlayback(leaf) {
     if (!video.paused) pauseVideoElement(video);
     applyTileAudio(leaf);
     resetLeafSyncClock(leaf);
-    return;
-  }
-
-  // Wrong clip loaded for this tile's playlist index.
-  if (cur && videoSourceUrl(video) && !playingFileMatches(leaf, cur, video) && video.readyState > 0) {
-    repairLeafPlayback(leaf, 'wrong-source');
     return;
   }
 
@@ -1952,12 +1915,9 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
         // Confirm dialog open — don't let peer identity steal the clip under trash.
       } else {
       const idx = clamp(remoteNode.index, 0, localNode.files.length - 1);
-      const cur = localNode.files[idx];
-      const srcOk = playingFileMatches(localNode, cur, localNode.video);
-      if (idx !== localNode.index || (cur && !srcOk)) {
+      // Same clip: leave the element playing. Reloading it starts the file over.
+      if (idx !== localNode.index) {
         localNode.index = idx;
-        // Load without autoplay when we may batch-resume below.
-        // loadCurrent applies per-file volume memory for the new clip.
         loadCurrent(localNode, false, { force: true });
         mediaDirty = true;
       }
@@ -1981,19 +1941,6 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
       }
     }
 
-    // Never seek on volume-only syncs — that made unrelated tiles jump while
-    // the user scrubbed another tile's volume.
-    if (!volumesOnly && applyIdentity && typeof remoteNode.currentTime === 'number' &&
-        localNode.video && !localNode.userPaused && !localNode.video.seeking &&
-        localNode.video.readyState >= 3) {
-      const drift = Math.abs(mediaClock(localNode) - remoteNode.currentTime);
-      if (drift > 1.25) {
-        void seekLeafTime(localNode, remoteNode.currentTime);
-        resetLeafSyncClock(localNode);
-        mediaDirty = true;
-      }
-    }
-
     const pauseDirty = wasPaused !== !!localNode.userPaused;
     const shouldResume = wasPaused && !localNode.userPaused && leafShouldPlay(localNode);
     if (shouldResume) resumeBatch.push(localNode);
@@ -2012,18 +1959,14 @@ function applyPendingSyncIdentity(leaf) {
   const hasTime = typeof leaf._pendingSyncTime === 'number';
   if (!hasIndex && !hasTime) return;
 
+  const previousIndex = leaf.index;
   if (hasIndex && leaf.files.length) {
     leaf.index = clamp(leaf._pendingSyncIndex, 0, leaf.files.length - 1);
   }
-  const idx = leaf.index;
-  const cur = leaf.files[idx];
-  const srcOk = playingFileMatches(leaf, cur, leaf.video);
-  if (cur && !srcOk) {
+  const cur = leaf.files[leaf.index];
+  const indexChanged = hasIndex && leaf.index !== previousIndex;
+  if (cur && (indexChanged || !videoSourceUrl(leaf.video))) {
     loadCurrent(leaf, leafShouldPlay(leaf), { force: true });
-  }
-  if (hasTime && leaf.video && leafShouldPlay(leaf)) {
-    void seekLeafTime(leaf, leaf._pendingSyncTime);
-    resetLeafSyncClock(leaf);
   }
   delete leaf._pendingSyncIndex;
   delete leaf._pendingSyncTime;
@@ -2179,9 +2122,8 @@ function applyIncomingLayout(payload) {
 
 let projectionIdentityTimer = 0;
 const IDENTITY_SYNC_MS = 4000;
-const IDENTITY_TIME_DRIFT = 0.5;
 
-/** True when any playing tile's clip/time drifted enough to bother mirrors. */
+/** True when clip index or pause changed. Playhead movement is not a reason to sync. */
 function needsIdentityBroadcast() {
   let needed = false;
   forEachLeaf(root, (leaf) => {
@@ -2189,12 +2131,6 @@ function needsIdentityBroadcast() {
     if (leaf.index !== leaf._lastBroadcastIndex || !!leaf.userPaused !== !!leaf._lastBroadcastPaused) {
       needed = true;
       return;
-    }
-    if (!leafShouldPlay(leaf) || !leaf.video) return;
-    const t = leaf.video.currentTime;
-    if (!isFinite(t)) return;
-    if (leaf._lastBroadcastTime == null || Math.abs(t - leaf._lastBroadcastTime) > IDENTITY_TIME_DRIFT) {
-      needed = true;
     }
   });
   return needed;
@@ -2731,24 +2667,16 @@ function wireVideoElement(leaf) {
   video.addEventListener('ended', () => {
     if (leaf.video !== video) return;
     if (leaf._gifActive || leaf._stillActive) return;
-    if (leaf.userPaused) return;
-    // A buffer underrun can fire `ended` while most of the file is still ahead.
-    // Continue from the playhead instead of shuffling or starting over.
+    if (leaf.userPaused || leaf._suspendEnded) return;
+    // Only a real end of file may shuffle or rewind. A stall, a source swap,
+    // or a decoder reset also fires `ended`, and treating that as the end
+    // restarts the clip.
     const dur = mediaDuration(leaf);
     const now = mediaClock(leaf);
-    if (dur > 2 && now < dur - 1.5) {
-      const stamp = performance.now();
-      const sameSpot = leaf._earlyEndAt && stamp - leaf._earlyEndAt < 4000 &&
-        Math.abs((leaf._earlyEndPos || 0) - now) < 0.5;
-      if (!sameSpot) {
-        leaf._earlyEndAt = stamp;
-        leaf._earlyEndPos = now;
-        leaf._qualityEndLatch = false;
-        resetLeafSyncClock(leaf);
-        try { video.currentTime = Math.min(now, Math.max(0, dur - 0.05)); } catch (_) { /* ignore */ }
-        video.play().catch(() => {});
-        return;
-      }
+    const finished = dur > 0.5 && now >= dur - 0.75;
+    if (!finished) {
+      if (leafShouldPlay(leaf) && leafMayDecode(leaf)) video.play().catch(() => {});
+      return;
     }
     if (leaf.loop) {
       if (leaf._qualitySeekable === false) void seekLeafTime(leaf, 0);
@@ -3093,6 +3021,7 @@ async function finishLoadAndPlay(leaf, gen, autoplay) {
   const cur = leaf.files && leaf.files[leaf.index];
   if (cur && sourcesMatch(video, cur.url)) applyRememberedFileVolume(leaf, cur);
   leaf._holdSilence = false;
+  leaf._suspendEnded = false;
   applyTileAudio(leaf);
   if (autoplay && leaf._wantPlaying && leafShouldPlay(leaf) && leafMayDecode(leaf)) {
     resumeAudioContext();
@@ -3180,15 +3109,10 @@ async function swapLeafClip(leaf, current, gen, autoplay, opts = {}) {
   detachTileAudioGraph(leaf);
 
   const old = leaf.video;
+  leaf._suspendEnded = true;
   if (old) {
     try { old.pause(); } catch (_) { /* ignore */ }
     try { old.muted = true; } catch (_) { /* ignore */ }
-    try {
-      if (old.getAttribute('src') || old.currentSrc) {
-        old.removeAttribute('src');
-        old.load();
-      }
-    } catch (_) { /* ignore */ }
   }
 
   // Always replace on delete (hardSwap). Also replace after Web Audio capture —
@@ -3208,7 +3132,10 @@ async function swapLeafClip(leaf, current, gen, autoplay, opts = {}) {
   // sync cannot point us at the wrong clip's memory.
   applyRememberedFileVolume(leaf, current);
   const applied = await applyQualitySrc(leaf, current, { start: 0 });
-  if (!applied || leaf._loadGen !== gen || !leaf.video) return;
+  if (!applied || leaf._loadGen !== gen || !leaf.video) {
+    if (leaf && leaf._loadGen === gen) leaf._suspendEnded = false;
+    return;
+  }
   leaf._lastDropped = null;
   leaf._lastTotal = null;
   leaf._frameWatchArmed = false;

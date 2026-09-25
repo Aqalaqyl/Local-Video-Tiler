@@ -382,22 +382,29 @@ async function resolveQuality(opts) {
   if (!ready || !port || plan.passthrough) return passthrough(filePath, duration, plan);
 
   const paths = cachePaths(filePath, plan, info || { mtimeMs: 0, size: 0 });
+  // A live or partial transcode ends early and the player starts the clip over.
+  // Use a scaled file only when it already covers the whole source. Otherwise
+  // play the original so every tile can hardware-decode without a restart.
   if (start < 0.05 && fs.existsSync(paths.finalPath)) {
-    const id = crypto.randomBytes(8).toString('hex');
-    jobs.set(id, { mode: 'file', finalPath: paths.finalPath });
-    return {
-      url: 'lvtq://media/' + id,
-      seekable: true,
-      passthrough: false,
-      origin: 0,
-      duration,
-      key: plan.key,
-      bitrate: plan.bitrate,
-      maxEdge: plan.maxEdge
-    };
+    const cachedInfo = await probeFile(paths.finalPath);
+    const cacheDur = cachedInfo && cachedInfo.duration ? cachedInfo.duration : 0;
+    const complete = !duration || (cacheDur > 1 && Math.abs(cacheDur - duration) <= Math.max(1.5, duration * 0.2));
+    if (complete) {
+      const id = crypto.randomBytes(8).toString('hex');
+      jobs.set(id, { mode: 'file', finalPath: paths.finalPath });
+      return {
+        url: 'lvtq://media/' + id,
+        seekable: true,
+        passthrough: false,
+        origin: 0,
+        duration: cacheDur || duration,
+        key: plan.key,
+        bitrate: plan.bitrate,
+        maxEdge: plan.maxEdge
+      };
+    }
+    try { fs.unlinkSync(paths.finalPath); } catch (_) { /* ignore */ }
   }
-
-  if (start < 0.05) beginBackgroundEncode(filePath, plan, paths);
   return passthrough(filePath, duration, plan);
 }
 

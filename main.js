@@ -46,7 +46,7 @@ function configureHardwareAcceleration() {
   if (process.platform === 'win32') {
     app.commandLine.appendSwitch(
       'disable-features',
-      'CalculateNativeWinOcclusion,UseEcoQoSForBackgroundProcess'
+      'CalculateNativeWinOcclusion,UseEcoQoSForBackgroundProcess,DirectCompositionVideoOverlays'
     );
   }
 }
