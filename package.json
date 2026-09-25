@@ -27,7 +27,6 @@
       "quality.js",
       "quality-server.js",
       "taskbar-win.js",
-      "scripts/win-taskbar.ps1",
       "src/**/*",
       "package.json"
     ],
@@ -64,5 +63,8 @@
   "devDependencies": {
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3"
+  },
+  "dependencies": {
+    "koffi": "^2.14.1"
   }
 }
