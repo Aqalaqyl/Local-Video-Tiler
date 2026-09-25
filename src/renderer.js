@@ -421,7 +421,8 @@ function applyPlaybackIntent(leaf, opts = {}) {
   // Full preload keeps hardware decoders fed; metadata-only caused stutter.
   if (leaf.video) leaf.video.preload = 'auto';
   applyTileAudio(leaf);
-  // A clip swap is still warming — finishLoadAndPlay will unmute + play.
+  // A clip swap is still warming. Want-to-play is already set so the swap
+  // starts playback when the decoder is ready — including on other displays.
   if (leaf._holdSilence) return;
   resumeAudioContext();
   if (leaf.video.paused || leaf.video.ended) leaf.video.play().catch(() => {});
@@ -1915,10 +1916,14 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
         // Confirm dialog open — don't let peer identity steal the clip under trash.
       } else {
       const idx = clamp(remoteNode.index, 0, localNode.files.length - 1);
-      // Same clip: leave the element playing. Reloading it starts the file over.
-      if (idx !== localNode.index) {
+      const clipChanged = idx !== localNode.index;
+      // The controller replays the same file without changing index. A mirror
+      // whose element has already ended has to follow that, or the other
+      // monitors freeze on the last frame.
+      const replay = !clipChanged && localNode.video && localNode.video.ended && leafShouldPlay(localNode);
+      if (clipChanged || replay) {
         localNode.index = idx;
-        loadCurrent(localNode, false, { force: true });
+        loadCurrent(localNode, leafShouldPlay(localNode), { force: true });
         mediaDirty = true;
       }
       }
@@ -3025,7 +3030,9 @@ async function finishLoadAndPlay(leaf, gen, autoplay) {
   leaf._holdSilence = false;
   leaf._suspendEnded = false;
   applyTileAudio(leaf);
-  if (autoplay && leaf._wantPlaying && leafShouldPlay(leaf) && leafMayDecode(leaf)) {
+  // `_wantPlaying` covers other displays: they are asked to load the clip
+  // before anyone sets the autoplay flag, then told to play while it warms up.
+  if ((autoplay || leaf._wantPlaying) && leafShouldPlay(leaf) && leafMayDecode(leaf)) {
     resumeAudioContext();
     video.play().catch(() => {});
     armVideoFrameWatch(leaf);
