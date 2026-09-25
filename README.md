@@ -47,6 +47,11 @@ picture you see.
   - **Clear Folders** (`C`) — unlink every tile from its media folder while
     keeping the current layout splits, so you can re-assign folders without
     rebuilding the grid.
+  - **Tile-sized bitrate** — each video is scaled to the pixels its tile actually
+    shows, so a small pane does not decode a full-size file. Favorites keep a
+    higher bitrate (about **2.5×**) and a larger frame than other clips in the
+    same size of tile. This needs `ffmpeg` on your PATH; without it, files play
+    at their original size.
   - **Random / shuffle playback** — a tile starts on a weighted-random clip and,
     when a clip finishes, automatically shuffles to another clip from its folder.
     (Next / Previous still step through in order for manual control.)
@@ -63,15 +68,14 @@ picture you see.
     shuffle (default **1**). The tile loop button still holds one file.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
-  - **Fullscreen across ALL displays at once** (`A`) — each monitor gets its own
-    **real OS fullscreen window**, so every screen is genuinely fullscreen and
-    **covers the taskbar / dock / menu bar**. The single tiling canvas is spread
-    across the union of all monitors and each window shows just its own slice, so
-    a tile (or a "Tile to Displays" layout) fills the screen it belongs to.
+  - **Fullscreen across ALL displays at once** (`A`) — **one window** covers
+    every monitor edge to edge, including the taskbar / dock / menu bar, so
+    the GPU sees a single fullscreen surface instead of a separate program per
+    screen. The tiling canvas is the union of the monitors, so a tile (or a
+    "Tile to Displays" layout) fills the display it belongs to.
     - Your **primary** display keeps the top control bar.
-    - **Every** display is a live editor — move the cursor to any screen and
-      split / resize / delete tiles there; the alignment grid spans all monitors
-      and edits sync instantly across the whole wall.
+    - Move the cursor to any screen and split / resize / delete tiles there.
+      The alignment grid runs across the whole wall.
     - Hot-plugging or rearranging monitors re-fits the wall automatically.
   - When spanning every display, the control bar and edit tools are **pinned to
     your primary monitor** so they're always fully visible (never stranded in a

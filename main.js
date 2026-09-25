@@ -1,9 +1,10 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const url = require('url');
+const { startQualityServer, resolveQuality } = require('./quality-server');
 
 /**
  * Prefer GPU compositing + hardware video decode. Chromium falls back to
@@ -31,13 +32,31 @@ function configureHardwareAcceleration() {
     features.push('PlatformHEVCDecoderSupport');
   }
   app.commandLine.appendSwitch('enable-features', features.join(','));
-  // Avoid Windows occlusion heuristics throttling background decoder windows.
+  // Every display's fullscreen window loads the same page. Keep them in one
+  // renderer so the GPU budget covers the whole wall, and don't park a
+  // display that doesn't have the pointer.
+  app.commandLine.appendSwitch('process-per-site');
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('disable-background-timer-throttling');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
   if (process.platform === 'win32') {
     app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
   }
 }
 
 configureHardwareAcceleration();
+
+// Scaled playback is served as lvtq:// so file:// pages can load it.
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'lvtq',
+  privileges: {
+    standard: true,
+    secure: true,
+    supportFetchAPI: true,
+    stream: true,
+    corsEnabled: true
+  }
+}]);
 
 const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.m4v', '.webm', '.ogv', '.ogg', '.mov', '.mkv', '.avi',
@@ -52,9 +71,8 @@ let mainWindow = null;
 let savedBounds = null;
 let spanningAllDisplays = false;
 
-// While spanning, every NON-primary display gets its own fullscreen "mirror"
-// window showing that display's slice of the global canvas. The primary display
-// is covered by the main window (which keeps the controls).
+// Left empty. Spanning uses the main window only so the GPU has one surface.
+// closeProjectionWindows still clears this if an older session created any.
 /** @type {BrowserWindow[]} */
 let projectionWindows = [];
 
@@ -88,21 +106,11 @@ function createWindow() {
     // Required so the window may be sized larger than a single screen — without
     // it macOS clamps the window to one display and "All Displays" can't span.
     enableLargerThanScreen: true,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      // Allow file:// media to load from the file:// page.
-      webSecurity: true,
-      // Keep decoding/compositing alive when the window isn't focused (multi-tile).
-      backgroundThrottling: false,
-      // Let assigned folders start playing on launch without a user gesture.
-      autoplayPolicy: 'no-user-gesture-required'
-    }
+    webPreferences: sharedWebPreferences()
   });
 
   mainWindow.removeMenu();
+  mainWindow.webContents.setBackgroundThrottling(false);
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
@@ -161,56 +169,16 @@ function getAllDisplaysBounds() {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-/**
- * Create a frameless, fullscreen "mirror" window pinned to one display. It loads
- * the same UI in `role=mirror`, told its viewport (the display) and the union of
- * all displays, so it renders just that display's slice of the global canvas.
- */
-function createProjectionWindow(display, union) {
-  const b = display.bounds;
-  const win = new BrowserWindow({
-    x: b.x,
-    y: b.y,
-    width: b.width,
-    height: b.height,
-    frame: false,
-    show: false,
-    backgroundColor: '#000000',
-    enableLargerThanScreen: true,
-    skipTaskbar: true,
-    title: 'Local Video Tiler',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      webSecurity: true,
-      backgroundThrottling: false,
-      autoplayPolicy: 'no-user-gesture-required'
-    }
-  });
-  win.removeMenu();
-  win.loadFile(path.join(__dirname, 'src', 'index.html'), {
-    query: {
-      role: 'mirror',
-      vx: String(b.x), vy: String(b.y), vw: String(b.width), vh: String(b.height),
-      ux: String(union.x), uy: String(union.y), uw: String(union.width), uh: String(union.height)
-    }
-  });
-  win.once('ready-to-show', () => {
-    if (win.isDestroyed()) return;
-    win.show();
-    win.setBounds(b);
-    win.setAlwaysOnTop(true, 'screen-saver');
-    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    setWindowFullscreen(win, true);
-    // Re-sync after fullscreen using display.bounds (global coords), not getBounds().
-    setTimeout(() => syncProjectionViewport(win, 'mirror', union, null, b), 80);
-  });
-  win.on('closed', () => {
-    projectionWindows = projectionWindows.filter((w) => w !== win);
-  });
-  return win;
+function sharedWebPreferences() {
+  return {
+    preload: path.join(__dirname, 'preload.js'),
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: false,
+    webSecurity: true,
+    backgroundThrottling: false,
+    autoplayPolicy: 'no-user-gesture-required'
+  };
 }
 
 function closeProjectionWindows() {
@@ -231,47 +199,48 @@ function spanAllDisplays() {
   const primary = screen.getPrimaryDisplay();
   const union = getAllDisplaysBounds();
   spanningAllDisplays = true;
+  // One OS window is one GPU surface. Extra fullscreen windows made the other
+  // screens separate programs and the GPU only fed the focused one.
+  closeProjectionWindows();
 
-  // The main window becomes the controller, fullscreen on the PRIMARY display.
-  // Real OS fullscreen reliably covers the taskbar / dock / menu bar — that's
-  // what gives a genuinely immersive surface on each individual screen.
   mainWindow.setMenuBarVisibility(false);
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  try { mainWindow.webContents.setBackgroundThrottling(false); } catch (_) { /* ignore */ }
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
-  mainWindow.setBounds(primary.bounds);
-  setWindowFullscreen(mainWindow, true);
+
+  // A single display uses OS fullscreen. Several displays use one borderless
+  // window over the whole desktop, covering every monitor's full bounds
+  // (including the taskbar) so each screen is fullscreen inside that window.
+  const multi = displays.length >= 2;
+  const view = multi ? union : primary.bounds;
+  mainWindow.setBounds(view);
+  if (!multi) setWindowFullscreen(mainWindow, true);
+
   sendProjection(mainWindow, {
     active: true,
     role: 'controller',
-    viewport: primary.bounds,
+    viewport: view,
     union,
     displayCount: displays.length
   });
-  // Re-sync after fullscreen using display.bounds (global coords), not getBounds().
-  setTimeout(() => syncProjectionViewport(mainWindow, 'controller', union, displays.length, primary.bounds), 80);
-
-  // Every other display gets its own fullscreen mirror window.
-  closeProjectionWindows();
-  for (const d of displays) {
-    if (d.id === primary.id) continue;
-    projectionWindows.push(createProjectionWindow(d, union));
-  }
+  setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || !spanningAllDisplays) return;
+    const list = screen.getAllDisplays();
+    const again = list.length >= 2 ? getAllDisplaysBounds() : screen.getPrimaryDisplay().bounds;
+    if (list.length >= 2) {
+      if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
+      mainWindow.setBounds(again);
+      mainWindow.setAlwaysOnTop(true, 'screen-saver');
+    }
+    syncProjectionViewport(mainWindow, 'controller', getAllDisplaysBounds(), list.length, again);
+    sendWindowState();
+  }, 80);
 
   mainWindow.moveTop();
   mainWindow.focus();
   sendWindowState();
-
-  // Mirror windows steal focus; keep the controller focused and nudge audio resume.
-  const refocusController = () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    mainWindow.moveTop();
-    mainWindow.focus();
-    try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
-  };
-  setTimeout(refocusController, 300);
-  setTimeout(refocusController, 900);
-  setTimeout(refocusController, 1800);
+  try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
 }
 
 function restoreFromSpan() {
@@ -377,6 +346,14 @@ ipcMain.handle('media:deleteFile', async (_event, filePath, folderPath) => {
   }
 });
 
+ipcMain.handle('media:qualityUrl', async (_event, opts) => {
+  try {
+    return await resolveQuality(opts || {});
+  } catch (err) {
+    return { url: '', seekable: true, passthrough: true, origin: 0, duration: 0, key: 'orig', bitrate: 0, maxEdge: 0, error: String(err && err.message ? err.message : err) };
+  }
+});
+
 ipcMain.handle('display:getInfo', () => {
   const displays = screen.getAllDisplays();
   const primaryId = screen.getPrimaryDisplay().id;
@@ -439,6 +416,7 @@ app.whenReady().then(() => {
     console.log(`[Local Video Tiler] GPU compositing: ${compositing}; video decode: ${videoDecode}`);
   } catch (_) { /* ignore */ }
 
+  startQualityServer();
   createWindow();
 
   // Re-broadcast display changes so the renderer can update its info pill.
