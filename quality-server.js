@@ -20,6 +20,7 @@ let cacheDir = '';
 let activeEncoders = 0;
 const jobs = new Map();
 const probes = new Map();
+const backgroundEncodes = new Set();
 
 function tryAcquire() {
   if (activeEncoders >= MAX_ENCODERS) return false;
@@ -157,6 +158,63 @@ function serveFile(req, res, filePath) {
     'Accept-Ranges': 'bytes'
   });
   fs.createReadStream(filePath).pipe(res);
+}
+
+function fileEncodeArgs(filePath, plan, outPath) {
+  const edge = plan.maxEdge;
+  const scale = 'scale=' + edge + ':' + edge +
+    ':force_original_aspect_ratio=decrease:flags=fast_bilinear,' +
+    'scale=trunc(iw/2)*2:trunc(ih/2)*2';
+  return [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-hwaccel', 'none',
+    '-i', filePath,
+    '-vf', scale,
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-b:v', String(plan.bitrate),
+    '-maxrate', String(plan.bitrate),
+    '-bufsize', String(plan.bitrate * 2),
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-b:a', String(plan.audioBitrate),
+    '-movflags', '+faststart',
+    outPath
+  ];
+}
+
+/**
+ * Write a scaled copy beside playback. The tile keeps playing the original
+ * file until this finishes — a live transcode underruns, and the player then
+ * treats the stall as the end of the clip and starts it over.
+ */
+function beginBackgroundEncode(filePath, plan, paths) {
+  if (!paths || !paths.finalPath || !paths.partPath) return;
+  if (fs.existsSync(paths.finalPath) || backgroundEncodes.has(paths.finalPath)) return;
+  if (!tryAcquire()) return;
+  backgroundEncodes.add(paths.finalPath);
+  const child = spawn('ffmpeg', fileEncodeArgs(filePath, plan, paths.partPath), { windowsHide: true });
+  deprioritizeProcess(child.pid);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    backgroundEncodes.delete(paths.finalPath);
+    releaseEncoder();
+  };
+  child.on('error', () => {
+    try { fs.unlinkSync(paths.partPath); } catch (_) { /* ignore */ }
+    release();
+  });
+  child.on('close', (code) => {
+    if (code === 0 && fs.existsSync(paths.partPath)) {
+      try { fs.renameSync(paths.partPath, paths.finalPath); }
+      catch (_) { try { fs.unlinkSync(paths.partPath); } catch (__) { /* ignore */ } }
+    } else {
+      try { fs.unlinkSync(paths.partPath); } catch (_) { /* ignore */ }
+    }
+    release();
+  });
 }
 
 function ffmpegArgs(filePath, plan, start) {
@@ -339,36 +397,8 @@ async function resolveQuality(opts) {
     };
   }
 
-  if (!tryAcquire()) return passthrough(filePath, duration, plan);
-
-  const id = crypto.randomBytes(8).toString('hex');
-  const job = {
-    mode: 'live',
-    filePath,
-    plan,
-    start,
-    finalPath: paths.finalPath,
-    partPath: paths.partPath,
-    started: false,
-    clientGone: false
-  };
-  job.idleTimer = setTimeout(() => {
-    if (!job.started) {
-      jobs.delete(id);
-      releaseEncoder();
-    }
-  }, 15000);
-  jobs.set(id, job);
-  return {
-    url: 'lvtq://media/' + id,
-    seekable: false,
-    passthrough: false,
-    origin: start,
-    duration,
-    key: plan.key,
-    bitrate: plan.bitrate,
-    maxEdge: plan.maxEdge
-  };
+  if (start < 0.05) beginBackgroundEncode(filePath, plan, paths);
+  return passthrough(filePath, duration, plan);
 }
 
 module.exports = { startQualityServer, resolveQuality };

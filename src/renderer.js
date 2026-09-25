@@ -521,7 +521,9 @@ function mediaClock(leaf) {
 }
 
 function mediaDuration(leaf) {
-  if (leaf && leaf._qualitySeekable === false && leaf._qualityDuration > 0) return leaf._qualityDuration;
+  // A live proxy's element duration grows with the buffer and sits on the
+  // playhead during a stall. That is not the end of the file.
+  if (leaf && leaf._qualitySeekable === false) return leaf._qualityDuration || 0;
   const video = leaf && leaf.video;
   if (video && isFinite(video.duration) && video.duration > 0) return video.duration;
   return (leaf && leaf._qualityDuration) || 0;
@@ -633,6 +635,9 @@ function retargetQuality(leaf) {
     favorite: isFileFavorite(file)
   });
   if (plan.key === leaf._qualityPlanKey) return;
+  // Swapping sources while a clip is playing restarts it. The next clip
+  // picks up the new tile size on its own.
+  if (leaf.video && !leaf.video.paused && !leaf.video.ended && leafShouldPlay(leaf)) return;
   const t = mediaClock(leaf);
   const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
   leaf._wantPlaying = leafShouldPlay(leaf);
@@ -1102,7 +1107,7 @@ function reconcileProjectionPlayback() {
     if (!media) return;
 
     if (projection.role === 'controller') {
-      if (cur && !playingFileMatches(leaf, cur, media)) {
+      if (cur && !playingFileMatches(leaf, cur, media) && !leaf._holdSilence) {
         loadCurrent(leaf, shouldPlay, { force: true });
       } else {
         applyPlaybackIntent(leaf);
@@ -1120,7 +1125,7 @@ function reconcileProjectionPlayback() {
       return;
     }
 
-    if (cur && !playingFileMatches(leaf, cur, media)) {
+    if (cur && !playingFileMatches(leaf, cur, media) && !leaf._holdSilence) {
       loadCurrent(leaf, shouldPlay);
     } else {
       applyPlaybackIntent(leaf);
@@ -1180,15 +1185,10 @@ function replaceLeafVideoElement(leaf) {
 }
 
 // ----------------------------------------------------------- A/V sync watchdog
-// Under heavy load the decoder can stall or drift from the audio clock. We
-// periodically verify each tile is on the right file with correct mute/volume,
-// and gently resync (seek-to-self + play) when wall-clock vs media-clock diverge.
+// Keep each tile on the right file with the right mute/volume. A stall is left
+// alone: seeking or reloading to "catch up" is what restarts the clip.
 const PLAYBACK_AUDIT_MS = 4000;
-const SYNC_SAMPLE_SEC = 1.25;
-const STALL_RATIO = 0.3;
-const JUMP_SLACK_SEC = 0.9;
 const REPAIR_COOLDOWN_MS = 8000;
-const DROPPED_FRAME_BURST = 24;
 
 let playbackAuditTimer = 0;
 
@@ -1235,9 +1235,8 @@ function armVideoFrameWatch(leaf) {
 }
 
 /**
- * Soft A/V repair: re-apply mute/volume, optionally reload the correct source,
- * otherwise gently resync. Seek-to-self is held silent until seeked — restoring
- * audio mid-seek was a common desync after deletes/volume changes.
+ * Put the tile back on the file it should be playing. The playhead is never
+ * seeked or reloaded just because decode stalled.
  */
 function repairLeafPlayback(leaf, reason) {
   if (!leaf || !leaf.video || leaf.spacer) return;
@@ -1245,7 +1244,6 @@ function repairLeafPlayback(leaf, reason) {
   const now = performance.now();
   if (leaf._syncRepairAt && now - leaf._syncRepairAt < REPAIR_COOLDOWN_MS) return;
   leaf._syncRepairAt = now;
-  const repairGen = (leaf._repairGen = (leaf._repairGen || 0) + 1);
 
   // Never restart a tile the user (or a peer window) paused.
   if (leaf.userPaused || !leafShouldPlay(leaf)) {
@@ -1270,62 +1268,23 @@ function repairLeafPlayback(leaf, reason) {
     }
   }
 
-  video.loop = !!leaf.loop;
+  video.loop = !!leaf.loop && leaf._qualitySeekable !== false;
 
-  // With Web Audio boost or many tiles, seek-to-self often worsens lip-sync —
-  // just ensure playback is running and leave decoder buffers alone.
-  const heavy = countPlayingLeaves() >= 4 || !!leaf._audioGraph;
-  if (heavy || !(video.readyState >= 2 && isFinite(video.currentTime) && !video.seeking)) {
-    leaf._holdSilence = false;
-    applyTileAudio(leaf);
-    if (shouldPlay && leafMayDecode(leaf)) {
-      resumeAudioContext();
-      if (video.paused || video.ended) video.play().catch(() => {});
-      armVideoFrameWatch(leaf);
-    } else {
-      leaf._wantPlaying = false;
-      pauseVideoElement(video);
-    }
-    resetLeafSyncClock(leaf);
-    if (reason) {
-      try { console.debug('[playback-sync] repaired', leaf.id, reason); } catch (_) { /* ignore */ }
-    }
-    return;
+  // A hitch is not a broken clip. Seeking or reloading here starts the file over.
+  leaf._holdSilence = false;
+  applyTileAudio(leaf);
+  if (shouldPlay && leafMayDecode(leaf)) {
+    resumeAudioContext();
+    if (video.paused && !video.ended && !video.seeking) video.play().catch(() => {});
+    armVideoFrameWatch(leaf);
+  } else {
+    leaf._wantPlaying = false;
+    pauseVideoElement(video);
   }
-
-  const t = video.currentTime;
-  leaf._holdSilence = true;
-  silenceLeafOutput(leaf);
-
-  const finish = () => {
-    if (leaf._repairGen !== repairGen || leaf.video !== video) return;
-    video.removeEventListener('seeked', onSeeked);
-    clearTimeout(timer);
-    leaf._holdSilence = false;
-    applyTileAudio(leaf);
-    if (shouldPlay && leafMayDecode(leaf) && !leaf.userPaused) {
-      resumeAudioContext();
-      video.play().catch(() => {});
-      armVideoFrameWatch(leaf);
-    }
-    resetLeafSyncClock(leaf);
-  };
-  const onSeeked = () => finish();
-  video.addEventListener('seeked', onSeeked);
-  const timer = setTimeout(finish, 600);
-  try { video.currentTime = t; } catch (_) { finish(); }
-
+  resetLeafSyncClock(leaf);
   if (reason) {
     try { console.debug('[playback-sync] repaired', leaf.id, reason); } catch (_) { /* ignore */ }
   }
-}
-
-function countPlayingLeaves() {
-  let n = 0;
-  forEachLeaf(root, (leaf) => {
-    if (!leaf.spacer && leaf.video && !leaf.video.paused && !leaf.video.ended) n++;
-  });
-  return n;
 }
 
 function auditLeafPlayback(leaf) {
@@ -1376,20 +1335,12 @@ function auditLeafPlayback(leaf) {
     if (audioWrong) applyTileAudio(leaf);
   }
 
-  // Under heavy multi-tile load, or while the user is adjusting volume, skip
-  // seek-style repairs — a seek resets the decoder and makes the stall worse.
-  const playingCount = countPlayingLeaves();
-  const volumeBusy = performance.now() < volumeAdjustUntil;
-  if (volumeBusy || playingCount >= 4) {
-    resetLeafSyncClock(leaf);
-    return;
-  }
-
-  if (video.paused || video.ended || video.seeking || video.readyState < 2) {
+  if (video.paused || video.seeking || video.readyState < 2) {
     resetLeafSyncClock(leaf);
     leaf._wantPlaying = leafShouldPlay(leaf);
     // Fullscreen transitions can leave tiles paused — resume only if still wanted.
-    if (leafShouldPlay(leaf) && video.paused && !video.ended && leafMayDecode(leaf)) {
+    // Never seek. A seek during a stall drops the buffer and the clip starts over.
+    if (leafShouldPlay(leaf) && video.paused && !video.ended && !video.seeking && leafMayDecode(leaf)) {
       resumeAudioContext();
       video.play().catch(() => {});
     }
@@ -1398,54 +1349,7 @@ function auditLeafPlayback(leaf) {
 
   leaf._wantPlaying = leafShouldPlay(leaf);
   armVideoFrameWatch(leaf);
-
-  const now = performance.now();
-  if (leaf._syncWall == null) {
-    resetLeafSyncClock(leaf);
-    return;
-  }
-
-  const wallDelta = (now - leaf._syncWall) / 1000;
-  if (wallDelta < SYNC_SAMPLE_SEC) return;
-
-  const mediaDelta = video.currentTime - (leaf._syncMedia || 0);
-
-  // Decoder stall / A/V drift: media clock lagged far behind wall clock.
-  if (mediaDelta >= 0 && mediaDelta < wallDelta * STALL_RATIO) {
-    repairLeafPlayback(leaf, 'stall');
-    return;
-  }
-  // Unexpected jump ahead of wall clock.
-  if (mediaDelta > wallDelta + JUMP_SLACK_SEC) {
-    repairLeafPlayback(leaf, 'jump');
-    return;
-  }
-
-  // Frames frozen while the media clock keeps advancing → classic lip-sync drift.
-  if (leaf._lastFrameWall != null && (now - leaf._lastFrameWall) > 900 && wallDelta >= SYNC_SAMPLE_SEC) {
-    repairLeafPlayback(leaf, 'frozen-frames');
-    return;
-  }
-
-  if (typeof video.getVideoPlaybackQuality === 'function') {
-    const q = video.getVideoPlaybackQuality();
-    const dropped = q.droppedVideoFrames || 0;
-    const total = q.totalVideoFrames || 0;
-    if (leaf._lastDropped != null && total > (leaf._lastTotal || 0) + 24) {
-      const burst = dropped - leaf._lastDropped;
-      if (burst >= DROPPED_FRAME_BURST) {
-        leaf._lastDropped = dropped;
-        leaf._lastTotal = total;
-        repairLeafPlayback(leaf, 'dropped-frames');
-        return;
-      }
-    }
-    leaf._lastDropped = dropped;
-    leaf._lastTotal = total;
-  }
-
-  leaf._syncWall = now;
-  leaf._syncMedia = video.currentTime;
+  resetLeafSyncClock(leaf);
 }
 
 function auditAllPlayback() {
@@ -2081,7 +1985,7 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     // the user scrubbed another tile's volume.
     if (!volumesOnly && applyIdentity && typeof remoteNode.currentTime === 'number' &&
         localNode.video && !localNode.userPaused && !localNode.video.seeking &&
-        localNode.video.readyState >= 2) {
+        localNode.video.readyState >= 3) {
       const drift = Math.abs(mediaClock(localNode) - remoteNode.currentTime);
       if (drift > 1.25) {
         void seekLeafTime(localNode, remoteNode.currentTime);
@@ -2828,6 +2732,24 @@ function wireVideoElement(leaf) {
     if (leaf.video !== video) return;
     if (leaf._gifActive || leaf._stillActive) return;
     if (leaf.userPaused) return;
+    // A buffer underrun can fire `ended` while most of the file is still ahead.
+    // Continue from the playhead instead of shuffling or starting over.
+    const dur = mediaDuration(leaf);
+    const now = mediaClock(leaf);
+    if (dur > 2 && now < dur - 1.5) {
+      const stamp = performance.now();
+      const sameSpot = leaf._earlyEndAt && stamp - leaf._earlyEndAt < 4000 &&
+        Math.abs((leaf._earlyEndPos || 0) - now) < 0.5;
+      if (!sameSpot) {
+        leaf._earlyEndAt = stamp;
+        leaf._earlyEndPos = now;
+        leaf._qualityEndLatch = false;
+        resetLeafSyncClock(leaf);
+        try { video.currentTime = Math.min(now, Math.max(0, dur - 0.05)); } catch (_) { /* ignore */ }
+        video.play().catch(() => {});
+        return;
+      }
+    }
     if (leaf.loop) {
       if (leaf._qualitySeekable === false) void seekLeafTime(leaf, 0);
       return;
