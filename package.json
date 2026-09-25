@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "lint": "node --check main.js && node --check preload.js && node --check src/renderer.js && node --check scripts/win-launcher.js && node --check scripts/copy-win-launcher.js",
+    "lint": "node --check main.js && node --check preload.js && node --check quality.js && node --check quality-server.js && node --check src/renderer.js && node --check scripts/win-launcher.js && node --check scripts/copy-win-launcher.js",
     "pack:win": "electron-builder --win dir --x64",
     "launcher:win": "npm install --no-save pkg@5.8.1 && npx pkg scripts/win-launcher.js --targets node18-win-x64 --output \"Local Video Tiler.exe\" && node scripts/copy-win-launcher.js",
     "dist:win": "npm run pack:win && npm run launcher:win",
@@ -24,6 +24,8 @@
     "files": [
       "main.js",
       "preload.js",
+      "quality.js",
+      "quality-server.js",
       "src/**/*",
       "package.json"
     ],

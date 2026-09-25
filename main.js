@@ -1,9 +1,10 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const url = require('url');
+const { startQualityServer, resolveQuality } = require('./quality-server');
 
 /**
  * Prefer GPU compositing + hardware video decode. Chromium falls back to
@@ -38,6 +39,18 @@ function configureHardwareAcceleration() {
 }
 
 configureHardwareAcceleration();
+
+// Scaled playback is served as lvtq:// so file:// pages can load it.
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'lvtq',
+  privileges: {
+    standard: true,
+    secure: true,
+    supportFetchAPI: true,
+    stream: true,
+    corsEnabled: true
+  }
+}]);
 
 const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.m4v', '.webm', '.ogv', '.ogg', '.mov', '.mkv', '.avi',
@@ -377,6 +390,14 @@ ipcMain.handle('media:deleteFile', async (_event, filePath, folderPath) => {
   }
 });
 
+ipcMain.handle('media:qualityUrl', async (_event, opts) => {
+  try {
+    return await resolveQuality(opts || {});
+  } catch (err) {
+    return { url: '', seekable: true, passthrough: true, origin: 0, duration: 0, key: 'orig', bitrate: 0, maxEdge: 0, error: String(err && err.message ? err.message : err) };
+  }
+});
+
 ipcMain.handle('display:getInfo', () => {
   const displays = screen.getAllDisplays();
   const primaryId = screen.getPrimaryDisplay().id;
@@ -439,6 +460,7 @@ app.whenReady().then(() => {
     console.log(`[Local Video Tiler] GPU compositing: ${compositing}; video decode: ${videoDecode}`);
   } catch (_) { /* ignore */ }
 
+  startQualityServer();
   createWindow();
 
   // Re-broadcast display changes so the renderer can update its info pill.

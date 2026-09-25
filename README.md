@@ -47,6 +47,11 @@ picture you see.
   - **Clear Folders** (`C`) — unlink every tile from its media folder while
     keeping the current layout splits, so you can re-assign folders without
     rebuilding the grid.
+  - **Tile-sized bitrate** — each video is scaled to the pixels its tile actually
+    shows, so a small pane does not decode a full-size file. Favorites keep a
+    higher bitrate (about **2.5×**) and a larger frame than other clips in the
+    same size of tile. This needs `ffmpeg` on your PATH; without it, files play
+    at their original size.
   - **Random / shuffle playback** — a tile starts on a weighted-random clip and,
     when a clip finishes, automatically shuffles to another clip from its folder.
     (Next / Previous still step through in order for manual control.)
