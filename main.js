@@ -231,22 +231,66 @@ function physicalUnion(win) {
 }
 
 let savedMaxSize = null;
+let savedMinSize = null;
 
-function allowFullSpanSize(win, union) {
+function spanBox(union) {
+  return {
+    x: Math.round(union.x),
+    y: Math.round(union.y),
+    width: Math.max(1, Math.round(union.width)),
+    height: Math.max(1, Math.round(union.height))
+  };
+}
+
+function contentIsShort(win, box) {
+  try {
+    const c = win.getContentBounds();
+    return Math.abs(c.x - box.x) > 2 || Math.abs(c.y - box.y) > 2
+      || c.width < box.width - 2 || c.height < box.height - 2;
+  } catch (_) {
+    return true;
+  }
+}
+
+/**
+ * Windows shrinks a normal window to the work area, which is the line above
+ * the taskbar. A minimum size equal to every monitor's full bounds cannot be
+ * shrunk that way, so the window stays over the taskbar instead of stopping
+ * on it.
+ */
+function lockSpanToMonitors(win, union) {
   if (!win || win.isDestroyed()) return;
+  const box = spanBox(union);
+  if (!savedMinSize) {
+    try { savedMinSize = win.getMinimumSize(); } catch (_) { savedMinSize = [480, 320]; }
+  }
   if (!savedMaxSize) {
     try { savedMaxSize = win.getMaximumSize(); } catch (_) { savedMaxSize = [0, 0]; }
   }
-  // DIP maximum. display.bounds already include the taskbar; the work area does not.
-  try { win.setMaximumSize(Math.max(1, Math.ceil(union.width)), Math.max(1, Math.ceil(union.height))); }
-  catch (_) { /* ignore */ }
+  try { win.setMinimumSize(box.width, box.height); } catch (_) { /* ignore */ }
+  try { win.setMaximumSize(box.width, box.height); } catch (_) { /* ignore */ }
+  if (!contentIsShort(win, box)) return;
+  try { win.setBounds(box); } catch (_) { /* ignore */ }
+  if (!contentIsShort(win, box)) return;
+  // Fullscreen is the path that actually covers the taskbar. Re-apply the
+  // full wall immediately so it does not stay stuck on one monitor.
+  if (!isWindowFullscreen(win)) setWindowFullscreen(win, true);
+  try { win.setBounds(box); } catch (_) { /* ignore */ }
+  try { win.setContentBounds(box); } catch (_) { /* ignore */ }
 }
 
-function restoreMaxSize(win) {
-  const saved = savedMaxSize;
+function restoreSpanLimits(win) {
+  const minSaved = savedMinSize;
+  const maxSaved = savedMaxSize;
+  savedMinSize = null;
   savedMaxSize = null;
-  if (!saved || !win || win.isDestroyed()) return;
-  try { win.setMaximumSize(saved[0], saved[1]); } catch (_) { /* ignore */ }
+  if (!win || win.isDestroyed()) return;
+  const minW = minSaved && minSaved[0] ? minSaved[0] : 480;
+  const minH = minSaved && minSaved[1] ? minSaved[1] : 320;
+  try { win.setMinimumSize(minW, minH); } catch (_) { /* ignore */ }
+  if (maxSaved) {
+    try { win.setMaximumSize(maxSaved[0], maxSaved[1]); } catch (_) { /* ignore */ }
+  }
 }
 
 function raiseSpanWindow(win, level) {
@@ -275,12 +319,11 @@ function placeSpanWindow(win) {
     return view;
   }
 
-  // OS fullscreen locks the window to one monitor, and setBounds stops at the
-  // taskbar. Leave fullscreen and pin this one window to the virtual screen.
-  if (isWindowFullscreen(win)) setWindowFullscreen(win, false);
+  // Keep the one window the full size of every monitor, taskbar included.
+  // The minimum size is what stops Windows from cutting it off on the bar.
   if (process.platform === 'win32') {
-    allowFullSpanSize(win, union);
-    pinOverTaskbar(win, physicalUnion(win), true);
+    try { pinOverTaskbar(win, physicalUnion(win), true); } catch (_) { /* ignore */ }
+    lockSpanToMonitors(win, union);
     return view;
   }
   try { win.setContentBounds(view); } catch (_) { win.setBounds(view); }
@@ -297,7 +340,8 @@ function assertAboveTaskbar(win) {
   if (process.platform !== 'win32') return;
   const multi = screen.getAllDisplays().length >= 2;
   // Repeating ticks must not activate, or they close menus mid-click.
-  pinOverTaskbar(win, multi ? physicalUnion(win) : null, false);
+  try { pinOverTaskbar(win, multi ? physicalUnion(win) : null, false); } catch (_) { /* ignore */ }
+  if (multi) lockSpanToMonitors(win, getAllDisplaysBounds());
 }
 
 function startAboveTaskbar(win) {
@@ -367,16 +411,17 @@ function restoreFromSpan() {
   spanningAllDisplays = false;
   stopAboveTaskbar();
   showWindowsTaskbars();
-  restoreMaxSize(mainWindow);
+  restoreSpanLimits(mainWindow);
   closeProjectionWindows();
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
   mainWindow.setAlwaysOnTop(false);
   mainWindow.setVisibleOnAllWorkspaces(false);
   sendProjection(mainWindow, { active: false });
   // Restore the previous windowed geometry once we've left fullscreen.
-  const restore = () => { if (savedBounds && mainWindow && !mainWindow.isDestroyed()) mainWindow.setBounds(savedBounds); };
+  const restore = () => { if (savedBounds && mainWindow && !mainWindow.isDestroyed() && !spanningAllDisplays) mainWindow.setBounds(savedBounds); };
   restore();
   setTimeout(restore, 60);
+  setTimeout(restore, 240);
   sendWindowState();
 }
 
