@@ -102,9 +102,10 @@ function createWindow() {
     minHeight: 320,
     backgroundColor: '#0b0b0e',
     frame: false,
-    // Frameless Windows windows default to a thick resize frame, which the OS
-    // keeps above the taskbar and which insets the page so the bottom is clipped.
+    // Borderless, like a game window. A thick frame or a shadow is what makes
+    // Windows keep the window above the taskbar.
     thickFrame: false,
+    hasShadow: false,
     roundedCorners: false,
     show: false,
     title: 'Local Video Tiler',
@@ -230,73 +231,12 @@ function physicalUnion(win) {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-let savedMaxSize = null;
-let savedMinSize = null;
-
-function spanBox(union) {
-  return {
-    x: Math.round(union.x),
-    y: Math.round(union.y),
-    width: Math.max(1, Math.round(union.width)),
-    height: Math.max(1, Math.round(union.height))
-  };
-}
-
-function contentIsShort(win, box) {
-  try {
-    const c = win.getContentBounds();
-    return Math.abs(c.x - box.x) > 2 || Math.abs(c.y - box.y) > 2
-      || c.width < box.width - 2 || c.height < box.height - 2;
-  } catch (_) {
-    return true;
-  }
-}
-
-/**
- * Windows shrinks a normal window to the work area, which is the line above
- * the taskbar. A minimum size equal to every monitor's full bounds cannot be
- * shrunk that way, so the window stays over the taskbar instead of stopping
- * on it.
- */
-function lockSpanToMonitors(win, union) {
-  if (!win || win.isDestroyed()) return;
-  const box = spanBox(union);
-  if (!savedMinSize) {
-    try { savedMinSize = win.getMinimumSize(); } catch (_) { savedMinSize = [480, 320]; }
-  }
-  if (!savedMaxSize) {
-    try { savedMaxSize = win.getMaximumSize(); } catch (_) { savedMaxSize = [0, 0]; }
-  }
-  try { win.setMinimumSize(box.width, box.height); } catch (_) { /* ignore */ }
-  try { win.setMaximumSize(box.width, box.height); } catch (_) { /* ignore */ }
-  if (!contentIsShort(win, box)) return;
-  try { win.setBounds(box); } catch (_) { /* ignore */ }
-  if (!contentIsShort(win, box)) return;
-  // Fullscreen is the path that actually covers the taskbar. Re-apply the
-  // full wall immediately so it does not stay stuck on one monitor.
-  if (!isWindowFullscreen(win)) setWindowFullscreen(win, true);
-  try { win.setBounds(box); } catch (_) { /* ignore */ }
-  try { win.setContentBounds(box); } catch (_) { /* ignore */ }
-}
-
-function restoreSpanLimits(win) {
-  const minSaved = savedMinSize;
-  const maxSaved = savedMaxSize;
-  savedMinSize = null;
-  savedMaxSize = null;
-  if (!win || win.isDestroyed()) return;
-  const minW = minSaved && minSaved[0] ? minSaved[0] : 480;
-  const minH = minSaved && minSaved[1] ? minSaved[1] : 320;
-  try { win.setMinimumSize(minW, minH); } catch (_) { /* ignore */ }
-  if (maxSaved) {
-    try { win.setMaximumSize(maxSaved[0], maxSaved[1]); } catch (_) { /* ignore */ }
-  }
-}
-
 function raiseSpanWindow(win, level) {
+  // screen-saver is the top band Electron can ask for. moveTop() uses a lower
+  // band and lets the taskbar paint over the window, so it is not used here.
   try { win.setAlwaysOnTop(true, level || 'screen-saver', 1); }
   catch (_) { try { win.setAlwaysOnTop(true); } catch (_) { /* ignore */ } }
-  try { win.moveTop(); } catch (_) { /* ignore */ }
+  try { win.setHasShadow(false); } catch (_) { /* ignore */ }
 }
 
 function placeSpanWindow(win) {
@@ -319,11 +259,11 @@ function placeSpanWindow(win) {
     return view;
   }
 
-  // Keep the one window the full size of every monitor, taskbar included.
-  // The minimum size is what stops Windows from cutting it off on the bar.
+  // Borderless and topmost, sized to the whole wall. Electron setBounds stops
+  // at the taskbar and would undo this, so it is not called on this path.
+  if (isWindowFullscreen(win)) setWindowFullscreen(win, false);
   if (process.platform === 'win32') {
     try { pinOverTaskbar(win, physicalUnion(win), true); } catch (_) { /* ignore */ }
-    lockSpanToMonitors(win, union);
     return view;
   }
   try { win.setContentBounds(view); } catch (_) { win.setBounds(view); }
@@ -341,7 +281,6 @@ function assertAboveTaskbar(win) {
   const multi = screen.getAllDisplays().length >= 2;
   // Repeating ticks must not activate, or they close menus mid-click.
   try { pinOverTaskbar(win, multi ? physicalUnion(win) : null, false); } catch (_) { /* ignore */ }
-  if (multi) lockSpanToMonitors(win, getAllDisplaysBounds());
 }
 
 function startAboveTaskbar(win) {
@@ -411,7 +350,6 @@ function restoreFromSpan() {
   spanningAllDisplays = false;
   stopAboveTaskbar();
   showWindowsTaskbars();
-  restoreSpanLimits(mainWindow);
   closeProjectionWindows();
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
   mainWindow.setAlwaysOnTop(false);
