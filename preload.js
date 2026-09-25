@@ -1,12 +1,15 @@
 'use strict';
 
 const { contextBridge, ipcRenderer } = require('electron');
+const { planQuality } = require('./quality');
 
 contextBridge.exposeInMainWorld('api', {
   // Media / folders
   pickFolder: () => ipcRenderer.invoke('dialog:pickFolder'),
   readFolder: (folderPath) => ipcRenderer.invoke('media:readFolder', folderPath),
   deleteFile: (filePath, folderPath) => ipcRenderer.invoke('media:deleteFile', filePath, folderPath),
+  qualityUrl: (opts) => ipcRenderer.invoke('media:qualityUrl', opts),
+  qualityPlan: (opts) => planQuality(opts),
 
   // Displays
   getDisplayInfo: () => ipcRenderer.invoke('display:getInfo'),

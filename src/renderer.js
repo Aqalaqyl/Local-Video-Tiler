@@ -478,6 +478,14 @@ function sourcesMatch(video, url) {
   try { return loaded === new URL(url, window.location.href).href; } catch (_) { return loaded === url; }
 }
 
+/** True when the element is already showing this file, including a scaled proxy. */
+function playingFileMatches(leaf, file, media) {
+  if (!file) return true;
+  const el = media || (leaf && leaf.video);
+  if (leaf && file.path && leaf._playbackPath === file.path && videoSourceUrl(el)) return true;
+  return sourcesMatch(el, file.url);
+}
+
 /**
  * File actually on the tile's <video> right now (by src), not merely leaf.index.
  * Index can lead the element during async swaps — delete/favorite/volume must
@@ -485,6 +493,11 @@ function sourcesMatch(video, url) {
  */
 function resolvePlayingFile(leaf) {
   if (!leaf || !leaf.files || !leaf.files.length) return null;
+  if (leaf._playbackPath) {
+    for (const f of leaf.files) {
+      if (f && f.path === leaf._playbackPath) return f;
+    }
+  }
   const media = (leaf._gifActive && leaf.gif) ? leaf.gif : leaf.video;
   if (media && videoSourceUrl(media)) {
     for (const f of leaf.files) {
@@ -492,6 +505,144 @@ function resolvePlayingFile(leaf) {
     }
   }
   return leaf.files[leaf.index] || null;
+}
+
+/** Source timeline position. A live scaled stream starts at `_qualityOrigin`. */
+function mediaClock(leaf) {
+  const video = leaf && leaf.video;
+  const t = video && isFinite(video.currentTime) ? video.currentTime : 0;
+  if (leaf && leaf._qualitySeekable === false) return (leaf._qualityOrigin || 0) + t;
+  return t;
+}
+
+function mediaDuration(leaf) {
+  if (leaf && leaf._qualitySeekable === false && leaf._qualityDuration > 0) return leaf._qualityDuration;
+  const video = leaf && leaf.video;
+  if (video && isFinite(video.duration) && video.duration > 0) return video.duration;
+  return (leaf && leaf._qualityDuration) || 0;
+}
+
+function tilePixelSize(leaf) {
+  const rect = leaf && leaf.el ? leaf.el.getBoundingClientRect() : null;
+  const dpr = window.devicePixelRatio || 1;
+  return {
+    tileWidth: Math.max(2, Math.round((rect && rect.width ? rect.width : 320) * dpr)),
+    tileHeight: Math.max(2, Math.round((rect && rect.height ? rect.height : 180) * dpr))
+  };
+}
+
+async function resolveQuality(leaf, file, start) {
+  const fallback = {
+    url: file && file.url ? file.url : '',
+    seekable: true,
+    passthrough: true,
+    origin: 0,
+    duration: 0,
+    key: 'orig',
+    bitrate: 0,
+    maxEdge: 0
+  };
+  if (!file || !file.path || !window.api || !window.api.qualityUrl) return fallback;
+  const size = tilePixelSize(leaf);
+  try {
+    const q = await window.api.qualityUrl({
+      path: file.path,
+      tileWidth: size.tileWidth,
+      tileHeight: size.tileHeight,
+      favorite: isFileFavorite(file),
+      start: start || 0
+    });
+    if (q && q.url) return q;
+  } catch (_) { /* play the file directly */ }
+  return fallback;
+}
+
+function rememberQuality(leaf, file, q, start) {
+  leaf._playbackPath = file && file.path ? file.path : '';
+  leaf._qualityActive = !(q && q.passthrough);
+  leaf._qualitySeekable = !q || q.seekable !== false;
+  leaf._qualityOrigin = q && q.seekable === false ? (q.origin || start || 0) : 0;
+  leaf._qualityDuration = q && q.duration ? q.duration : 0;
+  leaf._qualityKey = q && q.key ? q.key : '';
+  leaf._qualityEndLatch = false;
+  const size = tilePixelSize(leaf);
+  if (window.api && window.api.qualityPlan) {
+    const plan = window.api.qualityPlan({
+      tileWidth: size.tileWidth,
+      tileHeight: size.tileHeight,
+      favorite: !!(file && isFileFavorite(file))
+    });
+    leaf._qualityPlanKey = plan.key;
+  }
+}
+
+async function applyQualitySrc(leaf, file, opts) {
+  const o = opts || {};
+  const start = Math.max(0, o.start || 0);
+  const gen = leaf._loadGen;
+  const q = await resolveQuality(leaf, file, start);
+  const video = leaf.video;
+  if (!video || leaf._loadGen !== gen) return false;
+  rememberQuality(leaf, file, q, start);
+  try { video.muted = true; } catch (_) { /* ignore */ }
+  video.loop = !!leaf.loop && leaf._qualitySeekable !== false;
+  video.src = q.url;
+  video.load();
+  if (leaf._qualitySeekable !== false && start > 0.05) {
+    const onReady = () => {
+      video.removeEventListener('loadedmetadata', onReady);
+      if (leaf.video !== video || leaf._loadGen !== gen) return;
+      try { video.currentTime = start; } catch (_) { /* ignore */ }
+    };
+    video.addEventListener('loadedmetadata', onReady);
+  }
+  return true;
+}
+
+async function seekLeafTime(leaf, time) {
+  if (!leaf || !leaf.video) return;
+  const dur = mediaDuration(leaf);
+  let t = Math.max(0, Number(time) || 0);
+  if (dur > 0) t = Math.min(t, Math.max(0, dur - 0.05));
+  if (leaf._qualitySeekable !== false) {
+    try { leaf.video.currentTime = t; } catch (_) { /* ignore */ }
+    return;
+  }
+  const file = resolvePlayingFile(leaf) || (leaf.files && leaf.files[leaf.index]);
+  if (!file || isGifFile(file) || isStillImage(file)) return;
+  const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
+  leaf._wantPlaying = leafShouldPlay(leaf);
+  const ok = await applyQualitySrc(leaf, file, { start: t });
+  if (!ok || !leaf.video || leaf._loadGen !== gen) return;
+  await finishLoadAndPlay(leaf, gen, leaf._wantPlaying);
+}
+
+function retargetQuality(leaf) {
+  const file = leaf && leaf.files && leaf.files[leaf.index];
+  if (!file || !file.path || isGifFile(file) || isStillImage(file)) return;
+  if (!window.api || !window.api.qualityPlan || !leaf.video || !videoSourceUrl(leaf.video)) return;
+  const size = tilePixelSize(leaf);
+  const plan = window.api.qualityPlan({
+    tileWidth: size.tileWidth,
+    tileHeight: size.tileHeight,
+    favorite: isFileFavorite(file)
+  });
+  if (plan.key === leaf._qualityPlanKey) return;
+  const t = mediaClock(leaf);
+  const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
+  leaf._wantPlaying = leafShouldPlay(leaf);
+  void applyQualitySrc(leaf, file, { start: t }).then((ok) => {
+    if (ok) return finishLoadAndPlay(leaf, gen, leaf._wantPlaying);
+  });
+}
+
+function watchTileQuality(leaf) {
+  if (!leaf || !leaf.el || leaf._qualityObserver || typeof ResizeObserver === 'undefined') return;
+  leaf._qualityObserver = new ResizeObserver(() => {
+    clearTimeout(leaf._qualityResizeTimer);
+    leaf._qualityResizeTimer = setTimeout(() => retargetQuality(leaf), 500);
+  });
+  leaf._qualityObserver.observe(leaf.el);
 }
 
 // ----------------------------------------------------------- Animated GIF tiles
@@ -946,7 +1097,7 @@ function reconcileProjectionPlayback() {
     if (!media) return;
 
     if (projection.role === 'controller') {
-      if (cur && !sourcesMatch(media, cur.url)) {
+      if (cur && !playingFileMatches(leaf, cur, media)) {
         loadCurrent(leaf, shouldPlay, { force: true });
       } else {
         applyPlaybackIntent(leaf);
@@ -964,7 +1115,7 @@ function reconcileProjectionPlayback() {
       return;
     }
 
-    if (cur && !sourcesMatch(media, cur.url)) {
+    if (cur && !playingFileMatches(leaf, cur, media)) {
       loadCurrent(leaf, shouldPlay);
     } else {
       applyPlaybackIntent(leaf);
@@ -1104,10 +1255,14 @@ function repairLeafPlayback(leaf, reason) {
   const cur = leaf.files[leaf.index];
   const shouldPlay = leafShouldPlay(leaf);
 
-  if (cur && videoSourceUrl(video) && !sourcesMatch(video, cur.url)) {
-    loadCurrent(leaf, shouldPlay);
-    resetLeafSyncClock(leaf);
-    return;
+  if (cur && videoSourceUrl(video)) {
+    const pathOk = !leaf._playbackPath || leaf._playbackPath === cur.path;
+    const srcOk = playingFileMatches(leaf, cur, video);
+    if (!pathOk || !srcOk) {
+      loadCurrent(leaf, shouldPlay);
+      resetLeafSyncClock(leaf);
+      return;
+    }
   }
 
   video.loop = !!leaf.loop;
@@ -1200,7 +1355,7 @@ function auditLeafPlayback(leaf) {
   }
 
   // Wrong clip loaded for this tile's playlist index.
-  if (cur && videoSourceUrl(video) && !sourcesMatch(video, cur.url) && video.readyState > 0) {
+  if (cur && videoSourceUrl(video) && !playingFileMatches(leaf, cur, video) && video.readyState > 0) {
     repairLeafPlayback(leaf, 'wrong-source');
     return;
   }
@@ -1750,10 +1905,7 @@ function restoreNativeAvClock(leaf) {
     return;
   }
   const wantPlay = leafShouldPlay(leaf);
-  let resumeAt = NaN;
-  try {
-    if (leaf.video && isFinite(leaf.video.currentTime)) resumeAt = leaf.video.currentTime;
-  } catch (_) { /* ignore */ }
+  const resumeAt = mediaClock(leaf);
   const idx = leaf.files.indexOf(file);
   if (idx >= 0) leaf.index = idx;
   detachTileAudioGraph(leaf);
@@ -1761,20 +1913,15 @@ function restoreNativeAvClock(leaf) {
   const video = leaf.video;
   if (!video) return;
   applyRememberedFileVolume(leaf, file);
-  try { video.muted = true; } catch (_) { /* ignore */ }
-  video.src = file.url;
-  video.loop = !!leaf.loop;
-  video.load();
   updateLeaf(leaf);
   const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
   leaf._holdSilence = true;
   leaf._wantPlaying = wantPlay;
   void (async () => {
-    await waitVideoReady(video, 2200);
-    if (!leaf.video || leaf.video !== video || leaf._loadGen !== gen) return;
-    if (isFinite(resumeAt) && resumeAt > 0) {
-      try { video.currentTime = resumeAt; } catch (_) { /* ignore */ }
-    }
+    const applied = await applyQualitySrc(leaf, file, { start: resumeAt });
+    if (!applied || !leaf.video || leaf.video !== video || leaf._loadGen !== gen) return;
+    await waitVideoReady(leaf.video, 2200);
+    if (!leaf.video || leaf._loadGen !== gen) return;
     leaf._holdSilence = false;
     applyTileAudio(leaf);
     if (wantPlay && leafShouldPlay(leaf) && leafMayDecode(leaf)) {
@@ -1913,7 +2060,7 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
         const startIndex = typeof remoteNode.index === 'number' ? remoteNode.index : 0;
         void loadFolder(localNode, remoteFolder, startIndex, false).then(() => {
           if (typeof remoteNode.currentTime === 'number' && localNode.video) {
-            try { localNode.video.currentTime = remoteNode.currentTime; } catch (_) { /* ignore */ }
+            void seekLeafTime(localNode, remoteNode.currentTime);
           }
           applyPlaybackIntent(localNode, { force: true });
         });
@@ -1927,7 +2074,8 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
       } else {
       const idx = clamp(remoteNode.index, 0, localNode.files.length - 1);
       const cur = localNode.files[idx];
-      if (idx !== localNode.index || (cur && !sourcesMatch(localNode.video, cur.url))) {
+      const srcOk = playingFileMatches(localNode, cur, localNode.video);
+      if (idx !== localNode.index || (cur && !srcOk)) {
         localNode.index = idx;
         // Load without autoplay when we may batch-resume below.
         // loadCurrent applies per-file volume memory for the new clip.
@@ -1959,9 +2107,9 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     if (!volumesOnly && applyIdentity && typeof remoteNode.currentTime === 'number' &&
         localNode.video && !localNode.userPaused && !localNode.video.seeking &&
         localNode.video.readyState >= 2) {
-      const drift = Math.abs((localNode.video.currentTime || 0) - remoteNode.currentTime);
+      const drift = Math.abs(mediaClock(localNode) - remoteNode.currentTime);
       if (drift > 1.25) {
-        try { localNode.video.currentTime = remoteNode.currentTime; } catch (_) { /* ignore */ }
+        void seekLeafTime(localNode, remoteNode.currentTime);
         resetLeafSyncClock(localNode);
         mediaDirty = true;
       }
@@ -1990,11 +2138,12 @@ function applyPendingSyncIdentity(leaf) {
   }
   const idx = leaf.index;
   const cur = leaf.files[idx];
-  if (cur && !sourcesMatch(leaf.video, cur.url)) {
+  const srcOk = playingFileMatches(leaf, cur, leaf.video);
+  if (cur && !srcOk) {
     loadCurrent(leaf, leafShouldPlay(leaf), { force: true });
   }
   if (hasTime && leaf.video && leafShouldPlay(leaf)) {
-    try { leaf.video.currentTime = leaf._pendingSyncTime; } catch (_) { /* ignore */ }
+    void seekLeafTime(leaf, leaf._pendingSyncTime);
     resetLeafSyncClock(leaf);
   }
   delete leaf._pendingSyncIndex;
@@ -2676,9 +2825,15 @@ function wireVideoElement(leaf) {
       leaf._timeUiPending = false;
       const v = leaf.video;
       if (!v || !leaf.refs || v !== video) return;
-      if (v.duration) {
-        refs.seek.value = String(Math.round((v.currentTime / v.duration) * 1000));
-        refs.time.textContent = `${fmtTime(v.currentTime)} / ${fmtTime(v.duration)}`;
+      const dur = mediaDuration(leaf);
+      const now = mediaClock(leaf);
+      if (dur) {
+        refs.seek.value = String(Math.round((now / dur) * 1000));
+        refs.time.textContent = `${fmtTime(now)} / ${fmtTime(dur)}`;
+      }
+      if (leaf._qualitySeekable === false && dur && now >= dur - 0.35 && !leaf._qualityEndLatch) {
+        leaf._qualityEndLatch = true;
+        video.dispatchEvent(new Event('ended'));
       }
     });
   });
@@ -2698,14 +2853,14 @@ function wireVideoElement(leaf) {
     if (leaf.video !== video) return;
     if (leaf._gifActive || leaf._stillActive) return;
     if (leaf.userPaused) return;
-    if (leaf.loop) return;
+    if (leaf.loop) {
+      if (leaf._qualitySeekable === false) void seekLeafTime(leaf, 0);
+      return;
+    }
     if (projection.active && projection.role === 'mirror') return;
     leaf._videoPlays = (leaf._videoPlays || 0) + 1;
     if (leaf._videoPlays < videoLoopCount()) {
-      try {
-        video.currentTime = 0;
-        video.play().catch(() => {});
-      } catch (_) { /* ignore */ }
+      void seekLeafTime(leaf, 0);
       return;
     }
     leaf._videoPlays = 0;
@@ -2732,8 +2887,8 @@ function wireLeafEvents(leaf) {
   refs.seek.addEventListener('input', (e) => {
     e.stopPropagation();
     if (leaf._gifActive || leaf._stillActive) return;
-    const v = leaf.video;
-    if (v && v.duration) v.currentTime = (refs.seek.value / 1000) * v.duration;
+    const dur = mediaDuration(leaf);
+    if (dur) void seekLeafTime(leaf, (refs.seek.value / 1000) * dur);
   });
   refs.vol.addEventListener('input', (e) => {
     e.stopPropagation();
@@ -2761,6 +2916,7 @@ function wireLeafEvents(leaf) {
   refs.toolbar.addEventListener('mousedown', (e) => e.stopPropagation());
 
   wireVideoElement(leaf);
+  watchTileQuality(leaf);
 
   // Click on the tile body: split (edit mode) or focus (view mode).
   // Note: the toolbar buttons and the "Choose media folder…" / 📁 buttons all
@@ -3072,7 +3228,10 @@ function loadCurrent(leaf, autoplay, opts = {}) {
   teardownStill(leaf);
   leaf._videoPlays = 0;
 
-  const sameSource = current && sourcesMatch(video, current.url);
+  const sameSource = current && videoSourceUrl(video) && (
+    (leaf._playbackPath && current.path && leaf._playbackPath === current.path) ||
+    sourcesMatch(video, current.url)
+  );
 
   if (!current || !mayDecode) {
     leaf._holdSilence = false;
@@ -3151,10 +3310,8 @@ async function swapLeafClip(leaf, current, gen, autoplay, opts = {}) {
   // Re-apply against the captured file object (not leaf.index) so a concurrent
   // sync cannot point us at the wrong clip's memory.
   applyRememberedFileVolume(leaf, current);
-  try { video.muted = true; } catch (_) { /* ignore */ }
-  video.src = current.url;
-  video.load();
-  video.loop = !!leaf.loop;
+  const applied = await applyQualitySrc(leaf, current, { start: 0 });
+  if (!applied || leaf._loadGen !== gen || !leaf.video) return;
   leaf._lastDropped = null;
   leaf._lastTotal = null;
   leaf._frameWatchArmed = false;
@@ -3237,7 +3394,7 @@ function prepareLeafForUnpause(leaf) {
   leaf.video.loop = !!leaf.loop;
   leaf.video.preload = 'auto';
 
-  const needsSwap = !!leaf._audioGraph || (cur && !sourcesMatch(leaf.video, cur.url));
+  const needsSwap = !!leaf._audioGraph || (cur && !playingFileMatches(leaf, cur, leaf.video));
   if (needsSwap && cur) {
     const idx = leaf.files.indexOf(cur);
     if (idx >= 0) leaf.index = idx;
@@ -3445,8 +3602,9 @@ function toggleFavorite(leaf) {
   const on = toggleFileFavorite(cur);
   applyFavoriteButton(leaf);
   flash(on
-    ? 'Favorited “' + cur.name + '” — plays more often'
+    ? 'Favorited “' + cur.name + '” — plays more often, higher quality'
     : 'Removed favorite “' + cur.name + '”');
+  retargetQuality(leaf);
 }
 
 function applyFavoriteButton(leaf) {
@@ -3457,8 +3615,8 @@ function applyFavoriteButton(leaf) {
   leaf.refs.fav.classList.toggle('active', on);
   leaf.refs.fav.textContent = on ? '★' : '☆';
   leaf.refs.fav.title = on
-    ? 'Favorited — plays more often in shuffle (click to unfavorite)'
-    : 'Favorite — play more often in shuffle (still discovers other clips)';
+    ? 'Favorited — plays more often and at a higher bitrate (click to unfavorite)'
+    : 'Favorite — play more often, and give this clip a higher bitrate';
   if (leaf.el) leaf.el.classList.toggle('has-favorite', on);
 }
 
@@ -3537,6 +3695,11 @@ function closeLeaf(leaf) {
 }
 
 function disposeLeaf(leaf) {
+  if (leaf._qualityObserver) {
+    try { leaf._qualityObserver.disconnect(); } catch (_) { /* ignore */ }
+    leaf._qualityObserver = null;
+  }
+  clearTimeout(leaf._qualityResizeTimer);
   teardownGif(leaf);
   teardownStill(leaf);
   detachTileAudioGraph(leaf);
@@ -3971,7 +4134,7 @@ function serializeTree(node, withIndex, withTime) {
     if (node.spacer) o.spacer = true;
     if (withIndex) o.index = node.index || 0;
     if (withTime && node.video && isFinite(node.video.currentTime)) {
-      o.currentTime = Math.round(node.video.currentTime * 20) / 20;
+      o.currentTime = Math.round(mediaClock(node) * 20) / 20;
     }
     o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
     if (node.muted) o.muted = true;
@@ -4694,7 +4857,7 @@ function tileToDisplays(opts = {}) {
       muted: src.muted,
       loop: src.loop,
       userPaused: !!src.userPaused,
-      currentTime: src.video && isFinite(src.video.currentTime) ? src.video.currentTime : 0
+      currentTime: mediaClock(src)
     });
   }
   // Fallback: reading-order save if geometry mapping found nothing yet.
@@ -4706,7 +4869,7 @@ function tileToDisplays(opts = {}) {
     muted: l.muted,
     loop: l.loop,
     userPaused: !!l.userPaused,
-    currentTime: l.video && isFinite(l.video.currentTime) ? l.video.currentTime : 0
+    currentTime: mediaClock(l)
   }));
 
   forEachLeaf(root, disposeLeaf);
@@ -4735,7 +4898,7 @@ function tileToDisplays(opts = {}) {
     if (s.folder) {
       loadFolder(leaf, s.folder, s.index || 0, false).then(() => {
         if (typeof s.currentTime === 'number' && leaf.video && s.currentTime > 0) {
-          try { leaf.video.currentTime = s.currentTime; } catch (_) { /* ignore */ }
+          void seekLeafTime(leaf, s.currentTime);
         }
         applyPlaybackIntent(leaf, leaf.userPaused ? {} : { force: true });
       });
