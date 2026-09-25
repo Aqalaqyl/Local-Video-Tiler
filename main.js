@@ -198,12 +198,6 @@ function closeProjectionWindows() {
   projectionWindows = [];
 }
 
-function boundsNear(a, b) {
-  if (!a || !b) return false;
-  return Math.abs(a.x - b.x) <= 2 && Math.abs(a.y - b.y) <= 2 &&
-    Math.abs(a.width - b.width) <= 2 && Math.abs(a.height - b.height) <= 2;
-}
-
 /**
  * Size the one span window to every monitor's full bounds, taskbar included.
  * Windows otherwise clamps a normal window to the work area, which leaves the
@@ -228,23 +222,15 @@ function placeSpanWindow(win) {
     return view;
   }
 
-  // OS fullscreen locks the window to one monitor. Stay borderless and pin the
-  // content box to the full desktop rectangle, then raise it over the taskbar.
+  // OS fullscreen locks the window to one monitor, and setBounds stops at the
+  // taskbar. Leave fullscreen and pin this one window to the virtual screen.
   if (isWindowFullscreen(win)) setWindowFullscreen(win, false);
-  const pin = () => {
-    if (!win || win.isDestroyed() || !spanningAllDisplays) return;
-    win.setAlwaysOnTop(true, 'screen-saver');
-    try { win.setContentBounds(view); } catch (_) { win.setBounds(view); }
-    const got = win.getContentBounds();
-    if (!boundsNear(got, view)) {
-      win.setBounds(view);
-      try { win.setContentBounds(view); } catch (_) { /* ignore */ }
-    }
-    win.moveTop();
-    // Native topmost placement. setBounds alone stays above the taskbar.
-    void pinOverTaskbar(win, view, screen);
-  };
-  pin();
+  if (process.platform === 'win32') {
+    pinOverTaskbar(win);
+    return view;
+  }
+  try { win.setContentBounds(view); } catch (_) { win.setBounds(view); }
+  win.moveTop();
   return view;
 }
 
@@ -281,13 +267,8 @@ function spanAllDisplays() {
   try { mainWindow.webContents.setBackgroundThrottling(false); } catch (_) { /* ignore */ }
 
   // Windows will not let one normal window cover the taskbar. Hide every
-  // monitor's taskbar for the span, then pin this single window to the full
-  // desktop. They come back when the span ends.
-  if (process.platform === 'win32' && displays.length >= 2) {
-    hideWindowsTaskbars().then(() => {
-      if (spanningAllDisplays) scheduleSpanPin(mainWindow);
-    });
-  }
+  // monitor's taskbar, then pin this single window to the full virtual screen.
+  if (process.platform === 'win32' && displays.length >= 2) hideWindowsTaskbars();
   scheduleSpanPin(mainWindow);
   sendProjection(mainWindow, {
     active: true,
