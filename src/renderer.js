@@ -335,6 +335,21 @@ function unionBoundsFromWinDisplays() {
   return unionBounds(displays);
 }
 
+/**
+ * The display that contains a tile's center is the one that shuffles it.
+ * The main window does not decode tiles on the other monitors, so those tiles
+ * have to pick their next random file themselves.
+ */
+function thisDisplayShuffles(leaf) {
+  if (!projection.active || !projection.viewport) return true;
+  const r = getLeafUnionRect(leaf);
+  if (!r || r.w < 1 || r.h < 1) return projection.role !== 'mirror';
+  const cx = r.x + r.w / 2;
+  const cy = r.y + r.h / 2;
+  const v = projection.viewport;
+  return cx >= v.x && cx < v.x + v.width && cy >= v.y && cy < v.y + v.height;
+}
+
 /** Map a tile into the shared multi-monitor canvas coordinates. */
 function getLeafUnionRect(leaf) {
   if (!leaf.el) return null;
@@ -490,6 +505,22 @@ function playingFileMatches(leaf, file, media) {
   const el = media || (leaf && leaf.video);
   if (leaf && file.path && leaf._playbackPath === file.path && videoSourceUrl(el)) return true;
   return sourcesMatch(el, file.url);
+}
+
+function activeMediaElement(leaf) {
+  if (!leaf) return null;
+  if ((leaf._gifActive || leaf._stillActive) && leaf.gif) return leaf.gif;
+  return leaf.video || null;
+}
+
+/** The on-screen file is missing or is not the clip this tile's index selected. */
+function clipOutOfDate(leaf) {
+  if (!leaf || leaf.spacer || leaf._holdSilence || !leaf.files || !leaf.files.length) return false;
+  const cur = leaf.files[leaf.index];
+  if (!cur) return false;
+  const media = activeMediaElement(leaf);
+  if (!media || !videoSourceUrl(media)) return true;
+  return !playingFileMatches(leaf, cur, media);
 }
 
 /**
@@ -811,7 +842,7 @@ function armGifCycle(leaf) {
     clearGifCycle(leaf);
     return;
   }
-  if (projection.active && projection.role === 'mirror') {
+  if (projection.active && !thisDisplayShuffles(leaf)) {
     clearGifCycle(leaf);
     return;
   }
@@ -823,7 +854,7 @@ function armGifCycle(leaf) {
   leaf._gifCycleTimer = window.setTimeout(() => {
     leaf._gifCycleTimer = 0;
     if (!leaf._gifActive || leaf.userPaused || leaf.loop) return;
-    if (projection.active && projection.role === 'mirror') return;
+    if (projection.active && !thisDisplayShuffles(leaf)) return;
     advanceRandom(leaf);
   }, ms);
 }
@@ -924,11 +955,13 @@ function paintGifChrome(leaf) {
 async function loadGifCurrent(leaf, file, autoplay, opts = {}) {
   if (!leaf || !file) return;
   const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
+  leaf._holdSilence = true;
   clearGifCycle(leaf);
   detachTileAudioGraph(leaf);
   stopVideoElement(leaf.video);
   showGifLayer(leaf, true);
   if (!leaf.gif) {
+    leaf._holdSilence = false;
     updateLeaf(leaf);
     return;
   }
@@ -941,6 +974,7 @@ async function loadGifCurrent(leaf, file, autoplay, opts = {}) {
   if (leaf._loadGen !== gen) return;
   leaf._gifLoopInfinite = plays === 0;
   leaf._gifLoopCount = plays;
+  leaf._playbackPath = file.path || '';
   const same = leaf.gif.src === playbackUrl;
   if (!same || opts.hardSwap) leaf.gif.src = playbackUrl;
   leaf._holdSilence = false;
@@ -986,7 +1020,7 @@ function armImageCycle(leaf) {
     clearImageCycle(leaf);
     return;
   }
-  if (projection.active && projection.role === 'mirror') {
+  if (projection.active && !thisDisplayShuffles(leaf)) {
     clearImageCycle(leaf);
     return;
   }
@@ -995,7 +1029,7 @@ function armImageCycle(leaf) {
   leaf._imageCycleTimer = window.setTimeout(() => {
     leaf._imageCycleTimer = 0;
     if (!leaf._stillActive || leaf.userPaused || leaf.loop) return;
-    if (projection.active && projection.role === 'mirror') return;
+    if (projection.active && !thisDisplayShuffles(leaf)) return;
     advanceRandom(leaf);
   }, ms);
 }
@@ -1063,6 +1097,7 @@ function applyStillPlayback(leaf) {
 async function loadImageCurrent(leaf, file, autoplay, opts = {}) {
   if (!leaf || !file) return;
   const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
+  leaf._holdSilence = true;
   clearGifCycle(leaf);
   clearImageCycle(leaf);
   detachTileAudioGraph(leaf);
@@ -1070,11 +1105,13 @@ async function loadImageCurrent(leaf, file, autoplay, opts = {}) {
   leaf._gifActive = false;
   showStillLayer(leaf, true);
   if (!leaf.gif) {
+    leaf._holdSilence = false;
     updateLeaf(leaf);
     return;
   }
   const same = leaf.gif.src === file.url;
   if (!same || opts.hardSwap) leaf.gif.src = file.url;
+  leaf._playbackPath = file.path || '';
   leaf._holdSilence = false;
   leaf._wantPlaying = !!autoplay && !leaf.userPaused;
   leaf._videoPlays = 0;
@@ -1103,31 +1140,23 @@ function reconcileProjectionPlayback() {
 
   forEachLeaf(root, (leaf) => {
     if (leaf.spacer || !leaf.files.length) return;
-    const cur = leaf.files[leaf.index];
     const shouldPlay = leafShouldPlay(leaf);
-    const media = (leaf._gifActive && leaf.gif) ? leaf.gif : leaf.video;
-    if (!media) return;
-
-    if (projection.role === 'controller') {
-      if (cur && !leaf._holdSilence && !videoSourceUrl(media) && !leaf._gifActive && !leaf._stillActive) {
-        loadCurrent(leaf, shouldPlay, { force: true });
-      } else {
-        applyPlaybackIntent(leaf);
-      }
-      return;
-    }
+    if (!activeMediaElement(leaf)) return;
 
     const visible = isLeafInViewport(leaf) || isLeafVisible(leaf);
     if (!visible) {
       leaf._wantPlaying = false;
       if (leaf._gifActive) applyGifPlayback(leaf);
+      else if (leaf._stillActive) applyStillPlayback(leaf);
       else pauseVideoElement(leaf.video);
       applyTileAudio(leaf);
       resetLeafSyncClock(leaf);
       return;
     }
 
-    if (cur && !leaf._holdSilence && !videoSourceUrl(media) && !leaf._gifActive && !leaf._stillActive) {
+    // A peer may have shuffled this tile while we were not decoding it. Load
+    // that file once this screen is the one showing it — do not replay the old src.
+    if (clipOutOfDate(leaf)) {
       loadCurrent(leaf, shouldPlay);
     } else {
       applyPlaybackIntent(leaf);
@@ -1851,7 +1880,8 @@ function sameLayoutStructure(a, b) {
 
 /**
  * Apply synced playback fields onto an existing tree (no DOM rebuild).
- * Clip index/time are only applied when `applyIdentity` is true (controller → mirrors).
+ * A higher clipSeq from any display wins (that screen shuffled the tile).
+ * An equal stamp is applied only when the sender is the controller.
  * Bulk unpause from a peer is collected and resumed in unison.
  */
 function applyIncomingPlayback(localNode, remoteNode, opts = {}) {
@@ -1911,20 +1941,27 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
       }
     }
 
-    if (!volumesOnly && applyIdentity && typeof remoteNode.index === 'number' && localNode.files.length) {
+    if (!volumesOnly && typeof remoteNode.index === 'number' && localNode.files.length) {
       if (localNode._deleteLock) {
         // Confirm dialog open — don't let peer identity steal the clip under trash.
       } else {
       const idx = clamp(remoteNode.index, 0, localNode.files.length - 1);
-      const clipChanged = idx !== localNode.index;
-      // The controller replays the same file without changing index. A mirror
-      // whose element has already ended has to follow that, or the other
-      // monitors freeze on the last frame.
-      const replay = !clipChanged && localNode.video && localNode.video.ended && leafShouldPlay(localNode);
-      if (clipChanged || replay) {
+      const remoteSeq = remoteNode.clipSeq || 0;
+      const localSeq = localNode._clipSeq || 0;
+      // The controller is the authority for an equal stamp. A newer stamp from
+      // another monitor is that display shuffling to a different file.
+      const takeClip = remoteSeq > localSeq || (applyIdentity && remoteSeq >= localSeq);
+      if (takeClip && idx !== localNode.index) {
+        if (remoteSeq > localSeq) localNode._clipSeq = remoteSeq;
         localNode.index = idx;
-        loadCurrent(localNode, leafShouldPlay(localNode), { force: true });
-        mediaDirty = true;
+        if (leafMayDecode(localNode)) {
+          loadCurrent(localNode, leafShouldPlay(localNode), { force: true });
+          mediaDirty = true;
+        } else if (!IS_MIRROR) {
+          saveState();
+        }
+      } else if (remoteSeq > localSeq) {
+        localNode._clipSeq = remoteSeq;
       }
       }
     }
@@ -1965,16 +2002,23 @@ function applyPendingSyncIdentity(leaf) {
   if (!hasIndex && !hasTime) return;
 
   const previousIndex = leaf.index;
-  if (hasIndex && leaf.files.length) {
+  const remoteSeq = leaf._pendingClipSeq || 0;
+  const localSeq = leaf._clipSeq || 0;
+  // An older stamp is a display that has not seen this tile's latest shuffle.
+  const takeClip = !hasIndex || remoteSeq >= localSeq;
+  if (remoteSeq > localSeq) leaf._clipSeq = remoteSeq;
+  if (takeClip && hasIndex && leaf.files.length) {
     leaf.index = clamp(leaf._pendingSyncIndex, 0, leaf.files.length - 1);
   }
   const cur = leaf.files[leaf.index];
-  const indexChanged = hasIndex && leaf.index !== previousIndex;
-  if (cur && (indexChanged || !videoSourceUrl(leaf.video))) {
+  const indexChanged = leaf.index !== previousIndex;
+  const media = activeMediaElement(leaf);
+  if (cur && (indexChanged || !videoSourceUrl(media))) {
     loadCurrent(leaf, leafShouldPlay(leaf), { force: true });
   }
   delete leaf._pendingSyncIndex;
   delete leaf._pendingSyncTime;
+  delete leaf._pendingClipSeq;
 }
 
 /**
@@ -2040,8 +2084,8 @@ function applyIncomingLayout(payload) {
     }
 
     // Fast path: same tile structure → just realign clip identity / pause / volume.
-    // Only the controller is authoritative for which clip/time each tile shows —
-    // mirror broadcasts can still carry pause/volume, but must not rewrite identity.
+    // A newer clipSeq from any display is that screen shuffling its own tiles.
+    // An equal or older stamp from a mirror must not put a tile back on the old file.
     // Do not schedule span recovery here — that was re-playing every tile every sync.
     if (sameLayoutStructure(root, payload.tree)) {
       applyIncomingPlayback(root, payload.tree, {
@@ -2080,6 +2124,7 @@ function applyIncomingLayout(payload) {
           // Always apply — omitting false left peers stuck paused after unpause.
           leaf.userPaused = !!node.userPaused;
           if (typeof node.index === 'number') leaf._pendingSyncIndex = node.index;
+          if (typeof node.clipSeq === 'number') leaf._pendingClipSeq = node.clipSeq;
           if (typeof node.currentTime === 'number') leaf._pendingSyncTime = node.currentTime;
         }
         if (leaf.el) leaf.el.classList.toggle('pad-spacer', spacer);
@@ -2190,9 +2235,17 @@ function setProjection(config) {
     stopProjectionIdentitySync();
     applyProjection();
     forEachLeaf(root, (leaf) => {
-      if (leaf.spacer || !leaf.video) return;
+      if (leaf.spacer || !leaf.files.length) return;
+      // While spanning, another monitor may have shuffled a tile this window
+      // was not decoding. Play that file, not the one still sitting in the element.
+      if (clipOutOfDate(leaf)) {
+        loadCurrent(leaf, leafShouldPlay(leaf), { force: true });
+        return;
+      }
       applyTileAudio(leaf);
-      if (leafShouldPlay(leaf)) leaf.video.play().catch(() => {});
+      if (leaf._gifActive) applyGifPlayback(leaf);
+      else if (leaf._stillActive) applyStillPlayback(leaf);
+      else if (leaf.video && leafShouldPlay(leaf)) leaf.video.play().catch(() => {});
     });
     renderDisplayGuide();
     return;
@@ -2667,9 +2720,8 @@ function wireVideoElement(leaf) {
     resetLeafSyncClock(leaf);
     armVideoFrameWatch(leaf);
   });
-  // When a clip ends (and the tile isn't looping), shuffle to a random clip.
-  // While spanning, only the controller advances — mirrors follow synced index
-  // so on-screen video and controller audio never drift onto different clips.
+  // When a clip ends (and the tile isn't set to loop), shuffle to another file
+  // from this tile's folder. The display that contains the tile does the pick.
   video.addEventListener('ended', () => {
     if (leaf.video !== video) return;
     if (leaf._gifActive || leaf._stillActive) return;
@@ -2689,7 +2741,9 @@ function wireVideoElement(leaf) {
       if (leaf._qualitySeekable === false) void seekLeafTime(leaf, 0);
       return;
     }
-    if (projection.active && projection.role === 'mirror') return;
+    // Each monitor shuffles the tiles centered on it. The main window is not
+    // playing the other screens, so it never sees those clips end.
+    if (!thisDisplayShuffles(leaf)) return;
     leaf._videoPlays = (leaf._videoPlays || 0) + 1;
     if (leaf._videoPlays < videoLoopCount()) {
       void seekLeafTime(leaf, 0);
@@ -3359,9 +3413,15 @@ function updatePauseButtons() {
   paintPauseButton(btnPauseDisplayMirror, displayPlaying, 'Display');
 }
 
+function bumpClipSeq(leaf) {
+  if (!leaf) return;
+  leaf._clipSeq = (leaf._clipSeq || 0) + 1;
+}
+
 function step(leaf, dir, autoplay = false) {
   if (!leaf.files.length) return;
   leaf.index = (leaf.index + dir + leaf.files.length) % leaf.files.length;
+  bumpClipSeq(leaf);
   loadCurrent(leaf, autoplay || !leaf.userPaused);
   saveState();
 }
@@ -3380,6 +3440,7 @@ function advanceRandom(leaf, initial = false) {
   if (leaf._deleteLock && !initial) return;
   if (initial) leaf.userPaused = false;
   leaf.index = pickWeightedIndex(leaf, { avoidCurrent: !initial });
+  bumpClipSeq(leaf);
   loadCurrent(leaf, leafShouldPlay(leaf) || initial);
   saveState();
 }
@@ -3965,7 +4026,10 @@ function serializeTree(node, withIndex, withTime) {
   if (node.kind === 'leaf') {
     const o = { kind: 'leaf', folder: node.folder, loop: !!node.loop, folderRev: node._folderRev || 0 };
     if (node.spacer) o.spacer = true;
-    if (withIndex) o.index = node.index || 0;
+    if (withIndex) {
+      o.index = node.index || 0;
+      o.clipSeq = node._clipSeq || 0;
+    }
     if (withTime && node.video && isFinite(node.video.currentTime)) {
       o.currentTime = Math.round(mediaClock(node) * 20) / 20;
     }
@@ -3995,6 +4059,7 @@ function deserialize(obj) {
     l.folder = obj.folder || null;
     l._folderRev = obj.folderRev || 0;
     l.index = l.savedIndex = obj.index || 0;
+    l._clipSeq = obj.clipSeq || 0;
     l.loop = !!obj.loop;
     l.volume = typeof obj.volume === 'number' ? clamp(obj.volume, 0, MAX_TILE_VOLUME) : 1;
     l.muted = !!obj.muted;
