@@ -169,10 +169,11 @@ function applyProjection() {
       projection.viewport.height === projection.union.height;
     const offX = coversWall ? 0 : projOffX();
     const offY = coversWall ? 0 : projOffY();
-    // One window over the whole desktop: fill the client area (the full monitor
-    // bounds, taskbar included). A per-display slice still uses the union size.
-    const width = coversWall ? window.innerWidth : projection.union.width;
-    const height = coversWall ? window.innerHeight : projection.union.height;
+    // Size the canvas to the monitors, not the work area. A window that stops
+    // at the taskbar is shorter than the wall, and scaling tiles into that
+    // shorter box makes the other displays miss their screens.
+    const width = projection.union.width;
+    const height = projection.union.height;
     for (const el of layers) {
       el.style.left = (-offX) + 'px';
       el.style.top = (-offY) + 'px';

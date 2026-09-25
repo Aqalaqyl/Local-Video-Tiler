@@ -206,15 +206,47 @@ function closeProjectionWindows() {
   projectionWindows = [];
 }
 
-/** Virtual-screen rectangle in physical pixels (SetWindowPos's coordinate space). */
+/**
+ * Virtual-screen rectangle in physical pixels (SetWindowPos's coordinate space).
+ * Convert each display on its own. One DIP rect across mixed-DPI monitors is
+ * not a single scale, and that error shows up as a short edge on the other screens.
+ */
 function physicalUnion(win) {
-  const union = getAllDisplaysBounds();
-  try {
-    const target = win && !win.isDestroyed() ? win : null;
-    const phys = screen.dipToScreenRect(target, union);
-    if (phys && phys.width > 0 && phys.height > 0) return phys;
-  } catch (_) { /* fall back to DIP */ }
-  return union;
+  const target = win && !win.isDestroyed() ? win : null;
+  const displays = screen.getAllDisplays();
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const d of displays) {
+    let b = d.bounds;
+    try {
+      const phys = screen.dipToScreenRect(target, d.bounds);
+      if (phys && phys.width > 0 && phys.height > 0) b = phys;
+    } catch (_) { /* keep DIP for this display */ }
+    minX = Math.min(minX, b.x);
+    minY = Math.min(minY, b.y);
+    maxX = Math.max(maxX, b.x + b.width);
+    maxY = Math.max(maxY, b.y + b.height);
+  }
+  if (!Number.isFinite(minX)) return getAllDisplaysBounds();
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+let savedMaxSize = null;
+
+function allowFullSpanSize(win, union) {
+  if (!win || win.isDestroyed()) return;
+  if (!savedMaxSize) {
+    try { savedMaxSize = win.getMaximumSize(); } catch (_) { savedMaxSize = [0, 0]; }
+  }
+  // DIP maximum. display.bounds already include the taskbar; the work area does not.
+  try { win.setMaximumSize(Math.max(1, Math.ceil(union.width)), Math.max(1, Math.ceil(union.height))); }
+  catch (_) { /* ignore */ }
+}
+
+function restoreMaxSize(win) {
+  const saved = savedMaxSize;
+  savedMaxSize = null;
+  if (!saved || !win || win.isDestroyed()) return;
+  try { win.setMaximumSize(saved[0], saved[1]); } catch (_) { /* ignore */ }
 }
 
 function raiseSpanWindow(win, level) {
@@ -247,6 +279,7 @@ function placeSpanWindow(win) {
   // taskbar. Leave fullscreen and pin this one window to the virtual screen.
   if (isWindowFullscreen(win)) setWindowFullscreen(win, false);
   if (process.platform === 'win32') {
+    allowFullSpanSize(win, union);
     pinOverTaskbar(win, physicalUnion(win), true);
     return view;
   }
@@ -334,6 +367,7 @@ function restoreFromSpan() {
   spanningAllDisplays = false;
   stopAboveTaskbar();
   showWindowsTaskbars();
+  restoreMaxSize(mainWindow);
   closeProjectionWindows();
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
   mainWindow.setAlwaysOnTop(false);

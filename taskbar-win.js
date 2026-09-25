@@ -34,6 +34,14 @@ const SWP_SHOWWINDOW = 0x0040;
 
 const GWL_STYLE = -16;
 const GWL_EXSTYLE = -20;
+const GWLP_WNDPROC = -4;
+
+// Windows asks for these before it will allow a size, then clamps the answer
+// to the work area (above the taskbar). The span window has to answer with
+// the full virtual screen or every monitor is shortened by the taskbar.
+const WM_GETMINMAXINFO = 0x0024;
+const WM_WINDOWPOSCHANGING = 0x0046;
+const WM_NCCALCSIZE = 0x0083;
 
 const WS_EX_TOPMOST = 0x00000008;
 const WS_EX_DLGMODALFRAME = 0x00000001;
@@ -49,19 +57,29 @@ const APPBAR_BYTES = 48;
 
 let user32 = null;
 let shellApi = null;
+let koffiLib = null;
 let secondaryEnum = null;
 let savedStyle = null;
 let savedExStyle = null;
 let pinnedHwnd = null;
 let savedAppBar = null;
+let spanRect = null;
+let origWndProc = null;
+let wndProcCb = null;
+let wndProcAddr = null;
+let subclassHwnd = null;
 
 function api() {
   if (process.platform !== 'win32') return null;
   if (user32) return user32;
   const koffi = require('koffi');
+  koffiLib = koffi;
   const lib = koffi.load('user32.dll');
   const EnumProc = koffi.proto('bool __stdcall LvtEnumProc(intptr hwnd, intptr lParam)');
+  const SpanProc = koffi.proto('intptr __stdcall LvtSpanProc(void *hwnd, uint msg, uintptr wParam, void *lParam)');
   user32 = {
+    koffi,
+    SpanProc,
     FindWindowW: lib.func('intptr __stdcall FindWindowW(const char16_t *lpClassName, const char16_t *lpWindowName)'),
     ShowWindow: lib.func('bool __stdcall ShowWindow(intptr hWnd, int nCmdShow)'),
     GetClassNameW: lib.func('int __stdcall GetClassNameW(intptr hWnd, void *buf, int max)'),
@@ -70,6 +88,8 @@ function api() {
     GetSystemMetrics: lib.func('int __stdcall GetSystemMetrics(int nIndex)'),
     GetWindowLongPtrW: lib.func('intptr __stdcall GetWindowLongPtrW(intptr hWnd, int nIndex)'),
     SetWindowLongPtrW: lib.func('intptr __stdcall SetWindowLongPtrW(intptr hWnd, int nIndex, intptr dwNewLong)'),
+    SetWindowLongPtrPtr: lib.func('intptr __stdcall SetWindowLongPtrW(intptr hWnd, int nIndex, void *dwNewLong)'),
+    CallWindowProcW: lib.func('intptr __stdcall CallWindowProcW(intptr prev, void *hwnd, uint msg, uintptr wParam, void *lParam)'),
     EnumProc
   };
   return user32;
@@ -97,14 +117,19 @@ function asBig(value) {
   return 0n;
 }
 
+function ptrBits(value) {
+  return BigInt.asUintN(64, asBig(value));
+}
+
 function hwndOf(win) {
   if (!win || win.isDestroyed()) return 0n;
   const handle = win.getNativeWindowHandle();
   if (!handle || handle.length < 4) return 0n;
   // Signed. An unsigned read of a sign-extended HWND does not fit in intptr,
   // and koffi then drops the SetWindowPos call.
-  if (handle.length >= 8) return handle.readBigInt64LE(0);
-  return BigInt(handle.readInt32LE(0));
+  // Unsigned bits. A negative BigInt is dropped by koffi and SetWindowPos no-ops.
+  if (handle.length >= 8) return handle.readBigUInt64LE(0);
+  return BigInt(handle.readUInt32LE(0));
 }
 
 function eachTaskbar(fn) {
@@ -256,6 +281,132 @@ function preferredRect(screenRect) {
   return { x, y, w: right - x, h: bottom - y };
 }
 
+function writeI32(ptr, offset, value) {
+  koffiLib.encode(ptr, offset, 'int32', value | 0);
+}
+
+function readU32(ptr, offset) {
+  return koffiLib.decode(ptr, offset, 'uint32') >>> 0;
+}
+
+function callOrigProc(hwnd, msg, wParam, lParam) {
+  const u = api();
+  if (!u || origWndProc == null) return 0;
+  if (wndProcAddr != null && ptrBits(origWndProc) === wndProcAddr) return 0;
+  return u.CallWindowProcW(asBig(origWndProc), hwnd, msg, wParam, lParam);
+}
+
+function msgNum(msg) {
+  return typeof msg === 'bigint' ? Number(msg) : msg;
+}
+
+/**
+ * Runs on the window thread for every message while spanning. Anything other
+ * than the size messages is forwarded immediately.
+ */
+function onSpanWndProc(hwnd, msg, wParam, lParam) {
+  const m = msgNum(msg);
+  if (!spanRect || (m !== WM_GETMINMAXINFO && m !== WM_WINDOWPOSCHANGING && m !== WM_NCCALCSIZE)) {
+    return callOrigProc(hwnd, msg, wParam, lParam);
+  }
+  // Keep the page itself full-bleed. The default handler insets the client
+  // to the work area, which is the gap the taskbar sits in.
+  if (m === WM_NCCALCSIZE) {
+    if (!Number(wParam)) return callOrigProc(hwnd, msg, wParam, lParam);
+    let left = 0;
+    let top = 0;
+    let right = 0;
+    let bottom = 0;
+    try {
+      left = koffiLib.decode(lParam, 0, 'int32');
+      top = koffiLib.decode(lParam, 4, 'int32');
+      right = koffiLib.decode(lParam, 8, 'int32');
+      bottom = koffiLib.decode(lParam, 12, 'int32');
+    } catch (_) {
+      return callOrigProc(hwnd, msg, wParam, lParam);
+    }
+    callOrigProc(hwnd, msg, wParam, lParam);
+    try {
+      writeI32(lParam, 0, left);
+      writeI32(lParam, 4, top);
+      writeI32(lParam, 8, right);
+      writeI32(lParam, 12, bottom);
+    } catch (err) {
+      console.error('[Local Video Tiler] span client', err && err.message ? err.message : err);
+    }
+    return 0;
+  }
+  const ret = callOrigProc(hwnd, msg, wParam, lParam);
+  const rect = spanRect;
+  try {
+    if (m === WM_GETMINMAXINFO) {
+      // ptMaxSize, ptMaxPosition, ptMaxTrackSize. Same layout on x64: no pointers.
+      writeI32(lParam, 8, rect.w);
+      writeI32(lParam, 12, rect.h);
+      writeI32(lParam, 16, rect.x);
+      writeI32(lParam, 20, rect.y);
+      writeI32(lParam, 32, rect.w);
+      writeI32(lParam, 36, rect.h);
+    } else {
+      // WINDOWPOS is x64: x,y,cx,cy start at byte 16. Leave z-order-only updates alone.
+      const flags = readU32(lParam, 32);
+      if ((flags & SWP_NOMOVE) === 0) {
+        writeI32(lParam, 16, rect.x);
+        writeI32(lParam, 20, rect.y);
+      }
+      if ((flags & SWP_NOSIZE) === 0) {
+        writeI32(lParam, 24, rect.w);
+        writeI32(lParam, 28, rect.h);
+      }
+    }
+  } catch (err) {
+    console.error('[Local Video Tiler] span size', err && err.message ? err.message : err);
+  }
+  return ret;
+}
+
+function installSpanClamp(hwnd) {
+  const u = api();
+  if (!u || !hwnd) return;
+  if (!wndProcCb) {
+    wndProcCb = koffiLib.register(onSpanWndProc, koffiLib.pointer(u.SpanProc));
+    try { wndProcAddr = ptrBits(koffiLib.address(wndProcCb)); } catch (_) { wndProcAddr = null; }
+  }
+  const current = ptrBits(u.GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
+  if (wndProcAddr != null && current === wndProcAddr) {
+    subclassHwnd = hwnd;
+    return;
+  }
+  if (subclassHwnd === hwnd && wndProcAddr == null) return;
+  // Chain to whatever is installed now (Chromium, or a proc it replaced us with).
+  if (current !== 0n) origWndProc = current;
+  u.SetWindowLongPtrPtr(hwnd, GWLP_WNDPROC, wndProcCb);
+  subclassHwnd = hwnd;
+}
+
+function removeSpanClamp() {
+  spanRect = null;
+  const u = api();
+  const hwnd = subclassHwnd;
+  const prev = origWndProc;
+  subclassHwnd = null;
+  origWndProc = null;
+  if (u && hwnd && prev != null) {
+    try {
+      const current = ptrBits(u.GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
+      if (wndProcAddr == null || current === wndProcAddr) {
+        u.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, asBig(prev));
+      }
+    } catch (_) { /* window already gone */ }
+  }
+  if (wndProcCb) {
+    const cb = wndProcCb;
+    wndProcCb = null;
+    wndProcAddr = null;
+    try { koffiLib.unregister(cb); } catch (_) { /* ignore */ }
+  }
+}
+
 /**
  * Keep `win` above every taskbar. `screenRect` is the virtual screen in
  * physical pixels ({x, y, width, height}); omit it to only fix z-order.
@@ -277,6 +428,10 @@ function pinOverTaskbar(win, screenRect, activate) {
     }
     demoteTaskbars();
     const rect = screenRect ? preferredRect(screenRect) : null;
+    if (rect) {
+      spanRect = rect;
+      installSpanClamp(hwnd);
+    }
     const activateBit = activate ? 0 : SWP_NOACTIVATE;
     if (rect) {
       u.SetWindowPos(
@@ -311,6 +466,7 @@ function hideWindowsTaskbars() {
 }
 
 function showWindowsTaskbars() {
+  removeSpanClamp();
   popTaskbarAutohide();
   restorePinnedStyle();
   restoreTaskbars();
