@@ -2613,6 +2613,7 @@ function wireVideoElement(leaf) {
 
   video.addEventListener('play', () => {
     if (leaf.video !== video) return;
+    leaf._suspendEnded = false;
     refs.play.textContent = '⏸';
     leaf._wantPlaying = true;
     if (el) el.classList.add('playing');
@@ -2668,13 +2669,14 @@ function wireVideoElement(leaf) {
     if (leaf.video !== video) return;
     if (leaf._gifActive || leaf._stillActive) return;
     if (leaf.userPaused || leaf._suspendEnded) return;
-    // Only a real end of file may shuffle or rewind. A stall, a source swap,
-    // or a decoder reset also fires `ended`, and treating that as the end
-    // restarts the clip.
+    if (!videoSourceUrl(video)) return;
     const dur = mediaDuration(leaf);
     const now = mediaClock(leaf);
-    const finished = dur > 0.5 && now >= dur - 0.75;
-    if (!finished) {
+    // A decoder glitch can fire `ended` while the playhead is still mid-clip.
+    // A real ending is at the end, or the element has already reset the
+    // playhead to 0 — both of those should shuffle to the next file.
+    if (dur > 2 && now > 0.5 && now < dur - 1.5) {
+      try { video.currentTime = Math.min(now, Math.max(0, dur - 0.05)); } catch (_) { /* ignore */ }
       if (leafShouldPlay(leaf) && leafMayDecode(leaf)) video.play().catch(() => {});
       return;
     }
