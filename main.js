@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const url = require('url');
 const { startQualityServer, resolveQuality } = require('./quality-server');
+const { hideWindowsTaskbars, showWindowsTaskbars, showWindowsTaskbarsSync, pinOverTaskbar } = require('./taskbar-win');
 
 /**
  * Prefer GPU compositing + hardware video decode. Chromium falls back to
@@ -121,6 +122,7 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     closeProjectionWindows();
+    showWindowsTaskbarsSync();
     mainWindow = null;
   });
 
@@ -239,6 +241,8 @@ function placeSpanWindow(win) {
       try { win.setContentBounds(view); } catch (_) { /* ignore */ }
     }
     win.moveTop();
+    // Native topmost placement. setBounds alone stays above the taskbar.
+    void pinOverTaskbar(win, view, screen);
   };
   pin();
   return view;
@@ -276,6 +280,14 @@ function spanAllDisplays() {
   closeProjectionWindows();
   try { mainWindow.webContents.setBackgroundThrottling(false); } catch (_) { /* ignore */ }
 
+  // Windows will not let one normal window cover the taskbar. Hide every
+  // monitor's taskbar for the span, then pin this single window to the full
+  // desktop. They come back when the span ends.
+  if (process.platform === 'win32' && displays.length >= 2) {
+    hideWindowsTaskbars().then(() => {
+      if (spanningAllDisplays) scheduleSpanPin(mainWindow);
+    });
+  }
   scheduleSpanPin(mainWindow);
   sendProjection(mainWindow, {
     active: true,
@@ -293,12 +305,13 @@ function spanAllDisplays() {
 function restoreFromSpan() {
   if (!mainWindow) return;
   clearTimeout(spanPinTimer);
+  spanningAllDisplays = false;
+  showWindowsTaskbars();
   closeProjectionWindows();
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
   mainWindow.setAlwaysOnTop(false);
   mainWindow.setVisibleOnAllWorkspaces(false);
   sendProjection(mainWindow, { active: false });
-  spanningAllDisplays = false;
   // Restore the previous windowed geometry once we've left fullscreen.
   const restore = () => { if (savedBounds && mainWindow && !mainWindow.isDestroyed()) mainWindow.setBounds(savedBounds); };
   restore();
@@ -486,6 +499,10 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('before-quit', () => {
+  showWindowsTaskbarsSync();
 });
 
 app.on('window-all-closed', () => {
