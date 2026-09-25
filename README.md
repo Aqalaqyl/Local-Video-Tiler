@@ -49,13 +49,12 @@ picture you see.
   - **Clear Folders** (`C`) — unlink every tile from its media folder while
     keeping the current layout splits, so you can re-assign folders without
     rebuilding the grid.
-  - **Tile-sized bitrate** — a scaled copy is built in the background for the
-    pixels a tile actually shows. The clip you are watching keeps playing the
-    original file until that copy is finished, so a stall never starts the video
-    over. The next play of that clip uses the smaller file. Favorites keep a
+  - **Tile-sized bitrate** — when a finished scaled copy of a clip already
+    exists, that smaller file is what plays. Otherwise the original file plays
+    straight through on the GPU. A clip is never reloaded or seeked to switch
+    quality or to catch up, so a stall cannot start it over. Favorites keep a
     higher bitrate (about **2.5×**) and a larger frame than other clips in the
-    same size of tile. This needs `ffmpeg` on your PATH; without it, files play
-    at their original size.
+    same size of tile. Building scaled copies needs `ffmpeg` on your PATH.
   - **Random / shuffle playback** — a tile starts on a weighted-random clip and,
     when a clip finishes, automatically shuffles to another clip from its folder.
     (Next / Previous still step through in order for manual control.)
