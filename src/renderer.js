@@ -163,18 +163,23 @@ function applyProjection() {
   const layers = [stage, gridOverlay];
   if (on) {
     document.body.classList.remove('desktop-preview');
-    const offX = projOffX();
-    const offY = projOffY();
-    // Offset the full union canvas so this window's slice sits at (0,0). Do not
-    // use clip-path — it forces software compositing of <video> and tanks FPS.
-    // Window bounds + body.overflow:hidden already clip to the physical display.
+    const coversWall = projection.viewport.x === projection.union.x &&
+      projection.viewport.y === projection.union.y &&
+      projection.viewport.width === projection.union.width &&
+      projection.viewport.height === projection.union.height;
+    const offX = coversWall ? 0 : projOffX();
+    const offY = coversWall ? 0 : projOffY();
+    // One window over the whole desktop: fill the client area (the full monitor
+    // bounds, taskbar included). A per-display slice still uses the union size.
+    const width = coversWall ? window.innerWidth : projection.union.width;
+    const height = coversWall ? window.innerHeight : projection.union.height;
     for (const el of layers) {
       el.style.left = (-offX) + 'px';
       el.style.top = (-offY) + 'px';
       el.style.right = 'auto';
       el.style.bottom = 'auto';
-      el.style.width = projection.union.width + 'px';
-      el.style.height = projection.union.height + 'px';
+      el.style.width = width + 'px';
+      el.style.height = height + 'px';
       el.style.clipPath = '';
     }
   } else {
