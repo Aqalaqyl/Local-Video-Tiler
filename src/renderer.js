@@ -118,9 +118,9 @@ let winState = {
 };
 
 // ---------------------------------------------------------- Projection / wall
-// Spanning all displays is one window — one GPU surface — stretched over the
-// whole desktop in fullscreen. The canvas is the union of the monitors, so
-// each screen shows the slice of that window that lands on it.
+// All Displays fullscreens one borderless window on every monitor. Each window
+// shows its slice of the shared canvas. Windows only covers the taskbar when
+// the window matches that one monitor.
 const projection = {
   active: false,
   role: 'controller',
@@ -452,12 +452,8 @@ function syncPlaybackNow() {
  */
 function leafMayDecode(leaf, opts = {}) {
   if (opts.force) return true;
-  if (!projection.active) return true;
-  if (projection.role === 'controller') {
-    // Fail open when geometry is unknown so secondary-display audio never drops.
-    if (!leaf.el) return true;
-    return leafIntersectsAnyDisplay(leaf);
-  }
+  if (!projection.active || !projection.viewport) return true;
+  // Each fullscreen display decodes only the tiles on that screen.
   return isLeafInViewport(leaf) || isLeafVisible(leaf);
 }
 
@@ -1467,43 +1463,13 @@ function stopPlaybackAudit() {
   playbackAuditTimer = 0;
 }
 
-/** True if the tile intersects at least one physical display in the wall. */
-function leafIntersectsAnyDisplay(leaf) {
-  if (!projection.active) return true;
-  const now = performance.now();
-  if (leaf._intersectCacheAt && now - leaf._intersectCacheAt < 250) {
-    return !!leaf._intersectCache;
-  }
-  const r = getLeafUnionRect(leaf);
-  let hit = true; // fail open — better extra decode than silent secondary displays
-  if (r && r.w >= 1 && r.h >= 1) {
-    const displays = winState.displays || [];
-    if (displays.length) {
-      hit = false;
-      for (const d of displays) {
-        const b = d.bounds;
-        if (!b) continue;
-        if (r.x < b.x + b.width && r.x + r.w > b.x &&
-            r.y < b.y + b.height && r.y + r.h > b.y) {
-          hit = true;
-          break;
-        }
-      }
-    }
-  }
-  leaf._intersectCacheAt = now;
-  leaf._intersectCache = hit;
-  return hit;
-}
-
 /** True when this tile should produce no audible output right now. */
 function leafAudioShouldMute(leaf) {
   if (!leaf) return true;
   if (leaf._holdSilence) return true;
   const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
-  const mirror = projection.active && projection.role === 'mirror';
-  const offWall = projection.active && projection.role === 'controller' && !leafIntersectsAnyDisplay(leaf);
-  return mirror || offWall || !!leaf.muted || vol === 0 || !!leaf.userPaused;
+  const offSlice = projection.active && !isLeafInViewport(leaf) && !isLeafVisible(leaf);
+  return offSlice || !!leaf.muted || vol === 0 || !!leaf.userPaused;
 }
 
 /** Silence output immediately without rebuilding the audio graph. */

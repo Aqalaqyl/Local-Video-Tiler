@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const url = require('url');
 const { startQualityServer, resolveQuality } = require('./quality-server');
-const { hideWindowsTaskbars, showWindowsTaskbars, showWindowsTaskbarsSync, pinOverTaskbar } = require('./taskbar-win');
+const { showWindowsTaskbars, showWindowsTaskbarsSync } = require('./taskbar-win');
 
 /**
  * Prefer GPU compositing + hardware video decode. Chromium falls back to
@@ -72,10 +72,12 @@ let mainWindow = null;
 let savedBounds = null;
 let spanningAllDisplays = false;
 
-// Left empty. Spanning uses the main window only so the GPU has one surface.
-// closeProjectionWindows still clears this if an older session created any.
+// One borderless fullscreen window per monitor. Windows only covers the taskbar
+// and fills a screen when that window matches that one monitor. The windows
+// share a renderer (process-per-site) and the extras are hidden from the taskbar.
 /** @type {BrowserWindow[]} */
 let projectionWindows = [];
+let mirrorDisplayKey = '';
 
 /** Fullscreen a window on whichever display it currently occupies. */
 function setWindowFullscreen(win, on) {
@@ -124,24 +126,18 @@ function createWindow() {
   mainWindow.on('closed', () => {
     closeProjectionWindows();
     spanningAllDisplays = false;
-    stopAboveTaskbar();
+    mirrorDisplayKey = '';
     showWindowsTaskbarsSync();
     mainWindow = null;
   });
 
   // Keep the renderer informed about fullscreen state for UI affordances.
   const emitState = () => sendWindowState();
-  mainWindow.on('blur', () => {
-    if (spanningAllDisplays) assertAboveTaskbar(mainWindow);
-  });
-  mainWindow.on('show', () => {
-    if (spanningAllDisplays) assertAboveTaskbar(mainWindow);
-  });
   mainWindow.on('enter-full-screen', emitState);
   mainWindow.on('leave-full-screen', () => {
     emitState();
     // Windows restores the pre-fullscreen work-area size after this event.
-    if (spanningAllDisplays && screen.getAllDisplays().length >= 2) scheduleSpanPin(mainWindow);
+    if (spanningAllDisplays) applySpanLayout();
   });
   mainWindow.on('maximize', emitState);
   mainWindow.on('unmaximize', emitState);
@@ -207,109 +203,110 @@ function closeProjectionWindows() {
   projectionWindows = [];
 }
 
-/**
- * Virtual-screen rectangle in physical pixels (SetWindowPos's coordinate space).
- * Convert each display on its own. One DIP rect across mixed-DPI monitors is
- * not a single scale, and that error shows up as a short edge on the other screens.
- */
-function physicalUnion(win) {
-  const target = win && !win.isDestroyed() ? win : null;
-  const displays = screen.getAllDisplays();
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const d of displays) {
-    let b = d.bounds;
-    try {
-      const phys = screen.dipToScreenRect(target, d.bounds);
-      if (phys && phys.width > 0 && phys.height > 0) b = phys;
-    } catch (_) { /* keep DIP for this display */ }
-    minX = Math.min(minX, b.x);
-    minY = Math.min(minY, b.y);
-    maxX = Math.max(maxX, b.x + b.width);
-    maxY = Math.max(maxY, b.y + b.height);
-  }
-  if (!Number.isFinite(minX)) return getAllDisplaysBounds();
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-}
-
-function raiseSpanWindow(win, level) {
-  // screen-saver is the top band Electron can ask for. moveTop() uses a lower
-  // band and lets the taskbar paint over the window, so it is not used here.
-  try { win.setAlwaysOnTop(true, level || 'screen-saver', 1); }
-  catch (_) { try { win.setAlwaysOnTop(true); } catch (_) { /* ignore */ } }
+function fullscreenOnDisplay(win, bounds) {
+  if (!win || win.isDestroyed() || !bounds) return;
+  if (win.isMaximized()) win.unmaximize();
+  try { win.setMenuBarVisibility(false); } catch (_) { /* ignore */ }
   try { win.setHasShadow(false); } catch (_) { /* ignore */ }
+  try { win.setAlwaysOnTop(true, 'screen-saver', 1); } catch (_) {
+    try { win.setAlwaysOnTop(true); } catch (_) { /* ignore */ }
+  }
+  try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch (_) { /* ignore */ }
+  // setBounds while already fullscreen makes Windows leave fullscreen and
+  // snaps the window back above the taskbar. Place first, then fullscreen on
+  // the monitor that placement landed on (that is what covers the taskbar).
+  if (!isWindowFullscreen(win)) {
+    try { win.setBounds(bounds); } catch (_) { /* ignore */ }
+    setTimeout(() => {
+      if (!spanningAllDisplays || win.isDestroyed() || isWindowFullscreen(win)) return;
+      setWindowFullscreen(win, true);
+    }, 60);
+  }
 }
 
-function placeSpanWindow(win) {
-  if (!win || win.isDestroyed() || !spanningAllDisplays) return null;
+function mirrorSearch(bounds, union) {
+  return new URLSearchParams({
+    role: 'mirror',
+    vx: String(bounds.x),
+    vy: String(bounds.y),
+    vw: String(bounds.width),
+    vh: String(bounds.height),
+    ux: String(union.x),
+    uy: String(union.y),
+    uw: String(union.width),
+    uh: String(union.height)
+  }).toString();
+}
+
+function openMirrorWindow(bounds, union, displayCount) {
+  const win = new BrowserWindow({
+    x: Math.round(bounds.x),
+    y: Math.round(bounds.y),
+    width: Math.max(1, Math.round(bounds.width)),
+    height: Math.max(1, Math.round(bounds.height)),
+    frame: false,
+    thickFrame: false,
+    hasShadow: false,
+    roundedCorners: false,
+    enableLargerThanScreen: true,
+    backgroundColor: '#0b0b0e',
+    show: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    title: 'Local Video Tiler',
+    webPreferences: sharedWebPreferences()
+  });
+  win.removeMenu();
+  try { win.webContents.setBackgroundThrottling(false); } catch (_) { /* ignore */ }
+  win.loadFile(path.join(__dirname, 'src', 'index.html'), { search: mirrorSearch(bounds, union) });
+  const showOnDisplay = () => {
+    if (!spanningAllDisplays || win.isDestroyed()) return;
+    if (!win.isVisible()) win.showInactive();
+    fullscreenOnDisplay(win, bounds);
+    syncProjectionViewport(win, 'mirror', union, displayCount, bounds);
+  };
+  win.once('ready-to-show', showOnDisplay);
+  win.on('leave-full-screen', () => {
+    if (spanningAllDisplays) fullscreenOnDisplay(win, bounds);
+  });
+  projectionWindows.push(win);
+}
+
+/**
+ * Fullscreen every connected monitor. The main window fills the primary
+ * display (taskbar included). Each other display gets its own borderless
+ * fullscreen window showing that screen's slice of the same layout.
+ */
+function applySpanLayout() {
+  if (!mainWindow || mainWindow.isDestroyed() || !spanningAllDisplays) return null;
   const displays = screen.getAllDisplays();
   const primary = screen.getPrimaryDisplay();
   const union = getAllDisplaysBounds();
-  const multi = displays.length >= 2;
-  const view = multi ? union : primary.bounds;
+  const others = displays.filter((d) => d.id !== primary.id);
+  const key = others.map((d) => d.id + ':' + d.bounds.x + ',' + d.bounds.y + ',' + d.bounds.width + 'x' + d.bounds.height).join('|');
 
-  if (win.isMaximized()) win.unmaximize();
-  win.setMenuBarVisibility(false);
-  try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch (_) { /* ignore */ }
-  raiseSpanWindow(win, 'screen-saver');
+  fullscreenOnDisplay(mainWindow, primary.bounds);
+  sendProjection(mainWindow, {
+    active: true,
+    role: 'controller',
+    viewport: primary.bounds,
+    union,
+    displayCount: displays.length
+  });
 
-  if (!multi) {
-    try { win.setContentBounds(view); } catch (_) { win.setBounds(view); }
-    setWindowFullscreen(win, true);
-    if (process.platform === 'win32') pinOverTaskbar(win, null, true);
-    return view;
+  if (key !== mirrorDisplayKey) {
+    closeProjectionWindows();
+    mirrorDisplayKey = key;
+    for (const d of others) openMirrorWindow(d.bounds, union, displays.length);
+  } else {
+    others.forEach((d, i) => {
+      const w = projectionWindows[i];
+      if (!w || w.isDestroyed()) return;
+      fullscreenOnDisplay(w, d.bounds);
+      syncProjectionViewport(w, 'mirror', union, displays.length, d.bounds);
+    });
   }
-
-  // Borderless and topmost, sized to the whole wall. Electron setBounds stops
-  // at the taskbar and would undo this, so it is not called on this path.
-  if (isWindowFullscreen(win)) setWindowFullscreen(win, false);
-  if (process.platform === 'win32') {
-    try { pinOverTaskbar(win, physicalUnion(win), true); } catch (_) { /* ignore */ }
-    return view;
-  }
-  try { win.setContentBounds(view); } catch (_) { win.setBounds(view); }
-  win.moveTop();
-  return view;
-}
-
-let spanPinTimer = null;
-let aboveTaskbarTimer = null;
-
-function assertAboveTaskbar(win) {
-  if (!spanningAllDisplays || !win || win.isDestroyed()) return;
-  raiseSpanWindow(win, 'screen-saver');
-  if (process.platform !== 'win32') return;
-  const multi = screen.getAllDisplays().length >= 2;
-  // Repeating ticks must not activate, or they close menus mid-click.
-  try { pinOverTaskbar(win, multi ? physicalUnion(win) : null, false); } catch (_) { /* ignore */ }
-}
-
-function startAboveTaskbar(win) {
-  clearInterval(aboveTaskbarTimer);
-  assertAboveTaskbar(win);
-  // The shell puts the taskbar back on top unless this window keeps priority.
-  aboveTaskbarTimer = setInterval(() => assertAboveTaskbar(win), 200);
-}
-
-function stopAboveTaskbar() {
-  clearInterval(aboveTaskbarTimer);
-  aboveTaskbarTimer = null;
-}
-
-function scheduleSpanPin(win) {
-  clearTimeout(spanPinTimer);
-  const run = () => {
-    if (!spanningAllDisplays) return;
-    const view = placeSpanWindow(win);
-    if (!view || !win || win.isDestroyed()) return;
-    const union = getAllDisplaysBounds();
-    syncProjectionViewport(win, 'controller', union, screen.getAllDisplays().length, view);
-    sendWindowState();
-  };
-  run();
-  // Leaving OS fullscreen restores the old work-area bounds a moment later.
-  spanPinTimer = setTimeout(run, 120);
-  setTimeout(run, 400);
-  setTimeout(run, 900);
+  return primary.bounds;
 }
 
 function spanAllDisplays() {
@@ -318,27 +315,11 @@ function spanAllDisplays() {
     savedBounds = mainWindow.getBounds();
   }
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
-
-  const displays = screen.getAllDisplays();
-  const union = getAllDisplaysBounds();
-  const view = displays.length >= 2 ? union : screen.getPrimaryDisplay().bounds;
   spanningAllDisplays = true;
+  mirrorDisplayKey = '';
   closeProjectionWindows();
   try { mainWindow.webContents.setBackgroundThrottling(false); } catch (_) { /* ignore */ }
-
-  // Windows will not let one normal window cover the taskbar. Hide every
-  // monitor's taskbar, then pin this single window to the full virtual screen.
-  if (process.platform === 'win32' && displays.length >= 2) hideWindowsTaskbars();
-  scheduleSpanPin(mainWindow);
-  startAboveTaskbar(mainWindow);
-  sendProjection(mainWindow, {
-    active: true,
-    role: 'controller',
-    viewport: view,
-    union,
-    displayCount: displays.length
-  });
-
+  applySpanLayout();
   mainWindow.focus();
   sendWindowState();
   try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
@@ -346,9 +327,8 @@ function spanAllDisplays() {
 
 function restoreFromSpan() {
   if (!mainWindow) return;
-  clearTimeout(spanPinTimer);
   spanningAllDisplays = false;
-  stopAboveTaskbar();
+  mirrorDisplayKey = '';
   showWindowsTaskbars();
   closeProjectionWindows();
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
@@ -547,7 +527,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   spanningAllDisplays = false;
-  stopAboveTaskbar();
+  mirrorDisplayKey = '';
   showWindowsTaskbarsSync();
 });
 
