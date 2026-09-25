@@ -118,9 +118,10 @@ let winState = {
 };
 
 // ---------------------------------------------------------- Projection / wall
-// Spanning all displays is one window stretched over the whole desktop, so every
-// tile shares a single renderer and GPU budget. The canvas is the union of the
-// monitors. Older mirror windows (one process per screen) are no longer opened.
+// Spanning all displays puts a real fullscreen window on every monitor. Those
+// windows load this same page and share one renderer, so the wall is still one
+// program. Each window shows its own slice of the canvas (the union of the
+// displays). The primary window keeps the controls.
 const projection = {
   active: false,
   role: 'controller',

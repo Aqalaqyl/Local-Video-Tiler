@@ -68,11 +68,12 @@ picture you see.
     shuffle (default **1**). The tile loop button still holds one file.
 - **Multiple display support** — detects every connected monitor.
   - **Fullscreen on the current display** (`F`).
-  - **Fullscreen across ALL displays at once** (`A`) — **one window** stretches
-    over the whole desktop, so every screen stays part of the same program and
-    the GPU budget is shared by all of the tiles. The window sits above the
-    taskbar / dock / menu bar. The tiling canvas is the union of the monitors,
-    so a tile (or a "Tile to Displays" layout) fills the screen it belongs to.
+  - **Fullscreen across ALL displays at once** (`A`) — every monitor enters
+    **real OS fullscreen** (taskbar / dock / menu bar covered) while staying
+    **one program**. The extra screens are fullscreen windows of this same
+    app and share its renderer, so GPU time covers the whole wall. The tiling
+    canvas is the union of the monitors and each screen shows its own slice, so
+    a tile (or a "Tile to Displays" layout) fills the display it belongs to.
     - Your **primary** display keeps the top control bar.
     - Move the cursor to any screen and split / resize / delete tiles there.
       The alignment grid runs across the whole wall.
