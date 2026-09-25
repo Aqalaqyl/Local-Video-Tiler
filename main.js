@@ -101,6 +101,10 @@ function createWindow() {
     minHeight: 320,
     backgroundColor: '#0b0b0e',
     frame: false,
+    // Frameless Windows windows default to a thick resize frame, which the OS
+    // keeps above the taskbar and which insets the page so the bottom is clipped.
+    thickFrame: false,
+    roundedCorners: false,
     show: false,
     title: 'Local Video Tiler',
     // Required so the window may be sized larger than a single screen — without
@@ -123,7 +127,11 @@ function createWindow() {
   // Keep the renderer informed about fullscreen state for UI affordances.
   const emitState = () => sendWindowState();
   mainWindow.on('enter-full-screen', emitState);
-  mainWindow.on('leave-full-screen', emitState);
+  mainWindow.on('leave-full-screen', () => {
+    emitState();
+    // Windows restores the pre-fullscreen work-area size after this event.
+    if (spanningAllDisplays && screen.getAllDisplays().length >= 2) scheduleSpanPin(mainWindow);
+  });
   mainWindow.on('maximize', emitState);
   mainWindow.on('unmaximize', emitState);
 }
@@ -138,7 +146,7 @@ function sendWindowState() {
     maximized: mainWindow.isMaximized(),
     // Geometry the renderer uses to keep controls on a real, visible monitor
     // (the primary display) when the window spans every display at once.
-    windowBounds: mainWindow.getBounds(),
+    windowBounds: spanningAllDisplays ? mainWindow.getContentBounds() : mainWindow.getBounds(),
     primaryBounds: primary.bounds,
     displayCount: displays.length,
     // Full per-display geometry so the renderer can draw a screen-split guide
@@ -188,6 +196,72 @@ function closeProjectionWindows() {
   projectionWindows = [];
 }
 
+function boundsNear(a, b) {
+  if (!a || !b) return false;
+  return Math.abs(a.x - b.x) <= 2 && Math.abs(a.y - b.y) <= 2 &&
+    Math.abs(a.width - b.width) <= 2 && Math.abs(a.height - b.height) <= 2;
+}
+
+/**
+ * Size the one span window to every monitor's full bounds, taskbar included.
+ * Windows otherwise clamps a normal window to the work area, which leaves the
+ * taskbar visible and clips the bottom of the canvas.
+ */
+function placeSpanWindow(win) {
+  if (!win || win.isDestroyed() || !spanningAllDisplays) return null;
+  const displays = screen.getAllDisplays();
+  const primary = screen.getPrimaryDisplay();
+  const union = getAllDisplaysBounds();
+  const multi = displays.length >= 2;
+  const view = multi ? union : primary.bounds;
+
+  if (win.isMaximized()) win.unmaximize();
+  win.setMenuBarVisibility(false);
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  if (!multi) {
+    try { win.setContentBounds(view); } catch (_) { win.setBounds(view); }
+    setWindowFullscreen(win, true);
+    return view;
+  }
+
+  // OS fullscreen locks the window to one monitor. Stay borderless and pin the
+  // content box to the full desktop rectangle, then raise it over the taskbar.
+  if (isWindowFullscreen(win)) setWindowFullscreen(win, false);
+  const pin = () => {
+    if (!win || win.isDestroyed() || !spanningAllDisplays) return;
+    win.setAlwaysOnTop(true, 'screen-saver');
+    try { win.setContentBounds(view); } catch (_) { win.setBounds(view); }
+    const got = win.getContentBounds();
+    if (!boundsNear(got, view)) {
+      win.setBounds(view);
+      try { win.setContentBounds(view); } catch (_) { /* ignore */ }
+    }
+    win.moveTop();
+  };
+  pin();
+  return view;
+}
+
+let spanPinTimer = null;
+function scheduleSpanPin(win) {
+  clearTimeout(spanPinTimer);
+  const run = () => {
+    if (!spanningAllDisplays) return;
+    const view = placeSpanWindow(win);
+    if (!view || !win || win.isDestroyed()) return;
+    const union = getAllDisplaysBounds();
+    syncProjectionViewport(win, 'controller', union, screen.getAllDisplays().length, view);
+    sendWindowState();
+  };
+  run();
+  // Leaving OS fullscreen restores the old work-area bounds a moment later.
+  spanPinTimer = setTimeout(run, 120);
+  setTimeout(run, 400);
+  setTimeout(run, 900);
+}
+
 function spanAllDisplays() {
   if (!mainWindow) return;
   if (!spanningAllDisplays) {
@@ -196,27 +270,13 @@ function spanAllDisplays() {
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
 
   const displays = screen.getAllDisplays();
-  const primary = screen.getPrimaryDisplay();
   const union = getAllDisplaysBounds();
+  const view = displays.length >= 2 ? union : screen.getPrimaryDisplay().bounds;
   spanningAllDisplays = true;
-  // One OS window is one GPU surface. Extra fullscreen windows made the other
-  // screens separate programs and the GPU only fed the focused one.
   closeProjectionWindows();
-
-  mainWindow.setMenuBarVisibility(false);
-  mainWindow.setAlwaysOnTop(true, 'screen-saver');
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   try { mainWindow.webContents.setBackgroundThrottling(false); } catch (_) { /* ignore */ }
-  if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
 
-  // A single display uses OS fullscreen. Several displays use one borderless
-  // window over the whole desktop, covering every monitor's full bounds
-  // (including the taskbar) so each screen is fullscreen inside that window.
-  const multi = displays.length >= 2;
-  const view = multi ? union : primary.bounds;
-  mainWindow.setBounds(view);
-  if (!multi) setWindowFullscreen(mainWindow, true);
-
+  scheduleSpanPin(mainWindow);
   sendProjection(mainWindow, {
     active: true,
     role: 'controller',
@@ -224,20 +284,7 @@ function spanAllDisplays() {
     union,
     displayCount: displays.length
   });
-  setTimeout(() => {
-    if (!mainWindow || mainWindow.isDestroyed() || !spanningAllDisplays) return;
-    const list = screen.getAllDisplays();
-    const again = list.length >= 2 ? getAllDisplaysBounds() : screen.getPrimaryDisplay().bounds;
-    if (list.length >= 2) {
-      if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
-      mainWindow.setBounds(again);
-      mainWindow.setAlwaysOnTop(true, 'screen-saver');
-    }
-    syncProjectionViewport(mainWindow, 'controller', getAllDisplaysBounds(), list.length, again);
-    sendWindowState();
-  }, 80);
 
-  mainWindow.moveTop();
   mainWindow.focus();
   sendWindowState();
   try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
@@ -245,6 +292,7 @@ function spanAllDisplays() {
 
 function restoreFromSpan() {
   if (!mainWindow) return;
+  clearTimeout(spanPinTimer);
   closeProjectionWindows();
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
   mainWindow.setAlwaysOnTop(false);

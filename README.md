@@ -70,9 +70,10 @@ picture you see.
   - **Fullscreen on the current display** (`F`).
   - **Fullscreen across ALL displays at once** (`A`) — **one window** covers
     every monitor edge to edge, including the taskbar / dock / menu bar, so
-    the GPU sees a single fullscreen surface instead of a separate program per
-    screen. The tiling canvas is the union of the monitors, so a tile (or a
-    "Tile to Displays" layout) fills the display it belongs to.
+    the GPU sees a single fullscreen surface. The page is sized to each
+    display's full bounds (not the area above the taskbar), so the bottom of
+    the wall is not clipped. A tile (or a "Tile to Displays" layout) fills the
+    display it belongs to.
     - Your **primary** display keeps the top control bar.
     - Move the cursor to any screen and split / resize / delete tiles there.
       The alignment grid runs across the whole wall.
