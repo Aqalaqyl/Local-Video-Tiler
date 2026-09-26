@@ -76,7 +76,9 @@ picture you see.
     taskbar is covered on the main display and every other display is filled
     edge to edge. Each screen decodes its own videos, they share one GPU process
     at high priority, and the extra screens do not add taskbar buttons. A tile
-    (or a "Tile to Displays" layout) fills the display it belongs to.
+    (or a "Tile to Displays" layout) fills the display it belongs to. When a
+    clip on that screen finishes, that display shuffles to another random file
+    from the tile's folder. The tile loop button is what repeats one file.
     - Your **primary** display keeps the top control bar.
     - Move the cursor to any screen and split / resize / delete tiles there.
       The alignment grid runs across the whole wall.
