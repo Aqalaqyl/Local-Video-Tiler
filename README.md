@@ -79,6 +79,8 @@ picture you see.
     (or a "Tile to Displays" layout) fills the display it belongs to. When a
     clip on that screen finishes, that display shuffles to another random file
     from the tile's folder. The tile loop button is what repeats one file.
+    Sound comes from the display that contains the tile, so the same clip is
+    not played by two screens at once.
     - Your **primary** display keeps the top control bar.
     - Move the cursor to any screen and split / resize / delete tiles there.
       The alignment grid runs across the whole wall.
