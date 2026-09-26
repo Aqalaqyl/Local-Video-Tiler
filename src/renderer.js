@@ -350,6 +350,11 @@ function thisDisplayShuffles(leaf) {
   return cx >= v.x && cx < v.x + v.width && cy >= v.y && cy < v.y + v.height;
 }
 
+/** The display that contains the tile is the only one that may play its audio. */
+function thisDisplayOwnsAudio(leaf) {
+  return thisDisplayShuffles(leaf);
+}
+
 /** Map a tile into the shared multi-monitor canvas coordinates. */
 function getLeafUnionRect(leaf) {
   if (!leaf.el) return null;
@@ -462,9 +467,9 @@ function syncPlaybackNow() {
 }
 
 /**
- * Controller keeps media loaded for tiles that hit a physical display (it owns
- * audible output). Padding / off-wall tiles stay paused. Mirrors only decode
- * their own display slice.
+ * Each fullscreen display decodes the tiles on its screen. Audio is separate:
+ * only the display that contains the tile's center may unmute it, so a second
+ * window cannot play the same clip a moment later and turn it into an echo.
  */
 function leafMayDecode(leaf, opts = {}) {
   if (opts.force) return true;
@@ -1129,9 +1134,9 @@ async function loadImageCurrent(leaf, file, autoplay, opts = {}) {
 
 /**
  * Projection playback:
- * - Controller owns audible output for every non-paused tile.
- * - Mirrors stay muted and only decode tiles on their slice.
- * - userPaused is honored on every window (synced via layout broadcast).
+ * Each fullscreen display decodes the tiles on its screen. Audio is separate:
+ * only the display that contains the tile's center may unmute it, so a second
+ * window cannot play the same clip a moment later and turn it into an echo.
  * Never trust video.paused alone during fullscreen — the OS briefly pauses media.
  */
 function reconcileProjectionPlayback() {
@@ -1205,14 +1210,29 @@ function replaceLeafVideoElement(leaf) {
   video.className = 'tile-video';
   configureVideoElement(video);
   try { video.muted = true; } catch (_) { /* ignore */ }
+  try { video.volume = 0; } catch (_) { /* ignore */ }
   leaf.video = video;
   leaf._frameWatchArmed = false;
   leaf._lastFrameWall = null;
   leaf._lastDropped = null;
   leaf._lastTotal = null;
   leaf.el.insertBefore(video, leaf.el.firstChild);
+  reapStrayTileVideos(leaf);
   wireVideoElement(leaf);
   return video;
+}
+
+/** Stop every <video> in the tile except the one this leaf is driving. */
+function reapStrayTileVideos(leaf) {
+  if (!leaf || !leaf.el) return;
+  const keep = leaf.video;
+  const extras = leaf.el.querySelectorAll('video');
+  for (let i = 0; i < extras.length; i++) {
+    const v = extras[i];
+    if (v === keep) continue;
+    stopVideoElement(v);
+    try { v.remove(); } catch (_) { /* ignore */ }
+  }
 }
 
 // ----------------------------------------------------------- A/V sync watchdog
@@ -1324,7 +1344,8 @@ function auditLeafPlayback(leaf) {
     const graph = leaf._audioGraph;
     const audioWrong = graph
       ? ((wantMute && graph.gain.gain.value !== 0) || (!wantMute && Math.abs(graph.gain.gain.value - leaf.volume) > 0.001))
-      : (!!video.muted !== wantMute);
+      : (!!video.muted !== wantMute || (wantMute && video.volume > 0.001) ||
+        (!wantMute && Math.abs(video.volume - Math.min(leaf.volume == null ? 1 : leaf.volume, 1)) > 0.001));
     if (audioWrong) applyTileAudio(leaf);
   }
 
@@ -1365,8 +1386,11 @@ function leafAudioShouldMute(leaf) {
   if (!leaf) return true;
   if (leaf._holdSilence) return true;
   const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
-  const offSlice = projection.active && !isLeafInViewport(leaf) && !isLeafVisible(leaf);
-  return offSlice || !!leaf.muted || vol === 0 || !!leaf.userPaused;
+  // A tile that crosses two monitors is decoded on both, for the picture.
+  // Only the display that contains its center may make sound, or the two
+  // copies drift and the clip echoes.
+  if (projection.active && !thisDisplayOwnsAudio(leaf)) return true;
+  return !!leaf.muted || vol === 0 || !!leaf.userPaused;
 }
 
 /** Silence output immediately without rebuilding the audio graph. */
@@ -1374,16 +1398,17 @@ function silenceLeafOutput(leaf) {
   if (!leaf || !leaf.video) return;
   if (leaf._audioGraph) {
     try { leaf._audioGraph.gain.gain.value = 0; } catch (_) { /* ignore */ }
-    // Keep element.muted false when Web Audio owns the stream — toggling it desyncs A/V.
-    try { leaf.video.muted = false; } catch (_) { /* ignore */ }
-  } else {
-    try { leaf.video.muted = true; } catch (_) { /* ignore */ }
   }
+  // Mute the element too. Leaving it unmuted while a graph exists let the
+  // raw element and the graph both reach the speakers.
+  try { leaf.video.volume = 0; } catch (_) { /* ignore */ }
+  try { leaf.video.muted = true; } catch (_) { /* ignore */ }
 }
 
 /** Apply per-tile volume/mute. Values above 1.0 boost via Web Audio (up to 200%). */
 function applyTileAudio(leaf) {
   if (!leaf.video) return;
+  reapStrayTileVideos(leaf);
   const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
   leaf.volume = vol;
   const muted = leafAudioShouldMute(leaf);
@@ -1398,20 +1423,26 @@ function applyTileAudio(leaf) {
       resumeAudioContext();
       try { leaf.video.volume = 1; } catch (_) { /* ignore */ }
       try { leaf.video.muted = false; } catch (_) { /* ignore */ }
-      try { graph.gain.gain.value = muted ? 0 : vol; } catch (_) { /* ignore */ }
+      try { graph.gain.gain.value = vol; } catch (_) { /* ignore */ }
     } else {
       leaf.video.volume = Math.min(vol, 1);
-      leaf.video.muted = muted;
+      leaf.video.muted = false;
     }
+  } else if (muted) {
+    if (leaf._audioGraph) {
+      try { leaf._audioGraph.gain.gain.value = 0; } catch (_) { /* ignore */ }
+    }
+    leaf.video.volume = 0;
+    leaf.video.muted = true;
   } else if (leaf._audioGraph) {
     // Leaving boost: mute the captured graph immediately. setTileVolume will
     // rebuild the <video> onto the native clock so A/V stay locked.
     try { leaf._audioGraph.gain.gain.value = 0; } catch (_) { /* ignore */ }
     leaf.video.volume = Math.min(vol, 1);
-    leaf.video.muted = muted;
+    leaf.video.muted = false;
   } else {
     leaf.video.volume = Math.min(vol, 1);
-    leaf.video.muted = muted;
+    leaf.video.muted = false;
   }
 
   if (leaf.refs) {
@@ -1711,10 +1742,21 @@ function pickWeightedIndex(leaf, opts = {}) {
   if (n === 1) return 0;
 
   const avoid = opts.avoidCurrent === false ? -1 : leaf.index;
+  const busy = pathsPlayingOnOtherTiles(leaf);
   const candidates = [];
   for (let i = 0; i < n; i++) {
     if (i === avoid) continue;
+    const path = files[i] && files[i].path;
+    if (path && busy.has(path)) continue;
     candidates.push(i);
+  }
+  // Every other file is already playing on another tile. Stay on this clip
+  // instead of starting a second copy, which is what makes one video echo.
+  if (!candidates.length) {
+    if (avoid >= 0 && avoid < n) candidates.push(avoid);
+    else {
+      for (let i = 0; i < n; i++) candidates.push(i);
+    }
   }
   if (!candidates.length) return clamp(leaf.index || 0, 0, n - 1);
 
@@ -1736,6 +1778,19 @@ function pickWeightedIndex(leaf, opts = {}) {
     if (r <= 0) return pool[k];
   }
   return pool[pool.length - 1];
+}
+
+/** File paths already showing on a different tile in this window. */
+function pathsPlayingOnOtherTiles(leaf) {
+  const paths = new Set();
+  forEachLeaf(root, (other) => {
+    if (!other || other === leaf || other.spacer || other.userPaused) return;
+    if (!other.files || !other.files.length) return;
+    if (projection.active && !thisDisplayOwnsAudio(other)) return;
+    const f = other.files[other.index];
+    if (f && f.path) paths.add(f.path);
+  });
+  return paths;
 }
 
 /** While the user is scrubbing volume, suppress seek-style A/V repairs. */
@@ -3310,10 +3365,13 @@ async function resumeLeavesInUnison(leaves, opts = {}) {
   const targets = [];
   for (const leaf of list) {
     leaf.userPaused = false;
-    // Controller: force so secondary-display tiles prepare even if clipped here.
-    // Mirrors: only tiles on this display slice.
-    const force = !projection.active || projection.role === 'controller';
-    if (!leafMayDecode(leaf, force ? { force: true } : {})) {
+    // Only this display's tiles start here. Forcing every tile on the main
+    // window made the other monitors' clips audible twice.
+    if (projection.active && !thisDisplayOwnsAudio(leaf)) {
+      applyPlaybackIntent(leaf);
+      continue;
+    }
+    if (!leafMayDecode(leaf)) {
       applyPlaybackIntent(leaf);
       continue;
     }
