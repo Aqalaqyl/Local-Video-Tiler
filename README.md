@@ -79,9 +79,10 @@ picture you see.
     (or a "Tile to Displays" layout) fills the display it belongs to. When a
     clip on that screen finishes, that display shuffles to another random file
     from the tile's folder. The tile loop button is what repeats one file.
-    **Displays → Monitors** chooses which screens that covers. Unchecked
-    monitors are left alone. One checked monitor fills that screen with the
-    whole layout.
+    **Displays → Monitors** chooses which screens that covers. The layout stays
+    mapped to the full desk. Unchecked monitors get no window, and tiles that
+    sit on them are not opened — they are not moved onto the monitors that remain.
+    One checked monitor shows only that screen's slice of the existing layout.
     - Your **primary** display keeps the top control bar when it is covered.
       Otherwise the controls sit on the leftmost checked monitor.
     - Move the cursor to any screen and split / resize / delete tiles there.

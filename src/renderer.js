@@ -129,7 +129,9 @@ const projection = {
   active: false,
   role: 'controller',
   viewport: null,
-  union: null
+  union: null,
+  // Checked monitors only. Tiles that miss every one of these stay closed.
+  openViewports: null
 };
 
 const IS_MIRROR = new URLSearchParams(location.search).get('role') === 'mirror';
@@ -145,6 +147,16 @@ function readProjectionQuery() {
   projection.role = 'mirror';
   projection.viewport = { x: +p.get('vx'), y: +p.get('vy'), width: +p.get('vw'), height: +p.get('vh') };
   projection.union = { x: +p.get('ux'), y: +p.get('uy'), width: +p.get('uw'), height: +p.get('uh') };
+  const open = [];
+  for (let i = 0; i < 32; i++) {
+    const raw = p.get('o' + i);
+    if (!raw) break;
+    const parts = raw.split(',').map(Number);
+    if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
+      open.push({ x: parts[0], y: parts[1], width: parts[2], height: parts[3] });
+    }
+  }
+  projection.openViewports = open.length ? open : null;
 }
 
 // Offset of this window's slice within the global canvas, per axis. Used to keep
@@ -382,14 +394,37 @@ function getLeafUnionRect(leaf) {
   };
 }
 
+function rectsOverlap(r, v) {
+  return r.x < v.x + v.width && r.x + r.w > v.x &&
+    r.y < v.y + v.height && r.y + r.h > v.y;
+}
+
+/** Overlap large enough to be the tile itself, not a border or bezel hairline. */
+function rectsOverlapMeaningfully(r, v) {
+  const w = Math.min(r.x + r.w, v.x + v.width) - Math.max(r.x, v.x);
+  const h = Math.min(r.y + r.h, v.y + v.height) - Math.max(r.y, v.y);
+  return w >= 24 && h >= 24;
+}
+
+/**
+ * A tile may open only on a monitor the user left checked. Missing this list
+ * means every monitor is covered (older projection messages).
+ */
+function tileHitsOpenViewport(leaf) {
+  const ports = projection.openViewports;
+  if (!projection.active || !ports || !ports.length) return true;
+  const r = getLeafUnionRect(leaf);
+  // Not laid out yet. Refuse only once the tile has a real rectangle.
+  if (!r || r.w < 1 || r.h < 1) return true;
+  return ports.some((v) => rectsOverlapMeaningfully(r, v));
+}
+
 /** Stable visibility check for projection (survives fullscreen layout glitches). */
 function isLeafInViewport(leaf) {
   if (!projection.active || !projection.viewport) return isLeafVisible(leaf);
   const r = getLeafUnionRect(leaf);
   if (!r || r.w < 1 || r.h < 1) return isLeafVisible(leaf);
-  const v = projection.viewport;
-  return r.x < v.x + v.width && r.x + r.w > v.x &&
-    r.y < v.y + v.height && r.y + r.h > v.y;
+  return rectsOverlap(r, projection.viewport);
 }
 
 function leafShouldPlay(leaf) {
@@ -471,6 +506,9 @@ function syncPlaybackNow() {
  * their own display slice.
  */
 function leafMayDecode(leaf, opts = {}) {
+  // Unchecked monitors have no window. Do not open those tiles on a leftover
+  // screen, even when a caller asks to force playback.
+  if (projection.active && !tileHitsOpenViewport(leaf)) return false;
   if (opts.force) return true;
   if (!projection.active || !projection.viewport) return true;
   // Each fullscreen display decodes only the tiles on that screen.
@@ -963,6 +1001,13 @@ async function loadGifCurrent(leaf, file, autoplay, opts = {}) {
   clearGifCycle(leaf);
   detachTileAudioGraph(leaf);
   stopVideoElement(leaf.video);
+  if (!leafMayDecode(leaf, opts)) {
+    leaf._holdSilence = false;
+    leaf._wantPlaying = false;
+    applyGifPlayback(leaf);
+    updateLeaf(leaf);
+    return;
+  }
   showGifLayer(leaf, true);
   if (!leaf.gif) {
     leaf._holdSilence = false;
@@ -987,11 +1032,6 @@ async function loadGifCurrent(leaf, file, autoplay, opts = {}) {
   if (leaf._loadGen !== gen) return;
   leaf._gifDurationMs = ms;
   paintGifChrome(leaf);
-  if (!leafMayDecode(leaf, opts) && !opts.force) {
-    applyGifPlayback(leaf);
-    updateLeaf(leaf);
-    return;
-  }
   if (leaf._wantPlaying && leafShouldPlay(leaf)) {
     unfreezeGif(leaf, !same || opts.hardSwap);
     armGifCycle(leaf);
@@ -1107,6 +1147,14 @@ async function loadImageCurrent(leaf, file, autoplay, opts = {}) {
   detachTileAudioGraph(leaf);
   stopVideoElement(leaf.video);
   leaf._gifActive = false;
+  if (!leafMayDecode(leaf, opts)) {
+    showStillLayer(leaf, false);
+    leaf._holdSilence = false;
+    leaf._wantPlaying = false;
+    clearImageCycle(leaf);
+    updateLeaf(leaf);
+    return;
+  }
   showStillLayer(leaf, true);
   if (!leaf.gif) {
     leaf._holdSilence = false;
@@ -1147,7 +1195,7 @@ function reconcileProjectionPlayback() {
     const shouldPlay = leafShouldPlay(leaf);
     if (!activeMediaElement(leaf)) return;
 
-    const visible = isLeafInViewport(leaf) || isLeafVisible(leaf);
+    const visible = tileHitsOpenViewport(leaf) && (isLeafInViewport(leaf) || isLeafVisible(leaf));
     if (!visible) {
       leaf._wantPlaying = false;
       if (leaf._gifActive) applyGifPlayback(leaf);
@@ -1369,7 +1417,7 @@ function leafAudioShouldMute(leaf) {
   if (!leaf) return true;
   if (leaf._holdSilence) return true;
   const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
-  const offSlice = projection.active && !isLeafInViewport(leaf) && !isLeafVisible(leaf);
+  const offSlice = projection.active && (!tileHitsOpenViewport(leaf) || (!isLeafInViewport(leaf) && !isLeafVisible(leaf)));
   return offSlice || !!leaf.muted || vol === 0 || !!leaf.userPaused;
 }
 
@@ -2223,10 +2271,12 @@ function projectionViewportKey(config) {
   if (!config || !config.active) return '';
   const v = config.viewport || {};
   const u = config.union || {};
+  const open = (config.openViewports || []).map((b) => [b.x, b.y, b.width, b.height].join(',')).join(';');
   return [
     config.role || '',
     v.x, v.y, v.width, v.height,
-    u.x, u.y, u.width, u.height
+    u.x, u.y, u.width, u.height,
+    open
   ].join('|');
 }
 
@@ -2236,6 +2286,7 @@ function setProjection(config) {
     projection.role = 'controller';
     projection.viewport = null;
     projection.union = null;
+    projection.openViewports = null;
     stopProjectionIdentitySync();
     applyProjection();
     forEachLeaf(root, (leaf) => {
@@ -2258,12 +2309,16 @@ function setProjection(config) {
     active: true,
     role: projection.role,
     viewport: projection.viewport,
-    union: projection.union
+    union: projection.union,
+    openViewports: projection.openViewports
   });
   projection.active = true;
   projection.role = config.role || 'controller';
   projection.viewport = config.viewport;
   projection.union = config.union;
+  projection.openViewports = Array.isArray(config.openViewports) && config.openViewports.length
+    ? config.openViewports
+    : null;
   resumeAudioContext();
   applyProjection();
   renderDisplayGuide();
@@ -2301,7 +2356,11 @@ function bootMirror() {
     if (config && config.active && config.role === 'mirror') {
       projection.viewport = config.viewport;
       projection.union = config.union;
+      projection.openViewports = Array.isArray(config.openViewports) && config.openViewports.length
+        ? config.openViewports
+        : projection.openViewports;
       applyProjection();
+      scheduleSpanPlaybackRecovery();
     }
   });
   window.api.requestLayout();
@@ -4608,7 +4667,7 @@ function updateSpanAllButton() {
   btnFsAll.textContent = all ? 'All displays' : (n === 1 ? '1 display' : n + ' displays');
   btnFsAll.title = all
     ? 'Fullscreen every monitor (A)'
-    : ('Fullscreen the ' + n + ' checked monitor' + (n === 1 ? '' : 's') + ' (A)');
+    : ('Fullscreen the checked monitors. Tiles on unchecked monitors stay closed (A)');
 }
 
 // ============================================================================
@@ -4686,7 +4745,7 @@ function renderDisplayGuide() {
     label.className = 'guide-label';
     label.textContent =
       `${d.isPrimary ? '★ ' : ''}Display ${d.index} · ${d.bounds.width}×${d.bounds.height}` +
-      (onSpan.has(d.id) ? '' : ' · skipped');
+      (onSpan.has(d.id) ? '' : ' · closed');
     cell.appendChild(label);
     displayGuide.appendChild(cell);
   }
@@ -4833,14 +4892,11 @@ function collectLeaves(node, out = []) {
 }
 
 function tileToDisplays(opts = {}) {
-  const all = winState.displays || [];
-  const displays = spanTargetDisplays();
+  // Always the full desk. Unchecking a monitor must not rebuild the wall
+  // onto fewer screens — those tiles simply stay closed while spanning.
+  const displays = winState.displays || [];
   if (displays.length < 2) {
-    if (!opts.quiet) {
-      flash(all.length < 2
-        ? 'Tile to Displays needs 2+ connected displays'
-        : 'Check at least two monitors under Displays');
-    }
+    if (!opts.quiet) flash('Tile to Displays needs 2+ connected displays');
     return;
   }
 
