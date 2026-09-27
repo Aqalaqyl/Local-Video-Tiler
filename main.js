@@ -304,7 +304,7 @@ function fullscreenOnDisplay(win, bounds) {
 }
 
 function mirrorSearch(bounds, union) {
-  return new URLSearchParams({
+  const params = new URLSearchParams({
     role: 'mirror',
     vx: String(bounds.x),
     vy: String(bounds.y),
@@ -314,10 +314,14 @@ function mirrorSearch(bounds, union) {
     uy: String(union.y),
     uw: String(union.width),
     uh: String(union.height)
-  }).toString();
+  });
+  (spanOpenViewports || []).forEach((b, i) => {
+    params.set('o' + i, [b.x, b.y, b.width, b.height].join(','));
+  });
+  return params.toString();
 }
 
-function openMirrorWindow(bounds, union, displayCount) {
+function openMirrorWindow(bounds, union) {
   const win = new BrowserWindow({
     x: Math.round(bounds.x),
     y: Math.round(bounds.y),
@@ -342,7 +346,7 @@ function openMirrorWindow(bounds, union, displayCount) {
     if (!spanningAllDisplays || win.isDestroyed()) return;
     if (!win.isVisible()) win.showInactive();
     fullscreenOnDisplay(win, bounds);
-    syncProjectionViewport(win, 'mirror', union, displayCount, bounds);
+    syncProjectionViewport(win, 'mirror', union, bounds);
   };
   win.once('ready-to-show', showOnDisplay);
   win.on('leave-full-screen', () => {
@@ -351,48 +355,72 @@ function openMirrorWindow(bounds, union, displayCount) {
   projectionWindows.push(win);
 }
 
+// Bounds of the monitors that currently have a window. Tiles outside these
+// stay closed instead of being restretched onto the screens that remain.
+let spanOpenViewports = null;
+
+function copyBounds(bounds) {
+  return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+}
+
+function projectionPayload(role, viewport, union) {
+  return {
+    active: true,
+    role,
+    viewport: copyBounds(viewport),
+    union: copyBounds(union),
+    displayCount: screen.getAllDisplays().length,
+    openViewports: (spanOpenViewports || []).map(copyBounds)
+  };
+}
+
 /**
- * Fullscreen the monitors the user checked. The main window fills one of them
- * (the primary, when it is checked). Each other checked display gets its own
- * borderless fullscreen window showing that screen's slice. Unchecked monitors
- * are left alone.
+ * Fullscreen the monitors the user checked. The shared canvas stays the whole
+ * desk, so each window shows the slice that already belonged on that screen.
+ * Unchecked monitors get no window: tiles that sit on them are not opened.
  */
 function applySpanLayout() {
   if (!mainWindow || mainWindow.isDestroyed() || !spanningAllDisplays) return null;
   const displays = displaysForSpan();
   const anchor = anchorDisplay(displays);
   const others = displays.filter((d) => d.id !== anchor.id);
-  const union = unionOfDisplays(displays);
-  const key = anchor.id + '|' + others.map((d) => d.id + ':' + d.bounds.x + ',' + d.bounds.y + ',' + d.bounds.width + 'x' + d.bounds.height).join('|');
+  // Always the full desk. A smaller union would squash every tile onto the
+  // checked monitors.
+  const union = getAllDisplaysBounds();
+  spanOpenViewports = displays.map((d) => copyBounds(d.bounds));
+  const key = anchor.id + '|' + others.map((d) => d.id + ':' + d.bounds.x + ',' + d.bounds.y + ',' + d.bounds.width + 'x' + d.bounds.height).join('|')
+    + '|u:' + union.x + ',' + union.y + ',' + union.width + 'x' + union.height;
 
   fullscreenOnDisplay(mainWindow, anchor.bounds);
 
-  // One monitor: the whole layout fills that screen. No second window.
-  if (!others.length) {
+  // The only connected monitor already is the whole desk.
+  const singleScreen = !others.length && boundsMatch(anchor.bounds, union);
+  if (singleScreen) {
     if (projectionWindows.length) closeProjectionWindows();
     mirrorDisplayKey = key;
+    spanOpenViewports = null;
     sendProjection(mainWindow, { active: false });
     return anchor.bounds;
   }
 
-  sendProjection(mainWindow, {
-    active: true,
-    role: 'controller',
-    viewport: anchor.bounds,
-    union,
-    displayCount: displays.length
-  });
+  sendProjection(mainWindow, projectionPayload('controller', anchor.bounds, union));
+
+  if (!others.length) {
+    if (projectionWindows.length) closeProjectionWindows();
+    mirrorDisplayKey = key;
+    return anchor.bounds;
+  }
 
   if (key !== mirrorDisplayKey) {
     closeProjectionWindows();
     mirrorDisplayKey = key;
-    for (const d of others) openMirrorWindow(d.bounds, union, displays.length);
+    for (const d of others) openMirrorWindow(d.bounds, union);
   } else {
     others.forEach((d, i) => {
       const w = projectionWindows[i];
       if (!w || w.isDestroyed()) return;
       fullscreenOnDisplay(w, d.bounds);
-      syncProjectionViewport(w, 'mirror', union, displays.length, d.bounds);
+      syncProjectionViewport(w, 'mirror', union, d.bounds);
     });
   }
   return anchor.bounds;
@@ -418,6 +446,7 @@ function restoreFromSpan() {
   if (!mainWindow) return;
   spanningAllDisplays = false;
   mirrorDisplayKey = '';
+  spanOpenViewports = null;
   showWindowsTaskbars();
   closeProjectionWindows();
   if (isWindowFullscreen(mainWindow)) setWindowFullscreen(mainWindow, false);
@@ -437,20 +466,9 @@ function sendProjection(win, config) {
 }
 
 /** Push display bounds in global desktop coordinates (never win.getBounds() — fullscreen on a secondary monitor often reports 0,0). */
-function syncProjectionViewport(win, role, union, displayCount, displayBounds) {
+function syncProjectionViewport(win, role, union, displayBounds) {
   if (!win || win.isDestroyed() || !displayBounds) return;
-  sendProjection(win, {
-    active: true,
-    role,
-    viewport: {
-      x: displayBounds.x,
-      y: displayBounds.y,
-      width: displayBounds.width,
-      height: displayBounds.height
-    },
-    union,
-    displayCount
-  });
+  sendProjection(win, projectionPayload(role, displayBounds, union));
 }
 
 function toggleSpanAllDisplays() {
