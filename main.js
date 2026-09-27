@@ -149,7 +149,8 @@ function createWindow() {
   mainWindow.on('leave-full-screen', () => {
     emitState();
     // Windows restores the pre-fullscreen work-area size after this event.
-    if (spanningAllDisplays) applySpanLayout();
+    // Ignore the exit we trigger ourselves while moving onto another monitor.
+    if (spanningAllDisplays && !placingSpan.has(mainWindow)) applySpanLayout();
   });
   mainWindow.on('maximize', emitState);
   mainWindow.on('unmaximize', emitState);
@@ -159,15 +160,21 @@ function sendWindowState() {
   if (!mainWindow) return;
   const primary = screen.getPrimaryDisplay();
   const displays = screen.getAllDisplays();
+  const spanTargets = displaysForSpan();
+  const anchor = spanningAllDisplays ? anchorDisplay(spanTargets) : null;
   mainWindow.webContents.send('window:state', {
     fullScreen: mainWindow.isFullScreen(),
     spanningAllDisplays,
     maximized: mainWindow.isMaximized(),
     // Geometry the renderer uses to keep controls on a real, visible monitor
-    // (the primary display) when the window spans every display at once.
+    // (the display this window is covering) when spanning.
     windowBounds: spanningAllDisplays ? mainWindow.getContentBounds() : mainWindow.getBounds(),
     primaryBounds: primary.bounds,
+    anchorBounds: anchor ? anchor.bounds : null,
     displayCount: displays.length,
+    spanCount: spanTargets.length,
+    // null means every connected monitor. An array is the user's subset.
+    spanDisplayIds: spanDisplayIds,
     // Full per-display geometry so the renderer can draw a screen-split guide
     // showing exactly where each physical monitor falls inside the window.
     displays: displays.map((d, i) => ({
@@ -180,11 +187,10 @@ function sendWindowState() {
 }
 
 /**
- * Compute the smallest rectangle that contains every connected display so the
- * window can be stretched across ALL monitors at once.
+ * Compute the smallest rectangle that contains the given displays so each
+ * fullscreen window can show its slice of that shared canvas.
  */
-function getAllDisplaysBounds() {
-  const displays = screen.getAllDisplays();
+function unionOfDisplays(displays) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const d of displays) {
     const b = d.bounds;
@@ -194,6 +200,49 @@ function getAllDisplaysBounds() {
     maxY = Math.max(maxY, b.y + b.height);
   }
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+function getAllDisplaysBounds() {
+  return unionOfDisplays(screen.getAllDisplays());
+}
+
+// null = every connected monitor. Otherwise the display ids the user checked.
+let spanDisplayIds = null;
+
+function normalizeSpanIds(ids) {
+  const all = screen.getAllDisplays();
+  if (!Array.isArray(ids) || !ids.length) return null;
+  const known = new Set(all.map((d) => d.id));
+  const next = [];
+  for (const id of ids) {
+    const n = Number(id);
+    if (!known.has(n) || next.includes(n)) continue;
+    next.push(n);
+  }
+  if (!next.length || next.length >= all.length) return null;
+  return next;
+}
+
+/** Displays All Displays should cover. Falls back to every monitor. */
+function displaysForSpan() {
+  const all = screen.getAllDisplays();
+  if (!spanDisplayIds || !spanDisplayIds.length) return all;
+  const want = new Set(spanDisplayIds);
+  const picked = all.filter((d) => want.has(d.id));
+  return picked.length ? picked : all;
+}
+
+/** The window with the control bar. Prefer the primary when it is selected. */
+function anchorDisplay(displays) {
+  const primary = screen.getPrimaryDisplay();
+  if (displays.some((d) => d.id === primary.id)) return primary;
+  return displays.slice().sort((a, b) => (a.bounds.x - b.bounds.x) || (a.bounds.y - b.bounds.y))[0];
+}
+
+function boundsMatch(a, b) {
+  if (!a || !b) return false;
+  return Math.abs(a.x - b.x) < 4 && Math.abs(a.y - b.y) < 4
+    && Math.abs(a.width - b.width) < 8 && Math.abs(a.height - b.height) < 8;
 }
 
 function sharedWebPreferences() {
@@ -215,25 +264,43 @@ function closeProjectionWindows() {
   projectionWindows = [];
 }
 
+const placingSpan = new WeakSet();
+
 function fullscreenOnDisplay(win, bounds) {
-  if (!win || win.isDestroyed() || !bounds) return;
-  if (win.isMaximized()) win.unmaximize();
+  if (!win || win.isDestroyed() || !bounds || placingSpan.has(win)) return;
   try { win.setMenuBarVisibility(false); } catch (_) { /* ignore */ }
   try { win.setHasShadow(false); } catch (_) { /* ignore */ }
   try { win.setAlwaysOnTop(true, 'screen-saver', 1); } catch (_) {
     try { win.setAlwaysOnTop(true); } catch (_) { /* ignore */ }
   }
   try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch (_) { /* ignore */ }
-  // setBounds while already fullscreen makes Windows leave fullscreen and
-  // snaps the window back above the taskbar. Place first, then fullscreen on
-  // the monitor that placement landed on (that is what covers the taskbar).
-  if (!isWindowFullscreen(win)) {
+
+  let onTarget = false;
+  try { onTarget = boundsMatch(bounds, screen.getDisplayMatching(win.getBounds()).bounds); } catch (_) { /* ignore */ }
+  if (onTarget && isWindowFullscreen(win)) return;
+
+  const enter = () => {
+    if (!spanningAllDisplays || win.isDestroyed()) return;
+    if (win.isMaximized()) win.unmaximize();
+    // setBounds while already fullscreen makes Windows leave fullscreen and
+    // snaps the window back above the taskbar. Place first, then fullscreen.
     try { win.setBounds(bounds); } catch (_) { /* ignore */ }
     setTimeout(() => {
       if (!spanningAllDisplays || win.isDestroyed() || isWindowFullscreen(win)) return;
       setWindowFullscreen(win, true);
     }, 60);
+  };
+
+  if (isWindowFullscreen(win)) {
+    placingSpan.add(win);
+    setWindowFullscreen(win, false);
+    setTimeout(() => {
+      enter();
+      setTimeout(() => placingSpan.delete(win), 250);
+    }, 80);
+    return;
   }
+  enter();
 }
 
 function mirrorSearch(bounds, union) {
@@ -285,23 +352,33 @@ function openMirrorWindow(bounds, union, displayCount) {
 }
 
 /**
- * Fullscreen every connected monitor. The main window fills the primary
- * display (taskbar included). Each other display gets its own borderless
- * fullscreen window showing that screen's slice of the same layout.
+ * Fullscreen the monitors the user checked. The main window fills one of them
+ * (the primary, when it is checked). Each other checked display gets its own
+ * borderless fullscreen window showing that screen's slice. Unchecked monitors
+ * are left alone.
  */
 function applySpanLayout() {
   if (!mainWindow || mainWindow.isDestroyed() || !spanningAllDisplays) return null;
-  const displays = screen.getAllDisplays();
-  const primary = screen.getPrimaryDisplay();
-  const union = getAllDisplaysBounds();
-  const others = displays.filter((d) => d.id !== primary.id);
-  const key = others.map((d) => d.id + ':' + d.bounds.x + ',' + d.bounds.y + ',' + d.bounds.width + 'x' + d.bounds.height).join('|');
+  const displays = displaysForSpan();
+  const anchor = anchorDisplay(displays);
+  const others = displays.filter((d) => d.id !== anchor.id);
+  const union = unionOfDisplays(displays);
+  const key = anchor.id + '|' + others.map((d) => d.id + ':' + d.bounds.x + ',' + d.bounds.y + ',' + d.bounds.width + 'x' + d.bounds.height).join('|');
 
-  fullscreenOnDisplay(mainWindow, primary.bounds);
+  fullscreenOnDisplay(mainWindow, anchor.bounds);
+
+  // One monitor: the whole layout fills that screen. No second window.
+  if (!others.length) {
+    if (projectionWindows.length) closeProjectionWindows();
+    mirrorDisplayKey = key;
+    sendProjection(mainWindow, { active: false });
+    return anchor.bounds;
+  }
+
   sendProjection(mainWindow, {
     active: true,
     role: 'controller',
-    viewport: primary.bounds,
+    viewport: anchor.bounds,
     union,
     displayCount: displays.length
   });
@@ -318,7 +395,7 @@ function applySpanLayout() {
       syncProjectionViewport(w, 'mirror', union, displays.length, d.bounds);
     });
   }
-  return primary.bounds;
+  return anchor.bounds;
 }
 
 function spanAllDisplays() {
@@ -477,6 +554,18 @@ ipcMain.on('window:toggleFullscreen', () => {
 });
 
 ipcMain.on('window:toggleSpanAll', () => toggleSpanAllDisplays());
+
+ipcMain.handle('display:setSpanIds', (_event, ids) => {
+  spanDisplayIds = normalizeSpanIds(ids);
+  if (spanningAllDisplays) {
+    mirrorDisplayKey = '';
+    applySpanLayout();
+    mainWindow.focus();
+    try { mainWindow.webContents.send('projection:resumeAudio'); } catch (_) { /* ignore */ }
+  }
+  sendWindowState();
+  return { ids: spanDisplayIds, spanning: spanningAllDisplays };
+});
 
 ipcMain.on('window:requestState', () => sendWindowState());
 

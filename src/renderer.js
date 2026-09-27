@@ -92,7 +92,11 @@ const settings = {
   /** How many times a GIF plays before shuffle (1 = once). */
   gifLoops: DEFAULT_MEDIA_LOOPS,
   /** How many times a video plays before shuffle (1 = once). */
-  videoLoops: DEFAULT_MEDIA_LOOPS
+  videoLoops: DEFAULT_MEDIA_LOOPS,
+  /**
+   * Display ids All Displays should cover. null means every connected monitor.
+   */
+  spanDisplayIds: null
 };
 
 function imageHoldMs() {
@@ -4114,7 +4118,14 @@ function loadState() {
   settings.imageSeconds = clamp(Math.round(Number(settings.imageSeconds) || DEFAULT_IMAGE_SECONDS), 1, 600);
   settings.gifLoops = gifLoopCount();
   settings.videoLoops = videoLoopCount();
+  if (Array.isArray(settings.spanDisplayIds)) {
+    settings.spanDisplayIds = settings.spanDisplayIds.map(Number).filter((id) => Number.isFinite(id));
+    if (!settings.spanDisplayIds.length) settings.spanDisplayIds = null;
+  } else {
+    settings.spanDisplayIds = null;
+  }
   syncPlaybackSettingsInputs();
+  publishSpanDisplays();
 
   render();
   applyDesktopPreview();
@@ -4513,7 +4524,91 @@ async function refreshDisplays() {
       .join('  ·  ');
     btnTileDisplays.disabled = info.count < 2;
     updateResetDisplayButton();
+    renderSpanDisplayChoices();
   } catch (_) {}
+}
+
+/** Monitors All Displays will cover. An empty saved list means every monitor. */
+function spanTargetDisplays() {
+  const displays = winState.displays || [];
+  const ids = settings.spanDisplayIds;
+  if (!Array.isArray(ids) || !ids.length) return displays;
+  const want = new Set(ids.map(Number));
+  const picked = displays.filter((d) => want.has(d.id));
+  return picked.length ? picked : displays;
+}
+
+function publishSpanDisplays() {
+  if (!window.api.setSpanDisplays) return;
+  const ids = Array.isArray(settings.spanDisplayIds) ? settings.spanDisplayIds : null;
+  window.api.setSpanDisplays(ids).catch(() => {});
+}
+
+let spanListKey = '';
+function renderSpanDisplayChoices() {
+  const host = document.getElementById('span-display-list');
+  if (!host) return;
+  const displays = winState.displays || [];
+  updateSpanAllButton();
+  if (displays.length < 2) {
+    host.hidden = true;
+    host.textContent = '';
+    spanListKey = '';
+    return;
+  }
+  host.hidden = false;
+  const selected = new Set(spanTargetDisplays().map((d) => d.id));
+  const key = displays.map((d) => d.id + (selected.has(d.id) ? ':1' : ':0') + ':' + d.bounds.width + 'x' + d.bounds.height).join('|');
+  if (key === spanListKey && host.childElementCount === displays.length) return;
+  spanListKey = key;
+  host.textContent = '';
+  for (const d of displays) {
+    const label = document.createElement('label');
+    label.className = 'menu-check';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = selected.has(d.id);
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('change', () => onSpanDisplayToggle(d.id, input));
+    const text = document.createElement('span');
+    text.textContent = 'Display ' + d.index + (d.isPrimary ? ' · Primary' : '');
+    const dim = document.createElement('span');
+    dim.className = 'dim';
+    dim.textContent = d.bounds.width + '×' + d.bounds.height;
+    label.appendChild(input);
+    label.appendChild(text);
+    label.appendChild(dim);
+    host.appendChild(label);
+  }
+}
+
+function onSpanDisplayToggle(id, input) {
+  const displays = winState.displays || [];
+  const set = new Set(spanTargetDisplays().map((d) => d.id));
+  if (input.checked) set.add(id);
+  else set.delete(id);
+  if (!set.size) {
+    input.checked = true;
+    flash('At least one monitor stays on');
+    return;
+  }
+  settings.spanDisplayIds = set.size >= displays.length ? null : [...set];
+  spanListKey = '';
+  saveState();
+  publishSpanDisplays();
+  renderSpanDisplayChoices();
+  renderDisplayGuide();
+}
+
+function updateSpanAllButton() {
+  if (!btnFsAll) return;
+  const displays = winState.displays || [];
+  const n = spanTargetDisplays().length;
+  const all = !displays.length || n >= displays.length;
+  btnFsAll.textContent = all ? 'All displays' : (n === 1 ? '1 display' : n + ' displays');
+  btnFsAll.title = all
+    ? 'Fullscreen every monitor (A)'
+    : ('Fullscreen the ' + n + ' checked monitor' + (n === 1 ? '' : 's') + ' (A)');
 }
 
 // ============================================================================
@@ -4578,10 +4673,11 @@ function renderDisplayGuide() {
   displayGuide.classList.toggle('preview', !span);
   displayGuide.classList.toggle('aligned', !span && !!settings.desktopPreview);
   displayGuide.textContent = '';
+  const onSpan = new Set(spanTargetDisplays().map((d) => d.id));
   for (const d of displays) {
     const r = map(d.bounds);
     const cell = document.createElement('div');
-    cell.className = 'guide-cell' + (d.isPrimary ? ' primary' : '');
+    cell.className = 'guide-cell' + (d.isPrimary ? ' primary' : '') + (onSpan.has(d.id) ? '' : ' off');
     cell.style.left = r.left + 'px';
     cell.style.top = r.top + 'px';
     cell.style.width = r.width + 'px';
@@ -4589,7 +4685,8 @@ function renderDisplayGuide() {
     const label = document.createElement('div');
     label.className = 'guide-label';
     label.textContent =
-      `${d.isPrimary ? '★ ' : ''}Display ${d.index} · ${d.bounds.width}×${d.bounds.height}`;
+      `${d.isPrimary ? '★ ' : ''}Display ${d.index} · ${d.bounds.width}×${d.bounds.height}` +
+      (onSpan.has(d.id) ? '' : ' · skipped');
     cell.appendChild(label);
     displayGuide.appendChild(cell);
   }
@@ -4736,9 +4833,14 @@ function collectLeaves(node, out = []) {
 }
 
 function tileToDisplays(opts = {}) {
-  const displays = winState.displays || [];
+  const all = winState.displays || [];
+  const displays = spanTargetDisplays();
   if (displays.length < 2) {
-    if (!opts.quiet) flash('Tile to Displays needs 2+ connected displays');
+    if (!opts.quiet) {
+      flash(all.length < 2
+        ? 'Tile to Displays needs 2+ connected displays'
+        : 'Check at least two monitors under Displays');
+    }
     return;
   }
 
@@ -4959,7 +5061,6 @@ btnX.addEventListener('click', () => window.api.close());
 gridSizeInput.addEventListener('input', () => setCellSize(parseInt(gridSizeInput.value, 10)));
 
 function applyWindowState(state) {
-  const wasSpanningAll = winState.spanningAllDisplays;
   winState = {
     fullScreen: !!state.fullScreen,
     spanningAllDisplays: !!state.spanningAllDisplays,
@@ -4970,27 +5071,30 @@ function applyWindowState(state) {
   btnFs.classList.toggle('active', state.fullScreen);
   btnFsAll.classList.toggle('active', state.spanningAllDisplays);
   document.body.classList.toggle('span-all', !!state.spanningAllDisplays);
-  void wasSpanningAll;
   if (!projection.active) applyDesktopPreview();
   renderDisplayGuide();
+  renderSpanDisplayChoices();
   positionTileBadges();
   bootstrapDesktopPreview();
   updateResetDisplayButton();
 
   const rootStyle = document.documentElement.style;
   const wasSpanning = document.body.dataset.spanning === '1';
-  if (state.spanningAllDisplays && state.windowBounds && state.primaryBounds) {
-    // Offset of the primary display inside the (multi-monitor) window so the
-    // chrome is always drawn on a real, fully-visible screen.
-    const left = state.primaryBounds.x - state.windowBounds.x;
-    const top = state.primaryBounds.y - state.windowBounds.y;
+  const anchor = state.anchorBounds || state.primaryBounds;
+  if (state.spanningAllDisplays && state.windowBounds && anchor) {
+    // Keep the control bar on the monitor this window is actually covering.
+    const left = anchor.x - state.windowBounds.x;
+    const top = anchor.y - state.windowBounds.y;
     rootStyle.setProperty('--ui-left', left + 'px');
     rootStyle.setProperty('--ui-top', Math.max(0, top) + 'px');
-    rootStyle.setProperty('--ui-width', state.primaryBounds.width + 'px');
+    rootStyle.setProperty('--ui-width', anchor.width + 'px');
     document.body.dataset.spanning = '1';
-    // Surface the chrome immediately so the user can see where controls went.
     wake();
-    if (!wasSpanning) spanToast(state.displayCount);
+    if (!wasSpanning) {
+      const match = (winState.displays || []).find((d) => d.bounds && anchor
+        && d.bounds.x === anchor.x && d.bounds.y === anchor.y);
+      spanToast(state.spanCount || state.displayCount, match ? match.index : 0);
+    }
   } else {
     rootStyle.removeProperty('--ui-left');
     rootStyle.removeProperty('--ui-top');
@@ -5000,10 +5104,13 @@ function applyWindowState(state) {
 }
 
 let spanToastTimer = null;
-function spanToast(count) {
+function spanToast(count, displayIndex) {
+  const n = Number(count) || 0;
+  const where = displayIndex ? ('Display ' + displayIndex) : 'this display';
+  const title = n > 1 ? ('Fullscreen on ' + n + ' displays') : ('Fullscreen on ' + where);
   toast.innerHTML =
-    '<strong>Spanning ' + (count || 'all') + ' displays</strong>' +
-    '<span>Controls &amp; edit tools are on your primary display · <kbd>A</kbd> to exit · <kbd>E</kbd> to edit tiles</span>';
+    '<strong>' + title + '</strong>' +
+    '<span>Controls are on ' + where + ' · <kbd>A</kbd> to exit · <kbd>E</kbd> to edit tiles</span>';
   toast.classList.add('show');
   clearTimeout(spanToastTimer);
   spanToastTimer = setTimeout(() => toast.classList.remove('show'), 5000);
