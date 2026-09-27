@@ -79,7 +79,11 @@ picture you see.
     (or a "Tile to Displays" layout) fills the display it belongs to. When a
     clip on that screen finishes, that display shuffles to another random file
     from the tile's folder. The tile loop button is what repeats one file.
-    - Your **primary** display keeps the top control bar.
+    **Displays → Monitors** chooses which screens that covers. Unchecked
+    monitors are left alone. One checked monitor fills that screen with the
+    whole layout.
+    - Your **primary** display keeps the top control bar when it is covered.
+      Otherwise the controls sit on the leftmost checked monitor.
     - Move the cursor to any screen and split / resize / delete tiles there.
       The alignment grid runs across the whole wall.
     - Hot-plugging or rearranging monitors re-fits the wall automatically.
@@ -190,7 +194,7 @@ npm start
 | Adjust grid cell size | The **Cell** slider |
 | Reset entire layout | **Reset All** |
 | Fullscreen (current display) | `F` or the **Fullscreen** button |
-| Fullscreen across ALL displays | `A` or the **All Displays** button |
+| Fullscreen the checked monitors | `A` or **Displays → All displays** (the button name shows how many are checked) |
 | Toggle the screen-split guide | `D` or the **Guide** button |
 | Tile layout to match displays | `T` or the **Tile to Displays** button |
 | Exit edit mode | `Escape` |

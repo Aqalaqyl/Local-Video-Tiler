@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('api', {
   close: () => ipcRenderer.send('window:close'),
   toggleFullscreen: () => ipcRenderer.send('window:toggleFullscreen'),
   toggleSpanAll: () => ipcRenderer.send('window:toggleSpanAll'),
+  setSpanDisplays: (ids) => ipcRenderer.invoke('display:setSpanIds', ids),
   requestWindowState: () => ipcRenderer.send('window:requestState'),
   onWindowState: (cb) => {
     const handler = (_e, state) => cb(state);
