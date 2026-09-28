@@ -64,7 +64,15 @@ picture you see.
     shuffles still force a non-favorite so you keep discovering new videos.
   - **Per-tile loop** (🔁) — keep the current file on screen by repeating it.
     Loop is independent per tile, so one pane can hold on a clip while the others
-    keep shuffling.
+    keep shuffling. **Playback → Stop all loops** turns loop off on every tile
+    that has it on.
+  - **Sound indicators** — **Playback → Sound indicators** shows a badge on each
+    tile that is currently playing audio, so you can find the loud one and
+    adjust its volume. The badge stays hidden for pictures, GIFs, and video
+    files that have no sound.
+  - **Volume or mute by default** — **Playback → Volume by default** switches
+    every video between playing with volume and starting muted. Click it again
+    to swap them back. New tiles follow the same choice.
   - **Menus** — the top bar groups controls into **Layout**, **Media**,
     **Playback**, and **Displays**. Playback includes how long a picture stays
     up (default **5 seconds**) and how many times a GIF or video plays before
@@ -189,6 +197,9 @@ npm start
 | Reset one display’s tiles | **Reset Display** or `R` (needs 2+ monitors) |
 | Reset entire layout | **Reset All** |
 | Loop the current file (per tile) | The **🔁** button on the tile |
+| Turn off every tile loop | **Playback → Stop all loops** |
+| Show which tiles are playing audio | **Playback → Sound indicators** |
+| Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** |
 | Image time, GIF loops, video loops | **Playback** menu |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |

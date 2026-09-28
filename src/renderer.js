@@ -96,7 +96,11 @@ const settings = {
   /**
    * Display ids All Displays should cover. null means every connected monitor.
    */
-  spanDisplayIds: null
+  spanDisplayIds: null,
+  /** Badge on tiles that are currently playing audio. */
+  soundIndicators: false,
+  /** New tiles, and the bulk sound toggle, start muted when this is true. */
+  defaultMuted: false
 };
 
 function imageHoldMs() {
@@ -1433,6 +1437,111 @@ function silenceLeafOutput(leaf) {
   }
 }
 
+/**
+ * True once this file has decoded audio. GIFs, pictures, and video files with
+ * no audio track stay false so the sound badge never appears on them.
+ * Unknown until the decoder has had a moment to produce audio bytes.
+ */
+function mediaHasSound(leaf) {
+  const cur = leaf && leaf.files && leaf.files[leaf.index];
+  if (!cur || isGifFile(cur) || isStillImage(cur)) return false;
+  const video = leaf.video;
+  if (!video || leaf._gifActive || leaf._stillActive) return false;
+  const bytes = video.webkitAudioDecodedByteCount;
+  if (cur._hasAudio === true) return true;
+  if (typeof bytes === 'number' && bytes > 0) {
+    cur._hasAudio = true;
+    delete cur._silentSince;
+    return true;
+  }
+  if (video.audioTracks && video.audioTracks.length > 0) {
+    cur._hasAudio = true;
+    delete cur._silentSince;
+    return true;
+  }
+  if (cur._hasAudio === false) return false;
+  const playing = video.readyState >= 2 && video.currentTime > 0.75 && !video.paused && !video.seeking;
+  if (playing && typeof bytes === 'number') {
+    if (video.currentTime < 0.9) delete cur._silentSince;
+    if (!cur._silentSince) cur._silentSince = performance.now();
+    if (performance.now() - cur._silentSince > 1500) {
+      cur._hasAudio = false;
+      return false;
+    }
+  }
+  return false;
+}
+
+/** This tile is outputting audio right now (not merely assigned a video). */
+function leafIsPlayingSound(leaf) {
+  if (!settings.soundIndicators) return false;
+  if (!leaf || leaf.spacer || !leaf.files.length) return false;
+  if (leaf._gifActive || leaf._stillActive) return false;
+  if (leafAudioShouldMute(leaf)) return false;
+  const video = leaf.video;
+  if (!video || video.paused || video.ended || !videoSourceUrl(video)) return false;
+  return mediaHasSound(leaf);
+}
+
+function paintSoundIndicator(leaf) {
+  if (!leaf || !leaf.el) return;
+  leaf.el.classList.toggle('sound-on', leafIsPlayingSound(leaf));
+}
+
+function paintAllSoundIndicators() {
+  forEachLeaf(root, paintSoundIndicator);
+}
+
+function setSoundIndicators(on, opts = {}) {
+  settings.soundIndicators = !!on;
+  document.body.classList.toggle('sound-indicators', settings.soundIndicators);
+  const btn = document.getElementById('btn-sound-indicators');
+  if (btn) btn.classList.toggle('active', settings.soundIndicators);
+  paintAllSoundIndicators();
+  if (!opts.quiet) saveState();
+}
+
+function updateDefaultAudioButton() {
+  const btn = document.getElementById('btn-default-audio');
+  if (!btn) return;
+  const muted = !!settings.defaultMuted;
+  btn.classList.toggle('active', muted);
+  btn.textContent = muted ? 'Muted by default' : 'Volume by default';
+  btn.title = muted
+    ? 'Videos are muted. Click to play every video with volume.'
+    : 'Videos play with volume. Click to mute every video.';
+}
+
+/** Swap every tile between muted and playing with its current volume. */
+function toggleDefaultAudio() {
+  settings.defaultMuted = !settings.defaultMuted;
+  forEachLeaf(root, (leaf) => {
+    if (!leaf || leaf.spacer) return;
+    leaf.muted = !!settings.defaultMuted;
+    applyTileAudio(leaf);
+  });
+  updateDefaultAudioButton();
+  saveState();
+  flash(settings.defaultMuted ? 'All videos muted' : 'All videos playing with volume');
+}
+
+/** Turn loop off on every tile that currently has it on. */
+function stopAllLoops() {
+  let n = 0;
+  forEachLeaf(root, (leaf) => {
+    if (!leaf || leaf.spacer || !leaf.loop) return;
+    leaf.loop = false;
+    applyLoop(leaf);
+    n++;
+  });
+  if (!n) {
+    flash('No tiles are looping');
+    return;
+  }
+  saveState();
+  flash(n === 1 ? 'Stopped looping 1 tile' : ('Stopped looping ' + n + ' tiles'));
+}
+
 /** Apply per-tile volume/mute. Values above 1.0 boost via Web Audio (up to 200%). */
 function applyTileAudio(leaf) {
   if (!leaf.video) return;
@@ -1466,6 +1575,7 @@ function applyTileAudio(leaf) {
     leaf.video.muted = muted;
   }
 
+  paintSoundIndicator(leaf);
   if (leaf.refs) {
     leaf.refs.vol.max = String(MAX_TILE_VOLUME);
     leaf.refs.vol.value = String(vol);
@@ -1875,7 +1985,13 @@ function showVolumeHint(leaf) {
 }
 
 function snapshotSettings() {
-  return { editMode: settings.editMode, gridOn: settings.gridOn, snapOn: settings.snapOn, cellSize: settings.cellSize };
+  return {
+    editMode: settings.editMode,
+    gridOn: settings.gridOn,
+    snapOn: settings.snapOn,
+    cellSize: settings.cellSize,
+    soundIndicators: !!settings.soundIndicators
+  };
 }
 
 function applySettingsFromPayload(s) {
@@ -1884,6 +2000,9 @@ function applySettingsFromPayload(s) {
   if (!!s.gridOn !== settings.gridOn) setGrid(!!s.gridOn);
   if (!!s.snapOn !== settings.snapOn) setSnap(!!s.snapOn);
   if (!!s.editMode !== settings.editMode) setEditMode(!!s.editMode);
+  if (s.soundIndicators != null && !!s.soundIndicators !== !!settings.soundIndicators) {
+    setSoundIndicators(!!s.soundIndicators, { quiet: true });
+  }
 }
 
 // Push the current layout + settings to peer windows (deduped to avoid echoes).
@@ -1964,7 +2083,7 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     localNode.userPaused = !!remoteNode.userPaused;
     if (!!remoteNode.loop !== !!localNode.loop) {
       localNode.loop = !!remoteNode.loop;
-      if (localNode.video) localNode.video.loop = localNode.loop;
+      applyLoop(localNode);
     }
 
     // Folder link changes (including Clear Folders) without rebuilding splits.
@@ -2386,7 +2505,7 @@ function makeLeaf() {
     loop: false,
     spacer: false,
     volume: 1,
-    muted: false,
+    muted: !!settings.defaultMuted,
     userPaused: false,
     el: null,
     refs: null,
@@ -2510,7 +2629,9 @@ function positionTileBadges() {
   forEachLeaf(root, (leaf) => {
     if (!leaf.refs || !leaf.refs.del || !leaf.el) return;
     const tileTop = leaf.el.getBoundingClientRect().top;
-    leaf.refs.del.style.top = Math.max(8, Math.round(barBottom - tileTop) + 8) + 'px';
+    const belowBar = Math.max(8, Math.round(barBottom - tileTop) + 8) + 'px';
+    leaf.refs.del.style.top = belowBar;
+    if (leaf.refs.sound) leaf.refs.sound.style.top = belowBar;
   });
 }
 
@@ -2589,11 +2710,17 @@ function ensureLeafEl(leaf) {
   del.title = 'Delete this tile (Del)';
   del.textContent = '🗑';
 
+  const sound = document.createElement('div');
+  sound.className = 'sound-live';
+  sound.setAttribute('aria-hidden', 'true');
+  sound.innerHTML = '<span class="sound-bars"><i></i><i></i><i></i></span><span>Sound</span>';
+
   el.appendChild(video);
   el.appendChild(gif);
   el.appendChild(empty);
   el.appendChild(toolbar);
   el.appendChild(del);
+  el.appendChild(sound);
 
   const refs = {
     empty,
@@ -2613,7 +2740,8 @@ function ensureLeafEl(leaf) {
     volPct: toolbar.querySelector('.vol-pct'),
     title: toolbar.querySelector('.title'),
     close: toolbar.querySelector('.close'),
-    del
+    del,
+    sound
   };
 
   leaf.el = el;
@@ -2740,6 +2868,7 @@ function wireVideoElement(leaf) {
     if (el) el.classList.add('playing');
     resetLeafSyncClock(leaf);
     armVideoFrameWatch(leaf);
+    paintSoundIndicator(leaf);
   });
   video.addEventListener('pause', () => {
     if (leaf.video !== video) return;
@@ -2747,6 +2876,7 @@ function wireVideoElement(leaf) {
     leaf._wantPlaying = false;
     if (el) el.classList.remove('playing');
     resetLeafSyncClock(leaf);
+    paintSoundIndicator(leaf);
   });
   // Throttle seek-bar UI updates so many tiles don't flood the main thread.
   video.addEventListener('timeupdate', () => {
@@ -4183,6 +4313,12 @@ function loadState() {
   } else {
     settings.spanDisplayIds = null;
   }
+  settings.soundIndicators = !!settings.soundIndicators;
+  settings.defaultMuted = !!settings.defaultMuted;
+  document.body.classList.toggle('sound-indicators', settings.soundIndicators);
+  const soundBtn = document.getElementById('btn-sound-indicators');
+  if (soundBtn) soundBtn.classList.toggle('active', settings.soundIndicators);
+  updateDefaultAudioButton();
   syncPlaybackSettingsInputs();
   publishSpanDisplays();
 
@@ -5089,6 +5225,15 @@ if (btnPauseAll) btnPauseAll.addEventListener('click', () => togglePauseAll());
 if (btnPauseDisplay) btnPauseDisplay.addEventListener('click', () => togglePauseDisplay());
 if (btnPauseAllMirror) btnPauseAllMirror.addEventListener('click', () => togglePauseAll());
 if (btnPauseDisplayMirror) btnPauseDisplayMirror.addEventListener('click', () => togglePauseDisplay());
+const btnStopLoops = document.getElementById('btn-stop-loops');
+const btnStopLoopsMirror = document.getElementById('btn-stop-loops-mirror');
+const btnSoundIndicators = document.getElementById('btn-sound-indicators');
+const btnDefaultAudio = document.getElementById('btn-default-audio');
+if (btnStopLoops) btnStopLoops.addEventListener('click', () => stopAllLoops());
+if (btnStopLoopsMirror) btnStopLoopsMirror.addEventListener('click', () => stopAllLoops());
+if (btnSoundIndicators) btnSoundIndicators.addEventListener('click', () => setSoundIndicators(!settings.soundIndicators));
+if (btnDefaultAudio) btnDefaultAudio.addEventListener('click', () => toggleDefaultAudio());
+setInterval(paintAllSoundIndicators, 400);
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
 btnGuide.addEventListener('click', () => setGuide(!settings.guideOn));
