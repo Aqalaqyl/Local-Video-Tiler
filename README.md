@@ -57,11 +57,15 @@ picture you see.
     same size of tile. Building scaled copies needs `ffmpeg` on your PATH.
   - **Random / shuffle playback** — a tile starts on a weighted-random clip and,
     when a clip finishes, automatically shuffles to another clip from its folder.
-    (Next / Previous still step through in order for manual control.)
+    **Next** picks another random clip. **Previous** steps backward in order.
   - **Favorites (☆ / ★)** — hover a tile to show the gold star on the media
     toolbar (favorited clips also keep a ★ badge in the corner). Shuffle picks
     favorites about **5× as often** as unmarked clips, and about **1 in 5**
     shuffles still force a non-favorite so you keep discovering new videos.
+    **Playback → Favorites only** limits every display to favorited clips.
+    The **All / ★** button on a tile turns that limit off for that tile only.
+    **Next** (⏭) picks a random clip (a random favorite while Favorites only
+    is on for that tile). Previous still steps backward in order.
   - **Per-tile loop** (🔁) — keep the current file on screen by repeating it.
     Loop is independent per tile, so one pane can hold on a clip while the others
     keep shuffling. **Playback → Stop all loops** turns loop off on every tile
@@ -205,6 +209,8 @@ npm start
 | Reset entire layout | **Reset All** |
 | Loop the current file (per tile) | The **🔁** button on the tile |
 | Turn off every tile loop | **Playback → Stop all loops** |
+| Play favorites only, on every display | **Playback → Favorites only** (the tile’s **All / ★** button turns it off for that tile) |
+| Skip to another random clip | **⏭** on the tile |
 | Show which tiles are playing audio | **Playback → Sound indicators** |
 | Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** (while muted, each new clip starts silent until you unmute it; that video is remembered) |
 | Image time, GIF loops, video loops | **Playback** menu |

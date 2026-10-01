@@ -106,7 +106,9 @@ const settings = {
   /** Badge on tiles that are currently playing audio. */
   soundIndicators: false,
   /** New tiles, and the bulk sound toggle, start muted when this is true. */
-  defaultMuted: false
+  defaultMuted: false,
+  /** When true, every display plays favorited clips only. A tile can opt out. */
+  favoritesOnly: false
 };
 
 function imageHoldMs() {
@@ -1965,6 +1967,10 @@ function loadMirrorPlaybackPrefs() {
   if (data && data.settings && data.settings.defaultMuted != null) {
     settings.defaultMuted = !!data.settings.defaultMuted;
   }
+  if (data && data.settings && data.settings.favoritesOnly != null) {
+    settings.favoritesOnly = !!data.settings.favoritesOnly;
+  }
+  updateFavoritesOnlyButton();
 }
 
 // Other renderer windows share localStorage — keep our Map in sync.
@@ -1992,6 +1998,9 @@ window.addEventListener('storage', (e) => {
     forEachLeaf(root, (leaf) => {
       stampFolderFavorites(leaf.files);
       applyFavoriteButton(leaf);
+      if (!leafUsesFavoritesOnly(leaf) || !thisDisplayShuffles(leaf)) return;
+      const cur = leaf.files && leaf.files[leaf.index];
+      if (cur && !isFileFavorite(cur) && retargetLeafForFavoritesOnly(leaf)) saveState();
     });
   }
 });
@@ -2079,10 +2088,28 @@ function clearFavoriteForFile(fileOrPath) {
   persistFavorites();
 }
 
+/** This tile plays only favorited clips. A per-tile opt-out leaves the whole folder. */
+function leafUsesFavoritesOnly(leaf) {
+  return !!settings.favoritesOnly && !!leaf && !leaf.spacer && !leaf.favoritesOnlyOff;
+}
+
+function favoriteIndexes(leaf, opts = {}) {
+  const files = leaf && leaf.files;
+  const out = [];
+  if (!files) return out;
+  const avoid = opts.avoid === false ? -1 : (opts.avoid == null ? -1 : opts.avoid);
+  for (let i = 0; i < files.length; i++) {
+    if (i === avoid) continue;
+    if (isFileFavorite(files[i])) out.push(i);
+  }
+  return out;
+}
+
 /**
  * Weighted shuffle pick: favorites are FAVORITE_WEIGHT× more likely than normal
  * clips. With probability DISCOVERY_CHANCE, pick uniformly among non-favorites
  * (when any exist) so new videos keep surfacing.
+ * Favorites only skips that discovery pick and chooses among favorites.
  */
 function pickWeightedIndex(leaf, opts = {}) {
   const files = leaf && leaf.files;
@@ -2097,6 +2124,14 @@ function pickWeightedIndex(leaf, opts = {}) {
     candidates.push(i);
   }
   if (!candidates.length) return clamp(leaf.index || 0, 0, n - 1);
+
+  if (leafUsesFavoritesOnly(leaf)) {
+    const favs = candidates.filter((i) => isFileFavorite(files[i]));
+    if (favs.length) return favs[Math.floor(Math.random() * favs.length)];
+    const any = favoriteIndexes(leaf);
+    if (any.length) return any[Math.floor(Math.random() * any.length)];
+    return clamp(leaf.index || 0, 0, n - 1);
+  }
 
   const nonFav = candidates.filter((i) => !isFileFavorite(files[i]));
   const discover = nonFav.length > 0 && Math.random() < DISCOVERY_CHANCE;
@@ -2220,7 +2255,8 @@ function snapshotSettings() {
     snapOn: settings.snapOn,
     cellSize: settings.cellSize,
     soundIndicators: !!settings.soundIndicators,
-    defaultMuted: !!settings.defaultMuted
+    defaultMuted: !!settings.defaultMuted,
+    favoritesOnly: !!settings.favoritesOnly
   };
 }
 
@@ -2248,6 +2284,13 @@ function applySettingsFromPayload(s) {
       });
     }
     updateDefaultAudioButton();
+  }
+  if (s.favoritesOnly != null && !!s.favoritesOnly !== !!settings.favoritesOnly) {
+    settings.favoritesOnly = !!s.favoritesOnly;
+    updateFavoritesOnlyButton();
+    forEachLeaf(root, applyFavoritesOnlyButton);
+    // The window that flipped the switch already picked the new clips.
+    if (!IS_MIRROR) saveState();
   }
 }
 
@@ -2338,6 +2381,10 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     if (!!remoteNode.loop !== !!localNode.loop) {
       localNode.loop = !!remoteNode.loop;
       applyLoop(localNode);
+    }
+    if (!!remoteNode.favoritesOnlyOff !== !!localNode.favoritesOnlyOff) {
+      localNode.favoritesOnlyOff = !!remoteNode.favoritesOnlyOff;
+      applyFavoritesOnlyButton(localNode);
     }
 
     // Folder link changes (including Clear Folders) without rebuilding splits.
@@ -2542,6 +2589,7 @@ function applyIncomingLayout(payload) {
         leaf.folder = folder;
         leaf._folderRev = node && node.folderRev ? node.folderRev : (leaf._folderRev || 0);
         leaf.loop = node ? !!node.loop : false;
+        leaf.favoritesOnlyOff = !!(node && node.favoritesOnlyOff);
         leaf.spacer = spacer;
         if (node) {
           if (typeof node.volume === 'number') leaf.volume = clamp(node.volume, 0, MAX_TILE_VOLUME);
@@ -2949,9 +2997,10 @@ function ensureLeafEl(leaf) {
     <button class="folder" title="Assign / change folder — Ctrl+click tiles to select several first">📁</button>
     <button class="prev" title="Previous">⏮</button>
     <button class="play" title="Play / Pause">▶</button>
-    <button class="next" title="Next">⏭</button>
+    <button class="next" title="Next random video">⏭</button>
     <button class="loop" title="Loop this video (per tile)">🔁</button>
     <button class="fav" type="button" title="Favorite — play more often in shuffle">☆</button>
+    <button class="fav-only" type="button" title="This tile plays every video">All</button>
     <button class="trash" title="Delete current video from disk">🗑</button>
     <input class="seek" type="range" min="0" max="1000" value="0" title="Seek" />
     <span class="time">0:00 / 0:00</span>
@@ -2991,6 +3040,7 @@ function ensureLeafEl(leaf) {
     next: toolbar.querySelector('.next'),
     loop: toolbar.querySelector('.loop'),
     fav: toolbar.querySelector('.fav'),
+    favOnly: toolbar.querySelector('.fav-only'),
     trash: toolbar.querySelector('.trash'),
     seek: toolbar.querySelector('.seek'),
     time: toolbar.querySelector('.time'),
@@ -3049,6 +3099,7 @@ function updateLeaf(leaf) {
   if (refs.trash) refs.trash.disabled = !hasFiles;
   applyLoop(leaf);
   applyFavoriteButton(leaf);
+  applyFavoritesOnlyButton(leaf);
 
   const current = hasFiles ? leaf.files[leaf.index] : null;
   refs.title.textContent = current ? `${leaf.index + 1}/${leaf.files.length} · ${current.name}` : '';
@@ -3216,6 +3267,7 @@ function wireLeafEvents(leaf) {
   refs.play.addEventListener('click', (e) => { e.stopPropagation(); togglePlay(leaf); });
   refs.prev.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, -1); });
   refs.next.addEventListener('click', (e) => { e.stopPropagation(); step(leaf, 1); });
+  if (refs.favOnly) refs.favOnly.addEventListener('click', (e) => { e.stopPropagation(); toggleTileFavoritesOnly(leaf); });
   refs.loop.addEventListener('click', (e) => { e.stopPropagation(); toggleLoop(leaf); });
   if (refs.fav) refs.fav.addEventListener('click', (e) => { e.stopPropagation(); toggleFavorite(leaf); });
   refs.trash.addEventListener('click', (e) => { e.stopPropagation(); deleteCurrentVideo(leaf); });
@@ -3891,9 +3943,36 @@ function bumpClipSeq(leaf) {
   leaf._clipSeq = (leaf._clipSeq || 0) + 1;
 }
 
+/** Previous clip in folder order. Favorites only stays inside favorited clips. */
+function previousIndex(leaf) {
+  const n = leaf.files.length;
+  if (!n) return 0;
+  if (leafUsesFavoritesOnly(leaf)) {
+    const favs = favoriteIndexes(leaf);
+    if (!favs.length) return leaf.index || 0;
+    const before = favs.filter((i) => i < leaf.index);
+    if (before.length) return before[before.length - 1];
+    return favs[favs.length - 1];
+  }
+  return (leaf.index - 1 + n) % n;
+}
+
 function step(leaf, dir, autoplay = false) {
   if (!leaf.files.length) return;
-  leaf.index = (leaf.index + dir + leaf.files.length) % leaf.files.length;
+  if (dir > 0) {
+    if (leafUsesFavoritesOnly(leaf) && !favoriteIndexes(leaf).length) {
+      flash('No favorites in this folder');
+      return;
+    }
+    // Skip-ahead is a shuffle, same as when a clip ends.
+    leaf.index = pickWeightedIndex(leaf, { avoidCurrent: true });
+  } else {
+    if (leafUsesFavoritesOnly(leaf) && !favoriteIndexes(leaf).length) {
+      flash('No favorites in this folder');
+      return;
+    }
+    leaf.index = previousIndex(leaf);
+  }
   bumpClipSeq(leaf);
   loadCurrent(leaf, autoplay || !leaf.userPaused);
   saveState();
@@ -3907,6 +3986,7 @@ function pickRandomIndex(leaf) {
 /** Auto-advance with weighted shuffle across every file in the folder (GIF and video). */
 function advanceRandom(leaf, initial = false) {
   if (!leaf.files.length) return;
+  if (leafUsesFavoritesOnly(leaf) && !favoriteIndexes(leaf).length) return;
   // Never clear a user pause via ended/advance — that caused ghost background audio.
   if (leaf.userPaused && !initial) return;
   // Don't reshuffle while a delete confirm is open for this tile.
@@ -3968,6 +4048,7 @@ function toggleFavorite(leaf) {
   if (idx >= 0) leaf.index = idx;
   const on = toggleFileFavorite(cur);
   applyFavoriteButton(leaf);
+  if (!on && leafUsesFavoritesOnly(leaf) && retargetLeafForFavoritesOnly(leaf)) saveState();
   flash(on
     ? 'Favorited “' + cur.name + '” — plays more often, higher quality'
     : 'Removed favorite “' + cur.name + '”');
@@ -3985,6 +4066,86 @@ function applyFavoriteButton(leaf) {
     ? 'Favorited — plays more often and at a higher bitrate (click to unfavorite)'
     : 'Favorite — play more often, and give this clip a higher bitrate';
   if (leaf.el) leaf.el.classList.toggle('has-favorite', on);
+}
+
+function updateFavoritesOnlyButton() {
+  const on = !!settings.favoritesOnly;
+  for (const id of ['btn-favorites-only', 'btn-favorites-only-mirror']) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    btn.classList.toggle('active', on);
+    btn.textContent = on ? 'Favorites only' : 'All videos';
+    btn.title = on
+      ? 'Every display is playing favorites. Click to play every video again. A tile can opt out.'
+      : 'Play every video. Click to play favorites only, on every display.';
+  }
+  forEachLeaf(root, applyFavoritesOnlyButton);
+}
+
+function applyFavoritesOnlyButton(leaf) {
+  if (!leaf || !leaf.refs) return;
+  const btn = leaf.refs.favOnly;
+  if (btn) {
+    const globalOn = !!settings.favoritesOnly;
+    const optedOut = !!leaf.favoritesOnlyOff;
+    const following = globalOn && !optedOut;
+    btn.classList.toggle('active', following);
+    btn.classList.toggle('off', globalOn && optedOut);
+    btn.textContent = following ? '★' : 'All';
+    btn.title = !globalOn
+      ? 'Favorites only is off. Turn it on from Playback → Favorites only.'
+      : (optedOut
+        ? 'This tile plays every video. Click to play favorites only.'
+        : 'This tile plays favorites only. Click to play every video on this tile.');
+  }
+  if (leaf.refs.next) {
+    leaf.refs.next.title = leafUsesFavoritesOnly(leaf)
+      ? 'Next random favorite'
+      : 'Next random video';
+  }
+}
+
+/** Move this tile onto a random favorite when it is showing something else. */
+function retargetLeafForFavoritesOnly(leaf) {
+  if (!leafUsesFavoritesOnly(leaf) || !leaf.files || !leaf.files.length) return false;
+  const cur = leaf.files[leaf.index];
+  if (cur && isFileFavorite(cur)) return false;
+  const favs = favoriteIndexes(leaf);
+  if (!favs.length) return false;
+  leaf.index = favs[Math.floor(Math.random() * favs.length)];
+  bumpClipSeq(leaf);
+  loadCurrent(leaf, leafShouldPlay(leaf));
+  return true;
+}
+
+function toggleFavoritesOnly() {
+  settings.favoritesOnly = !settings.favoritesOnly;
+  let missing = 0;
+  forEachLeaf(root, (leaf) => {
+    applyFavoritesOnlyButton(leaf);
+    if (!settings.favoritesOnly || !leaf || leaf.spacer) return;
+    if (leaf.favoritesOnlyOff) return;
+    if (leaf.files && leaf.files.length && !favoriteIndexes(leaf).length) missing++;
+    retargetLeafForFavoritesOnly(leaf);
+  });
+  updateFavoritesOnlyButton();
+  saveState();
+  if (!settings.favoritesOnly) flash('Playing every video');
+  else if (missing) flash('Playing favorites only — some folders have none');
+  else flash('Playing favorites only');
+}
+
+function toggleTileFavoritesOnly(leaf) {
+  if (!leaf || leaf.spacer) return;
+  if (!settings.favoritesOnly) {
+    flash('Turn on Favorites only in Playback first');
+    return;
+  }
+  leaf.favoritesOnlyOff = !leaf.favoritesOnlyOff;
+  applyFavoritesOnlyButton(leaf);
+  if (!leaf.favoritesOnlyOff) retargetLeafForFavoritesOnly(leaf);
+  saveState();
+  flash(leaf.favoritesOnlyOff ? 'This tile plays every video' : 'This tile plays favorites only');
 }
 
 function fmtTime(s) {
@@ -4165,6 +4326,7 @@ function resetLeafInPlace(leaf) {
   leaf.volume = 1;
   leaf.muted = !!settings.defaultMuted;
   leaf._muteFileKey = '';
+  leaf.favoritesOnlyOff = false;
   updateLeaf(leaf);
 }
 
@@ -4512,6 +4674,7 @@ function serializeTree(node, withIndex, withTime) {
     o.muted = !!node.muted;
     // Always include so unpause (false) clears peers — omitting it left them stuck.
     o.userPaused = !!node.userPaused;
+    o.favoritesOnlyOff = !!node.favoritesOnlyOff;
     return o;
   }
   return {
@@ -4539,6 +4702,7 @@ function deserialize(obj) {
     l.volume = typeof obj.volume === 'number' ? clamp(obj.volume, 0, MAX_TILE_VOLUME) : 1;
     l.muted = !!obj.muted;
     l.userPaused = !!obj.userPaused;
+    l.favoritesOnlyOff = !!obj.favoritesOnlyOff;
     return l;
   }
   return makeSplit(obj.direction, deserialize(obj.children[0]), deserialize(obj.children[1]), obj.ratio);
@@ -4598,10 +4762,12 @@ function loadState() {
   }
   settings.soundIndicators = !!settings.soundIndicators;
   settings.defaultMuted = !!settings.defaultMuted;
+  settings.favoritesOnly = !!settings.favoritesOnly;
   document.body.classList.toggle('sound-indicators', settings.soundIndicators);
   const soundBtn = document.getElementById('btn-sound-indicators');
   if (soundBtn) soundBtn.classList.toggle('active', settings.soundIndicators);
   updateDefaultAudioButton();
+  updateFavoritesOnlyButton();
   syncPlaybackSettingsInputs();
   publishSpanDisplays();
 
@@ -4621,6 +4787,7 @@ function loadState() {
 function serializePresetTree(node) {
   if (node.kind === 'leaf') {
     const o = { kind: 'leaf', folder: node.folder || null, loop: !!node.loop };
+    if (node.favoritesOnlyOff) o.favoritesOnlyOff = true;
     if (node.spacer) o.spacer = true;
     o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
     if (node.muted) o.muted = true;
@@ -5331,6 +5498,7 @@ function tileToDisplays(opts = {}) {
       volume: src.volume,
       muted: src.muted,
       loop: src.loop,
+      favoritesOnlyOff: !!src.favoritesOnlyOff,
       userPaused: !!src.userPaused,
       currentTime: mediaClock(src)
     });
@@ -5343,6 +5511,7 @@ function tileToDisplays(opts = {}) {
     volume: l.volume,
     muted: l.muted,
     loop: l.loop,
+    favoritesOnlyOff: !!l.favoritesOnlyOff,
     userPaused: !!l.userPaused,
     currentTime: mediaClock(l)
   }));
@@ -5369,6 +5538,7 @@ function tileToDisplays(opts = {}) {
     if (typeof s.volume === 'number') leaf.volume = clamp(s.volume, 0, MAX_TILE_VOLUME);
     if (s.muted != null) leaf.muted = !!s.muted;
     leaf.loop = !!s.loop;
+    leaf.favoritesOnlyOff = !!s.favoritesOnlyOff;
     leaf.userPaused = !!s.userPaused;
     if (s.folder) {
       loadFolder(leaf, s.folder, s.index || 0, false).then(() => {
@@ -5516,6 +5686,10 @@ if (btnStopLoops) btnStopLoops.addEventListener('click', () => stopAllLoops());
 if (btnStopLoopsMirror) btnStopLoopsMirror.addEventListener('click', () => stopAllLoops());
 if (btnSoundIndicators) btnSoundIndicators.addEventListener('click', () => setSoundIndicators(!settings.soundIndicators));
 if (btnDefaultAudio) btnDefaultAudio.addEventListener('click', () => toggleDefaultAudio());
+const btnFavoritesOnly = document.getElementById('btn-favorites-only');
+const btnFavoritesOnlyMirror = document.getElementById('btn-favorites-only-mirror');
+if (btnFavoritesOnly) btnFavoritesOnly.addEventListener('click', () => toggleFavoritesOnly());
+if (btnFavoritesOnlyMirror) btnFavoritesOnlyMirror.addEventListener('click', () => toggleFavoritesOnly());
 setInterval(paintAllSoundIndicators, 400);
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());

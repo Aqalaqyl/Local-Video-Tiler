@@ -363,6 +363,18 @@ body.idle:not(.editing) .tile-toolbar { opacity: 0 !important; pointer-events: n
   opacity: 0.4;
   cursor: default;
 }
+.tile-toolbar .fav-only {
+  color: var(--muted, #9aa3b5);
+  min-width: 2.4em;
+}
+.tile-toolbar .fav-only.active {
+  color: #f5c542;
+  border-color: rgba(245,197,66,0.85);
+  background: rgba(245,197,66,0.18);
+}
+.tile-toolbar .fav-only.off {
+  opacity: 0.75;
+}
 /* Live badge for tiles that are actually outputting audio. Stays up while the
    toolbar is hidden so the loud tile is easy to find. Silent files never get it. */
 .sound-live {
