@@ -74,9 +74,10 @@ picture you see.
     every video between playing with volume and starting muted. Click it again
     to swap them back. New tiles follow the same choice. While **Muted by
     default** is on, a video plays muted until you unmute it (mute button or
-    volume). That unmute sticks on every display, and the program remembers
-    the video, so the same file starts with sound the next time it plays.
-    Videos you have not unmuted still start muted.
+    volume). That unmute is remembered for that video only — the tile does
+    not stay unmuted, so the next clip starts muted unless you unmuted that
+    one too. The same video starts with sound the next time it plays, on
+    whichever display it is on. Videos you have not unmuted still start muted.
   - **Menus** — the top bar groups controls into **Layout**, **Media**,
     **Playback**, and **Displays**. Playback includes how long a picture stays
     up (default **5 seconds**) and how many times a GIF or video plays before
@@ -90,7 +91,9 @@ picture you see.
     at high priority, and the extra screens do not add taskbar buttons. A tile
     (or a "Tile to Displays" layout) fills the display it belongs to. When a
     clip on that screen finishes, that display shuffles to another random file
-    from the tile's folder. The tile loop button is what repeats one file.
+    from the tile's folder. Only the display that contains a tile plays its
+    audio, so the same clip is not heard from two screens at once. The tile
+    loop button is what repeats one file.
     **Displays → Monitors** chooses which screens that covers. The layout stays
     mapped to the full desk. Unchecked monitors get no window, and tiles that
     sit on them are not opened — they are not moved onto the monitors that remain.
