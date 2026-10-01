@@ -1298,6 +1298,8 @@ function configureVideoElement(video) {
   video.setAttribute('webkit-playsinline', '');
   // Keep the decoder pipeline warm so GPU decode can start without hitching.
   video.preload = 'auto';
+  // New elements must not blip audio before the tile's mute rule is applied.
+  try { video.muted = true; } catch (_) { /* ignore */ }
   try { video.disablePictureInPicture = true; } catch (_) { /* ignore */ }
   try { video.disableRemotePlayback = true; } catch (_) { /* ignore */ }
 }
@@ -1428,7 +1430,16 @@ function leafAudioShouldMute(leaf) {
   if (leaf._holdSilence) return true;
   const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
   const offSlice = projection.active && (!tileHitsOpenViewport(leaf) || (!isLeafInViewport(leaf) && !isLeafVisible(leaf)));
-  return offSlice || !!leaf.muted || vol === 0 || !!leaf.userPaused;
+  if (offSlice || vol === 0 || leaf.userPaused) return true;
+  if (settings.defaultMuted) {
+    const cur = resolvePlayingFile(leaf) || (leaf.files && leaf.files[leaf.index]);
+    const key = (fileVolumeKeys(cur)[0]) || '';
+    // A clip that just arrived stays silent until the user unmutes it on
+    // this tile. A remembered unmute must not turn the whole wall back on.
+    if (!key || key !== leaf._muteFileKey || leaf.muted) return true;
+    return false;
+  }
+  return !!leaf.muted;
 }
 
 /** Silence output immediately without rebuilding the audio graph. */
@@ -1514,21 +1525,18 @@ function updateDefaultAudioButton() {
   btn.classList.toggle('active', muted);
   btn.textContent = muted ? 'Muted by default' : 'Volume by default';
   btn.title = muted
-    ? 'Every video plays muted until you unmute it. Unmuting a video, or changing its volume, remembers that video so it has sound the next time it plays. Every other video stays muted.'
-    : 'Videos play with volume. Playing them does not add them to the Muted by default list. Click to start videos muted.';
+    ? 'Every video that starts plays muted, including ones you unmuted before, so they do not all play at once. Unmute the clip you want to hear. The next clip starts muted again.'
+    : 'Videos play with volume. Click to start every video muted.';
 }
 
-/** Swap every tile between muted and playing with its current volume. */
+/** Turn Muted by default on or off. On silences every tile immediately. */
 function toggleDefaultAudio() {
   settings.defaultMuted = !settings.defaultMuted;
   forEachLeaf(root, (leaf) => {
     if (!leaf || leaf.spacer) return;
-    if (settings.defaultMuted) {
-      // Honor videos this mode already remembers; mute every other file.
-      applyRememberedFileMute(leaf, (leaf.files && leaf.files[leaf.index]) || null);
-    } else {
-      leaf.muted = false;
-    }
+    // Turning the mode on mutes the clips already playing. A remembered
+    // unmute must not keep sounding, or several tiles stay loud together.
+    leaf.muted = !!settings.defaultMuted;
     applyTileAudio(leaf);
   });
   updateDefaultAudioButton();
@@ -1779,11 +1787,10 @@ function applyRememberedFileVolume(leaf, file) {
 }
 
 // ----------------------------------------------------------- Per-file unmute
-// Muted by default keeps its own list of videos the user unmuted (mute button
-// or a volume change) while that mode was on. Volume by default does not write
-// this list: a clip that merely played with sound starts muted again when
-// Muted by default is turned on. The next clip on the tile does not inherit
-// the previous clip's mute.
+// Muted by default remembers which videos the user unmuted, but a new clip
+// always starts muted. Playing every remembered video as it shuffles in
+// turns the whole wall on at once. Sound stays on only for the clip the
+// user unmuted, until that tile moves to another file.
 /** @type {Set<string>} */
 const fileUnmutes = new Set();
 
@@ -1852,11 +1859,11 @@ function rememberFileUnmuted(fileOrPath, on) {
 
 /**
  * Choose mute for this clip.
- * Muted by default always wins over the tile: a video plays muted unless the
- * user unmuted that file. The same rule is reapplied on reload so a tile that
- * was just unmuted cannot carry sound to another video, or to a video the
- * user never unmuted. Volume by default starts a different file with sound
- * and keeps a live mute only while that same file stays on the tile.
+ * Muted by default: a different file always starts muted, even if the user
+ * unmuted that file before. Otherwise every remembered video would start
+ * talking as soon as it shuffled in. The same file keeps a live unmute
+ * (volume change, mute button, quality reload). Volume by default starts a
+ * different file with sound.
  */
 function applyRememberedFileMute(leaf, file) {
   if (!leaf) return;
@@ -1869,8 +1876,10 @@ function applyRememberedFileMute(leaf, file) {
   const keys = fileVolumeKeys(cur);
   const key = keys[0] || cur._muteIdentity || (cur._muteIdentity = 'anon:' + uid());
   if (settings.defaultMuted) {
-    leaf._muteFileKey = key;
-    leaf.muted = !isFileManuallyUnmuted(cur);
+    if (leaf._muteFileKey !== key) {
+      leaf._muteFileKey = key;
+      leaf.muted = true;
+    }
     return;
   }
   if (leaf._muteFileKey === key) return;
@@ -2024,9 +2033,9 @@ function setTileVolume(leaf, volume, opts = {}) {
   markVolumeAdjusting();
   const hadBoostGraph = !!leaf._audioGraph;
   leaf.volume = clamp(volume, 0, MAX_TILE_VOLUME);
-  // A volume change turns this clip's sound on. Muted by default remembers
-  // that video in its own list. Volume by default does not, so a clip that
-  // merely played with sound starts muted again in the other mode.
+  // A volume change turns on the clip the user is adjusting, so they can
+  // hear the level. It does not leave the next clip — or that file the next
+  // time it shuffles in — playing with sound.
   const unmuteFile = leaf.volume > 0 && !opts.keepMuted;
   if (unmuteFile) leaf.muted = false;
   applyTileAudio(leaf);
@@ -3400,7 +3409,7 @@ async function loadFolder(leaf, folder, index = 0, autoplay = false) {
 }
 
 /**
- * After a source swap: wait until the decoder is ready, then unmute and play.
+ * After a source swap: wait until the decoder is ready, then apply mute and play.
  * Generation token ignores stale callbacks when the user deletes/skips quickly.
  */
 async function finishLoadAndPlay(leaf, gen, autoplay) {
@@ -3408,11 +3417,14 @@ async function finishLoadAndPlay(leaf, gen, autoplay) {
   if (!video) return;
   await waitVideoReady(video, 2200);
   if (!leaf.video || leaf.video !== video || leaf._loadGen !== gen) return;
-  // Re-assert per-file volume after the async gap (sync/peers may have raced).
-  const cur = leaf.files && leaf.files[leaf.index];
-  if (cur && sourcesMatch(video, cur.url)) {
+  // Re-assert after the async gap. Quality proxies do not match the file URL,
+  // so this must follow the file actually on the element, not sourcesMatch.
+  const cur = resolvePlayingFile(leaf) || (leaf.files && leaf.files[leaf.index]);
+  if (cur) {
     applyRememberedFileVolume(leaf, cur);
     applyRememberedFileMute(leaf, cur);
+  } else if (settings.defaultMuted) {
+    leaf.muted = true;
   }
   leaf._holdSilence = false;
   leaf._suspendEnded = false;
@@ -3676,12 +3688,12 @@ async function resumeLeavesInUnison(leaves, opts = {}) {
   for (const leaf of targets) {
     if (leaf.userPaused || !leaf.video) continue;
     leaf._wantPlaying = true;
-    leaf.video.play().catch(() => {});
-  }
-  for (const leaf of targets) {
-    if (leaf.userPaused || !leaf.video) continue;
+    if (settings.defaultMuted) {
+      applyRememberedFileMute(leaf, resolvePlayingFile(leaf) || leaf.files[leaf.index]);
+    }
     leaf._holdSilence = false;
     applyTileAudio(leaf);
+    leaf.video.play().catch(() => {});
     armVideoFrameWatch(leaf);
     resetLeafSyncClock(leaf);
     if (leaf.el) leaf.el.classList.add('playing');
