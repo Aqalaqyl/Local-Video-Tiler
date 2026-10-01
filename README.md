@@ -72,7 +72,8 @@ picture you see.
     files that have no sound.
   - **Volume or mute by default** — **Playback → Volume by default** switches
     every video between playing with volume and starting muted. Click it again
-    to swap them back. New tiles follow the same choice.
+    to swap them back. New tiles follow the same choice. While videos start
+    muted, changing a tile’s volume turns that tile’s sound on.
   - **Menus** — the top bar groups controls into **Layout**, **Media**,
     **Playback**, and **Displays**. Playback includes how long a picture stays
     up (default **5 seconds**) and how many times a GIF or video plays before
@@ -199,7 +200,7 @@ npm start
 | Loop the current file (per tile) | The **🔁** button on the tile |
 | Turn off every tile loop | **Playback → Stop all loops** |
 | Show which tiles are playing audio | **Playback → Sound indicators** |
-| Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** |
+| Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** (changing a tile’s volume turns its sound on) |
 | Image time, GIF loops, video loops | **Playback** menu |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |

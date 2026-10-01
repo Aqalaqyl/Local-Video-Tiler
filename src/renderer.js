@@ -1508,7 +1508,7 @@ function updateDefaultAudioButton() {
   btn.classList.toggle('active', muted);
   btn.textContent = muted ? 'Muted by default' : 'Volume by default';
   btn.title = muted
-    ? 'Videos are muted. Click to play every video with volume.'
+    ? 'Videos start muted. Change a tile’s volume to turn its sound on, or click to play every video with volume.'
     : 'Videos play with volume. Click to mute every video.';
 }
 
@@ -1565,9 +1565,10 @@ function applyTileAudio(leaf) {
       leaf.video.muted = muted;
     }
   } else if (leaf._audioGraph) {
-    // Leaving boost: mute the captured graph immediately. setTileVolume will
-    // rebuild the <video> onto the native clock so A/V stay locked.
-    try { leaf._audioGraph.gain.gain.value = 0; } catch (_) { /* ignore */ }
+    // The element is captured by the graph, so gain is what the speakers hear.
+    // Zero it only while this tile should be silent. A volume change that
+    // unmutes has to be audible before the native element is rebuilt.
+    try { leaf._audioGraph.gain.gain.value = muted ? 0 : Math.min(vol, 1); } catch (_) { /* ignore */ }
     leaf.video.volume = Math.min(vol, 1);
     leaf.video.muted = muted;
   } else {
@@ -1911,6 +1912,8 @@ function setTileVolume(leaf, volume, opts = {}) {
   markVolumeAdjusting();
   const hadBoostGraph = !!leaf._audioGraph;
   leaf.volume = clamp(volume, 0, MAX_TILE_VOLUME);
+  // Muted-by-default only chooses the starting state. Moving the slider or
+  // the scroll wheel turns this tile's sound on.
   if (leaf.volume > 0 && !opts.keepMuted) leaf.muted = false;
   applyTileAudio(leaf);
   // Persist against the clip the user is actually hearing/adjusting.
@@ -2984,7 +2987,8 @@ function wireLeafEvents(leaf) {
 
   el.addEventListener('wheel', (e) => {
     if (leaf.spacer || !leaf.files.length) return;
-    if (e.target.closest('.tile-toolbar')) return;
+    const onVolume = e.target.closest && e.target.closest('.vol');
+    if (e.target.closest('.tile-toolbar') && !onVolume) return;
     e.preventDefault();
     e.stopPropagation();
     const step = e.shiftKey ? 0.02 : 0.08;
@@ -4227,7 +4231,8 @@ function serializeTree(node, withIndex, withTime) {
       o.currentTime = Math.round(mediaClock(node) * 20) / 20;
     }
     o.volume = clamp(node.volume == null ? 1 : node.volume, 0, MAX_TILE_VOLUME);
-    if (node.muted) o.muted = true;
+    // Always include. Omitting false left other displays muted after a volume change.
+    o.muted = !!node.muted;
     // Always include so unpause (false) clears peers — omitting it left them stuck.
     o.userPaused = !!node.userPaused;
     return o;
