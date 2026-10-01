@@ -25,6 +25,8 @@ const LS_KEY = 'lvt.state.v1';
 const PRESETS_KEY = 'lvt.presets.v1';
 /** Remembered per-file volume levels (path → 0..MAX_TILE_VOLUME). */
 const FILE_VOLUMES_KEY = 'lvt.fileVolumes.v1';
+/** Videos the user unmuted by hand (mute button or a volume change). */
+const FILE_UNMUTES_KEY = 'lvt.fileUnmutes.v1';
 /** Favorited file identities (normalized path/url keys). */
 const FAVORITES_KEY = 'lvt.favorites.v1';
 /** Per-tile volume ceiling (2.0 = 200% boost, VLC-style). */
@@ -1508,7 +1510,7 @@ function updateDefaultAudioButton() {
   btn.classList.toggle('active', muted);
   btn.textContent = muted ? 'Muted by default' : 'Volume by default';
   btn.title = muted
-    ? 'Videos start muted. Change a tile’s volume to turn its sound on, or click to play every video with volume.'
+    ? 'Videos start muted. Changing a video’s volume, or turning its mute button off, remembers that video so it plays with sound again later. The next video on the tile starts muted. Click to play every video with volume.'
     : 'Videos play with volume. Click to mute every video.';
 }
 
@@ -1767,9 +1769,90 @@ function applyRememberedFileVolume(leaf, file) {
   if (remembered != null) cur._savedVolume = remembered;
 }
 
+// ----------------------------------------------------------- Per-file unmute
+// Mute follows the video, not the tile. A manual unmute (mute button, or a
+// volume change while muted-by-default is on) is remembered for that file.
+// The next clip on the tile starts from the default again.
+/** @type {Set<string>} */
+const fileUnmutes = new Set();
+
+function loadFileUnmutes() {
+  fileUnmutes.clear();
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(FILE_UNMUTES_KEY) || 'null'); } catch (_) { /* ignore */ }
+  if (!Array.isArray(data)) return;
+  for (const raw of data) {
+    if (typeof raw !== 'string' || !raw) continue;
+    fileUnmutes.add(normalizeVolKey(raw) || raw);
+  }
+}
+
+function persistFileUnmutes() {
+  try { localStorage.setItem(FILE_UNMUTES_KEY, JSON.stringify([...fileUnmutes])); } catch (_) { /* ignore */ }
+}
+
+function isFileManuallyUnmuted(fileOrPath) {
+  const keys = fileVolumeKeys(fileOrPath);
+  const hit = () => keys.some((k) => fileUnmutes.has(k));
+  // Reload so a mute on another window is forgotten even before the storage event.
+  if (keys.length) loadFileUnmutes();
+  if (hit()) {
+    if (fileOrPath && typeof fileOrPath === 'object') fileOrPath._manuallyUnmuted = true;
+    return true;
+  }
+  // No path to store — keep an in-session mark so a reload of this object still works.
+  if (!keys.length && fileOrPath && typeof fileOrPath === 'object' && fileOrPath._manuallyUnmuted === true) {
+    return true;
+  }
+  if (fileOrPath && typeof fileOrPath === 'object') delete fileOrPath._manuallyUnmuted;
+  return false;
+}
+
+/** Remember or forget a manual unmute. Volume 0 does not call this. */
+function rememberFileUnmuted(fileOrPath, on) {
+  if (!fileOrPath) return;
+  if (typeof fileOrPath === 'object') {
+    if (on) fileOrPath._manuallyUnmuted = true;
+    else delete fileOrPath._manuallyUnmuted;
+  }
+  const keys = fileVolumeKeys(fileOrPath);
+  if (!keys.length) return;
+  for (const k of keys) fileUnmutes.delete(k);
+  if (on) {
+    for (const k of keys) fileUnmutes.add(k);
+    while (fileUnmutes.size > MAX_FILE_VOLUME_ENTRIES) {
+      const oldest = fileUnmutes.keys().next().value;
+      if (oldest == null) break;
+      fileUnmutes.delete(oldest);
+    }
+  }
+  persistFileUnmutes();
+}
+
+/**
+ * Apply mute for this clip only when the file identity changes.
+ * Same-file reloads (quality, native-clock restore, finish-load) keep the
+ * live mute the user just set. A different file is unmuted only if that
+ * video was manually unmuted before; otherwise it follows the default.
+ */
+function applyRememberedFileMute(leaf, file) {
+  if (!leaf) return;
+  const cur = file || (leaf.files && leaf.files[leaf.index]);
+  if (!cur) {
+    leaf._muteFileKey = '';
+    return;
+  }
+  const keys = fileVolumeKeys(cur);
+  const key = keys[0] || cur._muteIdentity || (cur._muteIdentity = 'anon:' + uid());
+  if (leaf._muteFileKey === key) return;
+  leaf._muteFileKey = key;
+  leaf.muted = isFileManuallyUnmuted(cur) ? false : !!settings.defaultMuted;
+}
+
 // Other renderer windows share localStorage — keep our Map in sync.
 window.addEventListener('storage', (e) => {
   if (e.key === FILE_VOLUMES_KEY) loadFileVolumes();
+  if (e.key === FILE_UNMUTES_KEY) loadFileUnmutes();
   if (e.key === FAVORITES_KEY) {
     loadFavorites();
     forEachLeaf(root, (leaf) => {
@@ -1913,12 +1996,17 @@ function setTileVolume(leaf, volume, opts = {}) {
   const hadBoostGraph = !!leaf._audioGraph;
   leaf.volume = clamp(volume, 0, MAX_TILE_VOLUME);
   // Muted-by-default only chooses the starting state. Moving the slider or
-  // the scroll wheel turns this tile's sound on.
-  if (leaf.volume > 0 && !opts.keepMuted) leaf.muted = false;
+  // the scroll wheel turns this video's sound on and remembers that file.
+  // The tile itself does not stay unmuted for the next clip.
+  const unmuteFile = leaf.volume > 0 && !opts.keepMuted;
+  if (unmuteFile) leaf.muted = false;
   applyTileAudio(leaf);
   // Persist against the clip the user is actually hearing/adjusting.
   const cur = resolvePlayingFile(leaf);
-  if (cur) rememberFileVolume(cur, leaf.volume);
+  if (cur) {
+    rememberFileVolume(cur, leaf.volume);
+    if (unmuteFile) rememberFileUnmuted(cur, true);
+  }
   // Dropping boost: leave the Web Audio clock so picture/sound stay locked.
   if (hadBoostGraph && leaf.volume <= 1 && !opts.skipNativeRestore) {
     restoreNativeAvClock(leaf);
@@ -1950,6 +2038,7 @@ function restoreNativeAvClock(leaf) {
   const video = leaf.video;
   if (!video) return;
   applyRememberedFileVolume(leaf, file);
+  applyRememberedFileMute(leaf, file);
   updateLeaf(leaf);
   const gen = (leaf._loadGen = (leaf._loadGen || 0) + 1);
   leaf._holdSilence = true;
@@ -2818,6 +2907,7 @@ function clearLeafFolder(leaf) {
   leaf.userPaused = false;
   leaf._wantPlaying = false;
   leaf._holdSilence = false;
+  leaf._muteFileKey = '';
   teardownGif(leaf);
   teardownStill(leaf);
   detachTileAudioGraph(leaf);
@@ -2981,6 +3071,9 @@ function wireLeafEvents(leaf) {
     e.stopPropagation();
     markVolumeAdjusting();
     leaf.muted = !leaf.muted;
+    // Remember the video, not the tile. Muting forgets a previous unmute.
+    const heard = resolvePlayingFile(leaf);
+    if (heard) rememberFileUnmuted(heard, !leaf.muted);
     applyTileAudio(leaf);
     saveState({ volumesOnly: true });
   });
@@ -3213,6 +3306,7 @@ async function deleteCurrentVideo(leaf) {
   }
   if (current) delete current._savedVolume;
   persistFileVolumes();
+  rememberFileUnmuted(current, false);
   clearFavoriteForFile(current);
 
   leaf.files = leaf.files.filter((f) => f.path !== removedPath);
@@ -3277,7 +3371,10 @@ async function finishLoadAndPlay(leaf, gen, autoplay) {
   if (!leaf.video || leaf.video !== video || leaf._loadGen !== gen) return;
   // Re-assert per-file volume after the async gap (sync/peers may have raced).
   const cur = leaf.files && leaf.files[leaf.index];
-  if (cur && sourcesMatch(video, cur.url)) applyRememberedFileVolume(leaf, cur);
+  if (cur && sourcesMatch(video, cur.url)) {
+    applyRememberedFileVolume(leaf, cur);
+    applyRememberedFileMute(leaf, cur);
+  }
   leaf._holdSilence = false;
   leaf._suspendEnded = false;
   applyTileAudio(leaf);
@@ -3330,8 +3427,10 @@ function loadCurrent(leaf, autoplay, opts = {}) {
     return;
   }
 
-  // Restore this clip’s last volume (or 100% default) before starting playback.
+  // Restore this clip’s last volume (or 100% default) and whether this
+  // video was manually unmuted. A different file does not keep the tile unmuted.
   applyRememberedFileVolume(leaf, current);
+  applyRememberedFileMute(leaf, current);
 
   if (sameSource && !opts.hardSwap) {
     leaf._holdSilence = false;
@@ -3391,6 +3490,7 @@ async function swapLeafClip(leaf, current, gen, autoplay, opts = {}) {
   // Re-apply against the captured file object (not leaf.index) so a concurrent
   // sync cannot point us at the wrong clip's memory.
   applyRememberedFileVolume(leaf, current);
+  applyRememberedFileMute(leaf, current);
   const applied = await applyQualitySrc(leaf, current, { start: 0 });
   if (!applied || leaf._loadGen !== gen || !leaf.video) {
     if (leaf && leaf._loadGen === gen) leaf._suspendEnded = false;
@@ -3887,7 +3987,8 @@ function resetLeafInPlace(leaf) {
   leaf.loop = false;
   leaf.userPaused = false;
   leaf.volume = 1;
-  leaf.muted = false;
+  leaf.muted = !!settings.defaultMuted;
+  leaf._muteFileKey = '';
   updateLeaf(leaf);
 }
 
@@ -4292,6 +4393,7 @@ function saveState(opts = {}) {
 
 function loadState() {
   loadFileVolumes();
+  loadFileUnmutes();
   loadFavorites();
   let data = null;
   try { data = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (_) {}
