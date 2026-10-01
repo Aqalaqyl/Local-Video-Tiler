@@ -74,9 +74,9 @@ picture you see.
     every video between playing with volume and starting muted. Click it again
     to swap them back. New tiles follow the same choice. While **Muted by
     default** is on, a video plays muted until you unmute it (mute button or
-    volume). That unmute sticks, and the program remembers the video, so the
-    same file starts with sound the next time it plays. Videos you have not
-    unmuted still start muted.
+    volume). That unmute sticks on every display, and the program remembers
+    the video, so the same file starts with sound the next time it plays.
+    Videos you have not unmuted still start muted.
   - **Menus** — the top bar groups controls into **Layout**, **Media**,
     **Playback**, and **Displays**. Playback includes how long a picture stays
     up (default **5 seconds**) and how many times a GIF or video plays before

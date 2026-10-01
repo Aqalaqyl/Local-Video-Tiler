@@ -1838,6 +1838,9 @@ function rememberFileUnmuted(fileOrPath, on) {
   }
   const keys = fileVolumeKeys(fileOrPath);
   if (!keys.length) return;
+  // Merge first so this window's write does not drop an unmute another
+  // display just stored.
+  loadFileUnmutes();
   for (const k of keys) fileUnmutes.delete(k);
   if (on) {
     for (const k of keys) fileUnmutes.add(k);
@@ -1876,12 +1879,28 @@ function noteMuteFile(leaf, file) {
 }
 
 /**
+ * Turn sound on when the shared list remembers this file. Other displays keep
+ * leaf.muted true until this runs, so an unmute on the main window never
+ * reached them. Does not turn sound off — a same-file reload must not undo a
+ * live unmute. Returns true when leaf.muted changed.
+ */
+function pullSharedUnmute(leaf, file) {
+  if (!settings.defaultMuted || !leaf || !file) return false;
+  if (!isFileManuallyUnmuted(file)) return false;
+  noteMuteFile(leaf, file);
+  if (!leaf.muted) return false;
+  leaf.muted = false;
+  return true;
+}
+
+/**
  * Choose mute for this clip.
  * The same file keeps a live mute or unmute (mute button, volume change,
- * quality reload, finishLoadAndPlay, sync). A different file while Muted by
- * default starts unmuted only when the user unmuted that video before;
- * every other video starts muted. Volume by default starts a different file
- * with sound and does not consult the mute-by-default list.
+ * quality reload, finishLoadAndPlay, sync) and picks up an unmute stored by
+ * another display. A different file while Muted by default starts unmuted
+ * only when the user unmuted that video before; every other video starts
+ * muted. Volume by default starts a different file with sound and does not
+ * consult the mute-by-default list.
  */
 function applyRememberedFileMute(leaf, file) {
   if (!leaf) return;
@@ -1892,7 +1911,9 @@ function applyRememberedFileMute(leaf, file) {
     return;
   }
   if (isSameMuteFile(leaf, cur)) {
-    // Keep the user's mute. Prefer the path key once the file has one.
+    // Keep a live mute or unmute. Do not re-read the list here — that would
+    // turn every remembered video back on the moment Muted by default is
+    // enabled, and a reload would fight the mute button.
     const stable = fileVolumeKeys(cur)[0];
     if (stable) leaf._muteFileKey = stable;
     return;
@@ -1901,10 +1922,38 @@ function applyRememberedFileMute(leaf, file) {
   leaf.muted = settings.defaultMuted ? !isFileManuallyUnmuted(cur) : false;
 }
 
+/** Mute-by-default prefs for a display window that does not load the saved tree. */
+function loadMirrorPlaybackPrefs() {
+  loadFileVolumes();
+  loadFileUnmutes();
+  loadFavorites();
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (_) { /* ignore */ }
+  if (data && data.settings && data.settings.defaultMuted != null) {
+    settings.defaultMuted = !!data.settings.defaultMuted;
+  }
+}
+
 // Other renderer windows share localStorage — keep our Map in sync.
 window.addEventListener('storage', (e) => {
   if (e.key === FILE_VOLUMES_KEY) loadFileVolumes();
-  if (e.key === FILE_UNMUTES_KEY) loadFileUnmutes();
+  if (e.key === FILE_UNMUTES_KEY) {
+    loadFileUnmutes();
+    if (settings.defaultMuted) {
+      forEachLeaf(root, (leaf) => {
+        if (!leaf || leaf.spacer || !leaf.files || !leaf.files.length) return;
+        const cur = resolvePlayingFile(leaf) || leaf.files[leaf.index];
+        if (!cur) return;
+        let changed = pullSharedUnmute(leaf, cur);
+        // A mute on another display removed this file. Silence it here too.
+        if (!changed && !leaf.muted && fileVolumeKeys(cur).length && isSameMuteFile(leaf, cur) && !isFileManuallyUnmuted(cur)) {
+          leaf.muted = true;
+          changed = true;
+        }
+        if (changed) applyTileAudio(leaf);
+      });
+    }
+  }
   if (e.key === FAVORITES_KEY) {
     loadFavorites();
     forEachLeaf(root, (leaf) => {
@@ -2134,7 +2183,8 @@ function snapshotSettings() {
     gridOn: settings.gridOn,
     snapOn: settings.snapOn,
     cellSize: settings.cellSize,
-    soundIndicators: !!settings.soundIndicators
+    soundIndicators: !!settings.soundIndicators,
+    defaultMuted: !!settings.defaultMuted
   };
 }
 
@@ -2146,6 +2196,18 @@ function applySettingsFromPayload(s) {
   if (!!s.editMode !== settings.editMode) setEditMode(!!s.editMode);
   if (s.soundIndicators != null && !!s.soundIndicators !== !!settings.soundIndicators) {
     setSoundIndicators(!!s.soundIndicators, { quiet: true });
+  }
+  // Mirrors do not read the saved layout themselves. Without this flag they
+  // copy the tile mute from the main window, which puts sound back off after
+  // an unmute on another display.
+  if (s.defaultMuted != null && !!s.defaultMuted !== !!settings.defaultMuted) {
+    settings.defaultMuted = !!s.defaultMuted;
+    forEachLeaf(root, (leaf) => {
+      if (!leaf || leaf.spacer) return;
+      leaf.muted = !!settings.defaultMuted;
+      applyTileAudio(leaf);
+    });
+    updateDefaultAudioButton();
   }
 }
 
@@ -2221,11 +2283,18 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     let mediaDirty = false;
 
     if (settings.defaultMuted) {
-      // Same clip keeps a live unmute. A different clip follows this mode's
-      // per-video list, not the mute flag copied from another display.
+      // An explicit unmute from another display is remembered and played here.
+      // A muted flag from that display is ignored: it is usually the previous
+      // "start muted" value and was turning sound back off on this screen.
       const heard = (localNode.files && localNode.files[localNode.index]) || null;
       const before = !!localNode.muted;
-      applyRememberedFileMute(localNode, heard);
+      if (remoteNode.muted === false && heard && (localNode.muted || !isFileManuallyUnmuted(heard))) {
+        rememberFileUnmuted(heard, true);
+        noteMuteFile(localNode, heard);
+        localNode.muted = false;
+      } else {
+        applyRememberedFileMute(localNode, heard);
+      }
       if (!!localNode.muted !== before) audioDirty = true;
     } else if (remoteNode.muted != null && !!remoteNode.muted !== !!localNode.muted) {
       localNode.muted = !!remoteNode.muted;
@@ -2619,6 +2688,9 @@ function scheduleSpanPlaybackRecovery() {
 }
 
 function bootMirror() {
+  // Same mute-by-default memory as the main window. A mirror that skips this
+  // treats every layout sync as "copy muted" and silences an unmute.
+  loadMirrorPlaybackPrefs();
   readProjectionQuery();
   document.body.classList.add('mirror');
   applyProjection();
