@@ -73,11 +73,11 @@ picture you see.
   - **Volume or mute by default** — **Playback → Volume by default** switches
     every video between playing with volume and starting muted. Click it again
     to swap them back. New tiles follow the same choice. While **Muted by
-    default** is on, every video plays muted until you unmute that video with
-    its mute button or by changing its volume. The program remembers those
-    videos, so they have sound the next time they play. Every other video
-    stays muted, including the next one on the same tile. Videos that only
-    played under **Volume by default** are not remembered.
+    default** is on, every clip that starts plays muted — including a video
+    you unmuted earlier — so the wall does not turn several soundtracks on
+    at once. Unmute the clip you want to hear (mute button or volume). That
+    clip stays audible until the tile moves to another file, which starts
+    muted again.
   - **Menus** — the top bar groups controls into **Layout**, **Media**,
     **Playback**, and **Displays**. Playback includes how long a picture stays
     up (default **5 seconds**) and how many times a GIF or video plays before
@@ -204,7 +204,7 @@ npm start
 | Loop the current file (per tile) | The **🔁** button on the tile |
 | Turn off every tile loop | **Playback → Stop all loops** |
 | Show which tiles are playing audio | **Playback → Sound indicators** |
-| Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** (while muted, every video stays muted until you unmute it; those videos are remembered) |
+| Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** (while muted, each new clip starts silent until you unmute it) |
 | Image time, GIF loops, video loops | **Playback** menu |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |
