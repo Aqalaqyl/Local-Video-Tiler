@@ -1431,14 +1431,8 @@ function leafAudioShouldMute(leaf) {
   const vol = clamp(leaf.volume == null ? 1 : leaf.volume, 0, MAX_TILE_VOLUME);
   const offSlice = projection.active && (!tileHitsOpenViewport(leaf) || (!isLeafInViewport(leaf) && !isLeafVisible(leaf)));
   if (offSlice || vol === 0 || leaf.userPaused) return true;
-  if (settings.defaultMuted) {
-    const cur = resolvePlayingFile(leaf) || (leaf.files && leaf.files[leaf.index]);
-    const key = (fileVolumeKeys(cur)[0]) || '';
-    // A clip that just arrived stays silent until the user unmutes it on
-    // this tile. A remembered unmute must not turn the whole wall back on.
-    if (!key || key !== leaf._muteFileKey || leaf.muted) return true;
-    return false;
-  }
+  // Trust the tile flag. A key mismatch must not mute a clip the user just
+  // unmuted — the playback audit calls this every few seconds.
   return !!leaf.muted;
 }
 
@@ -1525,7 +1519,7 @@ function updateDefaultAudioButton() {
   btn.classList.toggle('active', muted);
   btn.textContent = muted ? 'Muted by default' : 'Volume by default';
   btn.title = muted
-    ? 'Every video that starts plays muted, including ones you unmuted before, so they do not all play at once. Unmute the clip you want to hear. The next clip starts muted again.'
+    ? 'Videos start muted until you unmute them. An unmuted video stays unmuted and is remembered, so it starts with sound the next time it plays. Other videos stay muted.'
     : 'Videos play with volume. Click to start every video muted.';
 }
 
@@ -1787,10 +1781,9 @@ function applyRememberedFileVolume(leaf, file) {
 }
 
 // ----------------------------------------------------------- Per-file unmute
-// Muted by default remembers which videos the user unmuted, but a new clip
-// always starts muted. Playing every remembered video as it shuffles in
-// turns the whole wall on at once. Sound stays on only for the clip the
-// user unmuted, until that tile moves to another file.
+// Muted by default remembers which videos the user unmuted. Those videos
+// start with sound the next time they play, and a live unmute is not undone
+// by a reload of the same file. A video the user has not unmuted starts muted.
 /** @type {Set<string>} */
 const fileUnmutes = new Set();
 
@@ -1857,13 +1850,38 @@ function rememberFileUnmuted(fileOrPath, on) {
   persistFileUnmutes();
 }
 
+/** Stable identity for mute memory: path, else url, else an in-session id. */
+function canonicalMuteKey(file) {
+  const keys = fileVolumeKeys(file);
+  if (keys[0]) return keys[0];
+  if (file && typeof file === 'object') {
+    if (!file._muteIdentity) file._muteIdentity = 'anon:' + uid();
+    return file._muteIdentity;
+  }
+  return '';
+}
+
+/** True when this leaf is already showing `file` (any of its keys). */
+function isSameMuteFile(leaf, file) {
+  if (!leaf || !leaf._muteFileKey || !file) return false;
+  if (fileVolumeKeys(file).includes(leaf._muteFileKey)) return true;
+  return !!(file._muteIdentity && file._muteIdentity === leaf._muteFileKey);
+}
+
+/** Pin the clip the tile is showing so a later reload is the same file. */
+function noteMuteFile(leaf, file) {
+  if (!leaf || !file) return;
+  const key = canonicalMuteKey(file);
+  if (key) leaf._muteFileKey = key;
+}
+
 /**
  * Choose mute for this clip.
- * Muted by default: a different file always starts muted, even if the user
- * unmuted that file before. Otherwise every remembered video would start
- * talking as soon as it shuffled in. The same file keeps a live unmute
- * (volume change, mute button, quality reload). Volume by default starts a
- * different file with sound.
+ * The same file keeps a live mute or unmute (mute button, volume change,
+ * quality reload, finishLoadAndPlay, sync). A different file while Muted by
+ * default starts unmuted only when the user unmuted that video before;
+ * every other video starts muted. Volume by default starts a different file
+ * with sound and does not consult the mute-by-default list.
  */
 function applyRememberedFileMute(leaf, file) {
   if (!leaf) return;
@@ -1873,18 +1891,14 @@ function applyRememberedFileMute(leaf, file) {
     if (settings.defaultMuted) leaf.muted = true;
     return;
   }
-  const keys = fileVolumeKeys(cur);
-  const key = keys[0] || cur._muteIdentity || (cur._muteIdentity = 'anon:' + uid());
-  if (settings.defaultMuted) {
-    if (leaf._muteFileKey !== key) {
-      leaf._muteFileKey = key;
-      leaf.muted = true;
-    }
+  if (isSameMuteFile(leaf, cur)) {
+    // Keep the user's mute. Prefer the path key once the file has one.
+    const stable = fileVolumeKeys(cur)[0];
+    if (stable) leaf._muteFileKey = stable;
     return;
   }
-  if (leaf._muteFileKey === key) return;
-  leaf._muteFileKey = key;
-  leaf.muted = false;
+  noteMuteFile(leaf, cur);
+  leaf.muted = settings.defaultMuted ? !isFileManuallyUnmuted(cur) : false;
 }
 
 // Other renderer windows share localStorage — keep our Map in sync.
@@ -2033,14 +2047,14 @@ function setTileVolume(leaf, volume, opts = {}) {
   markVolumeAdjusting();
   const hadBoostGraph = !!leaf._audioGraph;
   leaf.volume = clamp(volume, 0, MAX_TILE_VOLUME);
-  // A volume change turns on the clip the user is adjusting, so they can
-  // hear the level. It does not leave the next clip — or that file the next
-  // time it shuffles in — playing with sound.
+  // A volume change above zero unmutes this clip and remembers it while
+  // Muted by default is on. Pin the file first so a reload cannot treat
+  // the same clip as new and mute it again. Volume 0 does not remember.
   const unmuteFile = leaf.volume > 0 && !opts.keepMuted;
   if (unmuteFile) leaf.muted = false;
-  applyTileAudio(leaf);
-  // Persist against the clip the user is actually hearing/adjusting.
   const cur = resolvePlayingFile(leaf);
+  if (cur) noteMuteFile(leaf, cur);
+  applyTileAudio(leaf);
   if (cur) {
     rememberFileVolume(cur, leaf.volume);
     if (unmuteFile) rememberMutedDefaultUnmute(cur, true);
@@ -2207,8 +2221,8 @@ function applyIncomingPlaybackWalk(localNode, remoteNode, opts, resumeBatch) {
     let mediaDirty = false;
 
     if (settings.defaultMuted) {
-      // The tile flag from another display is not an unmute. Only this
-      // mode's per-video list may turn sound on.
+      // Same clip keeps a live unmute. A different clip follows this mode's
+      // per-video list, not the mute flag copied from another display.
       const heard = (localNode.files && localNode.files[localNode.index]) || null;
       const before = !!localNode.muted;
       applyRememberedFileMute(localNode, heard);
@@ -3119,9 +3133,13 @@ function wireLeafEvents(leaf) {
     markVolumeAdjusting();
     leaf.muted = !leaf.muted;
     // Muted by default remembers this video. Volume by default does not
-    // write that list, and muting here does not erase it.
+    // write that list, and muting here does not erase it. Pin the file so
+    // the next reload keeps this mute instead of starting the clip over.
     const heard = resolvePlayingFile(leaf);
-    if (heard) rememberMutedDefaultUnmute(heard, !leaf.muted);
+    if (heard) {
+      noteMuteFile(leaf, heard);
+      rememberMutedDefaultUnmute(heard, !leaf.muted);
+    }
     applyTileAudio(leaf);
     saveState({ volumesOnly: true });
   });
