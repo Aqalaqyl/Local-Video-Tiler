@@ -72,12 +72,12 @@ picture you see.
     files that have no sound.
   - **Volume or mute by default** — **Playback → Volume by default** switches
     every video between playing with volume and starting muted. Click it again
-    to swap them back. New tiles follow the same choice. **Muted by default**
-    keeps its own list: changing a video’s volume or turning its mute button
-    off remembers that video for this mode, and the next video on the tile
-    starts muted unless it is on that list. Videos that only play with sound
-    under **Volume by default** are not added, so they start muted when you
-    switch back.
+    to swap them back. New tiles follow the same choice. While **Muted by
+    default** is on, every video plays muted until you unmute that video with
+    its mute button or by changing its volume. The program remembers those
+    videos, so they have sound the next time they play. Every other video
+    stays muted, including the next one on the same tile. Videos that only
+    played under **Volume by default** are not remembered.
   - **Menus** — the top bar groups controls into **Layout**, **Media**,
     **Playback**, and **Displays**. Playback includes how long a picture stays
     up (default **5 seconds**) and how many times a GIF or video plays before
@@ -204,7 +204,7 @@ npm start
 | Loop the current file (per tile) | The **🔁** button on the tile |
 | Turn off every tile loop | **Playback → Stop all loops** |
 | Show which tiles are playing audio | **Playback → Sound indicators** |
-| Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** (Muted by default remembers videos you unmute; videos that only played with volume stay muted) |
+| Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** (while muted, every video stays muted until you unmute it; those videos are remembered) |
 | Image time, GIF loops, video loops | **Playback** menu |
 | Toggle alignment grid | `G` or the **Grid** button |
 | Toggle snap to grid | `S` or the **Snap** button |
