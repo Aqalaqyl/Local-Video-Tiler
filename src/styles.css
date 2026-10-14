@@ -49,6 +49,14 @@ body.idle:not(.editing) #topbar {
   transform: translateY(-100%);
   pointer-events: none;
 }
+/* An open menu stays readable. Idle must not slide it away. */
+body.menu-open #topbar,
+body.idle.menu-open:not(.editing) #topbar {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+body.idle.menu-open:not(.editing) { cursor: auto; }
 
 /* When spanning every display, pin the chrome onto the primary monitor so it
    never lands in a dead zone between physical screens. The renderer fills in
@@ -247,6 +255,23 @@ body.desktop-preview #stage > .node-leaf {
   /* Layout/style containment only — paint containment forces videos off the
      GPU overlay path and makes multi-tile playback lag. */
   contain: layout style;
+}
+/* Holds a maximized tile's place so the other tiles keep their size and playback. */
+.maximize-placeholder {
+  min-width: 0;
+  min-height: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.node-leaf.maximized {
+  position: fixed;
+  z-index: 48;
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  border-color: transparent;
 }
 .node-leaf.focused { box-shadow: inset 0 0 0 2px var(--accent); }
 .node-leaf.selected { box-shadow: inset 0 0 0 2px var(--accent-2); }

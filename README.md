@@ -125,7 +125,12 @@ picture you see.
   exactly one display when you span. Existing folder assignments are kept.
 - **Minimal, auto-hiding interface** — the top bar, tile controls and even the
   mouse cursor fade away when you stop interacting, leaving a clean viewing
-  surface. They reappear the moment you move the mouse.
+  surface. They reappear the moment you move the mouse. A menu you have opened
+  stays up while you read it. Clicking outside that menu, or pressing `Escape`,
+  closes it and returns to this minimal view right away.
+- **Double-click to fill the screen** — double-click a video and it fills the
+  screen you are watching. Every other video keeps playing behind it. Double-click
+  the video again, or press `Escape`, to bring the tile layout back.
 - **Alignment grid** — toggle a grid of squares to lay tiles out neatly and
   symmetrically. The cell size is adjustable.
 - **Snap to grid** — when enabled, splits and divider drags snap to the grid for
@@ -219,6 +224,7 @@ npm start
 | Adjust grid cell size | The **Cell** slider |
 | Reset entire layout | **Reset All** |
 | Fullscreen (current display) | `F` or the **Fullscreen** button |
+| Fill this screen with one video | Double-click the video. Other videos keep playing. Double-click again or `Escape` to restore |
 | Fullscreen the checked monitors | `A` or **Displays → All displays** (the button name shows how many are checked) |
 | Toggle the screen-split guide | `D` or the **Guide** button |
 | Tile layout to match displays | `T` or the **Tile to Displays** button |

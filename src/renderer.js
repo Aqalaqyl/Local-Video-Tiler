@@ -2904,17 +2904,85 @@ function forEachLeaf(node, fn) {
 }
 
 // ============================================================================
+// Maximize one video on this screen. Other tiles keep their slots and playback.
+// ============================================================================
+let maximizedLeaf = null;
+
+function releaseMaximizeSlot(leaf) {
+  const ph = leaf && leaf._maximizePlaceholder;
+  if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+  if (leaf) leaf._maximizePlaceholder = null;
+}
+
+function holdMaximizeSlot(leaf) {
+  const el = leaf && leaf.el;
+  if (!el || !el.parentNode) return;
+  releaseMaximizeSlot(leaf);
+  const ph = document.createElement('div');
+  ph.className = 'maximize-placeholder';
+  if (el.style.flex) ph.style.flex = el.style.flex;
+  ph.setAttribute('aria-hidden', 'true');
+  el.parentNode.insertBefore(ph, el);
+  leaf._maximizePlaceholder = ph;
+}
+
+function clearMaximizedLeaf() {
+  if (maximizedLeaf) {
+    releaseMaximizeSlot(maximizedLeaf);
+    if (maximizedLeaf.el) maximizedLeaf.el.classList.remove('maximized');
+  }
+  maximizedLeaf = null;
+  document.body.classList.remove('tile-maximized');
+}
+
+function maximizeLeaf(leaf) {
+  if (!leaf || !leaf.el || leaf.spacer) return;
+  if (maximizedLeaf && maximizedLeaf !== leaf) clearMaximizedLeaf();
+  maximizedLeaf = leaf;
+  leaf.el.classList.add('maximized');
+  document.body.classList.add('tile-maximized');
+  holdMaximizeSlot(leaf);
+  flash('Filling this screen — double-click or Esc to restore');
+}
+
+function toggleMaximizeLeaf(leaf) {
+  if (maximizedLeaf === leaf) {
+    clearMaximizedLeaf();
+    flash('Restored the layout');
+    return;
+  }
+  maximizeLeaf(leaf);
+}
+
+function syncMaximizedAfterRender() {
+  if (!maximizedLeaf) return;
+  if (!leafStillInTree(maximizedLeaf) || !maximizedLeaf.el || !maximizedLeaf.el.parentNode) {
+    const stale = maximizedLeaf;
+    maximizedLeaf = null;
+    document.body.classList.remove('tile-maximized');
+    if (stale && stale.el) stale.el.classList.remove('maximized');
+    releaseMaximizeSlot(stale);
+    return;
+  }
+  maximizedLeaf.el.classList.add('maximized');
+  document.body.classList.add('tile-maximized');
+  holdMaximizeSlot(maximizedLeaf);
+}
+
+// ============================================================================
 // Rendering
 // ============================================================================
 function render() {
   // Detach leaf elements (they're cached) before clearing containers so their
   // <video> playback survives a re-layout.
+  if (maximizedLeaf) releaseMaximizeSlot(maximizedLeaf);
   forEachLeaf(root, (leaf) => { if (leaf.el && leaf.el.parentNode) leaf.el.parentNode.removeChild(leaf.el); });
   stage.textContent = '';
   stage.appendChild(renderNode(root));
   applySelection();
   if (projection.active) applyProjection();
   else applyDesktopPreview();
+  syncMaximizedAfterRender();
   positionTileBadges();
   saveState();
 }
@@ -3336,6 +3404,16 @@ function wireLeafEvents(leaf) {
     } else {
       setSelectionSingle(leaf);
     }
+  });
+
+  // View mode: fill this screen with the video. Other tiles keep playing.
+  el.addEventListener('dblclick', (e) => {
+    if (leaf.spacer || settings.editMode) return;
+    if (e.target.closest('.tile-toolbar') || e.target.closest('button')) return;
+    if (!leaf.folder || !leaf.files || !leaf.files.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    toggleMaximizeLeaf(leaf);
   });
 }
 
@@ -4471,6 +4549,14 @@ let lastMouse = { x: 0, y: 0 };
 
 function onGlobalMouseMove(e) {
   lastMouse = { x: e.clientX, y: e.clientY };
+  // The click that dismisses a menu often jitters a few pixels. That must not
+  // immediately bring the chrome back after returning to the minimal UI.
+  if (dismissPoint) {
+    const dx = e.clientX - dismissPoint.x;
+    const dy = e.clientY - dismissPoint.y;
+    if (dx * dx + dy * dy < 25) return;
+    dismissPoint = null;
+  }
   wake();
   if (!settings.editMode) { hidePreview(); return; }
   updatePreview(e.clientX, e.clientY, e.shiftKey);
@@ -4614,6 +4700,7 @@ function applyFocus() {
 // ============================================================================
 function setEditMode(on) {
   settings.editMode = on;
+  if (on) clearMaximizedLeaf();
   document.body.classList.toggle('editing', on);
   btnEdit.classList.toggle('active', on);
   if (btnEditMirror) btnEditMirror.classList.toggle('active', on);
@@ -5149,12 +5236,38 @@ function deletePreset(id) {
 // Idle / minimal-UI auto hide
 // ============================================================================
 let idleTimer = null;
+/** Click that just dismissed a menu; tiny moves from that point do not wake. */
+let dismissPoint = null;
+/** Set during the mousedown that dismisses a menu so the later wake listener skips. */
+let suppressWake = false;
+
+function anyMenuOpen() {
+  return !!document.querySelector('.menu.open');
+}
+
+function chromeShouldStay() {
+  if (settings.editMode || anyMenuOpen()) return true;
+  if (typeof isPresetsPanelOpen === 'function' && isPresetsPanelOpen()) return true;
+  if (typeof settingsPanel !== 'undefined' && settingsPanel && !settingsPanel.hidden) return true;
+  return false;
+}
+
 function wake() {
+  dismissPoint = null;
   document.body.classList.remove('idle');
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
-    if (!settings.editMode) document.body.classList.add('idle');
+    // An open menu stays up so it can be read. Idle resumes once it closes.
+    if (!chromeShouldStay()) document.body.classList.add('idle');
   }, 2800);
+}
+
+/** Hide the chrome immediately. Used when a menu is dismissed. */
+function enterMinimalUi(point) {
+  clearTimeout(idleTimer);
+  if (point) dismissPoint = { x: point.x, y: point.y };
+  if (chromeShouldStay()) return;
+  document.body.classList.add('idle');
 }
 
 // ============================================================================
@@ -5578,6 +5691,7 @@ function closeMenus() {
     if (pop) pop.hidden = true;
     if (toggle) toggle.setAttribute('aria-expanded', 'false');
   });
+  document.body.classList.remove('menu-open');
 }
 
 function toggleMenu(menu) {
@@ -5586,11 +5700,17 @@ function toggleMenu(menu) {
   if (!pop || !toggle) return;
   const willOpen = pop.hidden;
   closeMenus();
-  if (!willOpen) return;
+  if (!willOpen) {
+    enterMinimalUi(lastMouse);
+    return;
+  }
   menu.classList.add('open');
+  document.body.classList.add('menu-open');
   pop.hidden = false;
   toggle.setAttribute('aria-expanded', 'true');
-  wake();
+  // Stay visible while the menu is open, even if the pointer is still.
+  document.body.classList.remove('idle');
+  clearTimeout(idleTimer);
 }
 
 document.querySelectorAll('.menu-toggle').forEach((toggle) => {
@@ -5600,7 +5720,10 @@ document.querySelectorAll('.menu-toggle').forEach((toggle) => {
   });
 });
 document.querySelectorAll('.menu-item').forEach((item) => {
-  item.addEventListener('click', () => closeMenus());
+  item.addEventListener('click', () => {
+    closeMenus();
+    enterMinimalUi(lastMouse);
+  });
 });
 
 document.addEventListener('mousedown', (e) => {
@@ -5611,13 +5734,33 @@ document.addEventListener('mousedown', (e) => {
     setPresetsPanelOpen(false);
   }
   if (t && t.closest && t.closest('.menu')) return;
+  if (!anyMenuOpen()) return;
   closeMenus();
+  suppressWake = true;
+  enterMinimalUi({ x: e.clientX, y: e.clientY });
 });
 
 document.addEventListener('mousemove', onGlobalMouseMove);
-document.addEventListener('mousedown', wake);
+document.addEventListener('mousedown', () => {
+  if (suppressWake) {
+    suppressWake = false;
+    return;
+  }
+  wake();
+});
 document.addEventListener('mousedown', () => resumeAudioContext());
 document.addEventListener('keydown', (e) => {
+  if (anyMenuOpen() && e.key === 'Escape') {
+    e.preventDefault();
+    closeMenus();
+    enterMinimalUi(lastMouse);
+    return;
+  }
+  if (maximizedLeaf && e.key === 'Escape') {
+    e.preventDefault();
+    clearMaximizedLeaf();
+    return;
+  }
   wake();
   if (e.key === 'Shift' && settings.editMode) updatePreview(lastMouse.x, lastMouse.y, true);
   if (isTypingTarget(e.target)) return;
