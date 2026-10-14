@@ -141,6 +141,12 @@ picture you see.
   layout **and each tile’s assigned media folder**, then Load to restore both in
   one click. Re-saving under the same name updates the preset (you’ll be asked
   before an update that would drop folder assignments, e.g. after Clear Folders).
+- **Import / export layouts** — **Media → Export layout…** writes the current
+  tile arrangement to a JSON file. **Media → Import layout…** replaces the
+  current arrangement with a file. Both steps ask whether to include each
+  tile’s media folder or keep the file to splits only. The same actions are in
+  the presets panel. Folder paths are absolute, so they restore only on a
+  machine that has those folders.
 - **Layout persistence** — your layout, folder assignments and settings are
   remembered between sessions.
 
@@ -222,6 +228,8 @@ npm start
 | Fullscreen the checked monitors | `A` or **Displays → All displays** (the button name shows how many are checked) |
 | Toggle the screen-split guide | `D` or the **Guide** button |
 | Tile layout to match displays | `T` or the **Tile to Displays** button |
+| Export the current layout | **Media → Export layout…** (also in **Presets**) — choose with or without folders |
+| Import a layout file | **Media → Import layout…** (also in **Presets**) — choose with or without folders |
 | Exit edit mode | `Escape` |
 
 ## Supported formats

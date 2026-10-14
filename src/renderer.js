@@ -5078,34 +5078,13 @@ async function applyPreset(id) {
     flash('Preset not found');
     return;
   }
-  // Deep-clone so hydration cannot mutate the stored preset object in place oddly.
-  let tree;
-  try {
-    tree = JSON.parse(JSON.stringify(preset.tree));
-  } catch (_) {
-    tree = preset.tree;
+  const applied = await applyLayoutTree(preset.tree, preset.folders, true);
+  if (!applied) {
+    flash('Could not load that preset');
+    return;
   }
-  if (Array.isArray(preset.folders) && preset.folders.some((f) => typeof f === 'string' && f)) {
-    applyFolderListToTree(tree, preset.folders);
-  }
-
-  forEachLeaf(root, disposeLeaf);
-  root = deserialize(tree);
-  focusedLeaf = null;
-  selectedLeaves.clear();
-  render();
-
-  const folderLeaves = [];
-  forEachLeaf(root, (leaf) => {
-    if (leaf.folder) folderLeaves.push(leaf);
-  });
-  const loads = folderLeaves.map((leaf) =>
-    loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf, true))
-  );
-  await Promise.all(loads);
-  saveState();
   setPresetsPanelOpen(false);
-  const n = folderLeaves.length;
+  const n = applied.folders;
   flash(
     n
       ? `Loaded preset “${preset.name || 'Untitled'}” · restored ${n} folder${n === 1 ? '' : 's'}`
@@ -5143,6 +5122,270 @@ function deletePreset(id) {
   writePresets(list.filter((p) => p.id !== id));
   renderPresetsList();
   flash('Deleted preset');
+}
+
+// ============================================================================
+// Layout files — export / import the tile tree, with or without folder paths
+// ============================================================================
+const LAYOUT_FILE_FORMAT = 'lvt.layout';
+const LAYOUT_FILE_VERSION = 1;
+
+const layoutFileDialog = document.getElementById('layout-file-dialog');
+const layoutFileTitle = document.getElementById('layout-file-title');
+const layoutFileHint = document.getElementById('layout-file-hint');
+const layoutFileStats = document.getElementById('layout-file-stats');
+const btnLayoutWithFolders = document.getElementById('btn-layout-with-folders');
+const btnLayoutWithoutFolders = document.getElementById('btn-layout-without-folders');
+const btnLayoutFileCancel = document.getElementById('btn-layout-file-cancel');
+const btnLayoutFileClose = document.getElementById('btn-layout-file-close');
+/** @type {((choice: 'with' | 'without' | null) => void) | null} */
+let layoutFileChoiceResolve = null;
+
+function isLayoutFileDialogOpen() {
+  return !!(layoutFileDialog && !layoutFileDialog.hidden);
+}
+
+function closeLayoutFileDialog(choice) {
+  if (layoutFileDialog) {
+    layoutFileDialog.hidden = true;
+    layoutFileDialog.setAttribute('aria-hidden', 'true');
+  }
+  const resolve = layoutFileChoiceResolve;
+  layoutFileChoiceResolve = null;
+  if (resolve) resolve(choice);
+}
+
+/**
+ * Ask whether this export or import should carry media folder paths.
+ * Resolves 'with', 'without', or null when cancelled.
+ */
+function askLayoutFileChoice(opts) {
+  return new Promise((resolve) => {
+    if (!layoutFileDialog || layoutFileChoiceResolve) {
+      resolve(null);
+      return;
+    }
+    layoutFileChoiceResolve = resolve;
+    if (layoutFileTitle) layoutFileTitle.textContent = opts.title || 'Layout';
+    if (layoutFileHint) layoutFileHint.textContent = opts.hint || '';
+    if (layoutFileStats) layoutFileStats.textContent = opts.stats || '';
+    if (btnLayoutWithFolders) btnLayoutWithFolders.textContent = opts.withLabel || 'With folders';
+    if (btnLayoutWithoutFolders) btnLayoutWithoutFolders.textContent = opts.withoutLabel || 'Without folders';
+    const emphasizeWithout = opts.focus === 'without';
+    if (btnLayoutWithFolders) btnLayoutWithFolders.classList.toggle('primary', !emphasizeWithout);
+    if (btnLayoutWithoutFolders) btnLayoutWithoutFolders.classList.toggle('primary', emphasizeWithout);
+    layoutFileDialog.hidden = false;
+    layoutFileDialog.setAttribute('aria-hidden', 'false');
+    wake();
+    const focusBtn = opts.focus === 'without' ? btnLayoutWithoutFolders : btnLayoutWithFolders;
+    if (focusBtn) focusBtn.focus();
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
+
+function layoutCountLabel(stats) {
+  const tiles = stats.tiles === 1 ? '1 tile' : stats.tiles + ' tiles';
+  const folders = stats.folders === 1 ? '1 folder' : stats.folders + ' folders';
+  return tiles + ' · ' + folders;
+}
+
+function clearTreeFolders(node) {
+  if (!node) return;
+  if (node.kind === 'leaf') {
+    node.folder = null;
+    return;
+  }
+  if (node.children) {
+    clearTreeFolders(node.children[0]);
+    clearTreeFolders(node.children[1]);
+  }
+}
+
+function isLayoutNode(node, depth) {
+  if (!node || typeof node !== 'object' || depth > 48) return false;
+  if (node.kind === 'leaf') return true;
+  if (node.kind !== 'split') return false;
+  if (node.direction !== 'row' && node.direction !== 'col') return false;
+  if (!Array.isArray(node.children) || node.children.length !== 2) return false;
+  if (!Number.isFinite(Number(node.ratio))) return false;
+  return isLayoutNode(node.children[0], depth + 1) && isLayoutNode(node.children[1], depth + 1);
+}
+
+function cleanFolderPath(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 4096 || trimmed.includes('\0')) return null;
+  return trimmed;
+}
+
+function sanitizeLeafFolders(node) {
+  if (!node) return;
+  if (node.kind === 'leaf') {
+    node.folder = node.spacer ? null : cleanFolderPath(node.folder);
+    return;
+  }
+  sanitizeLeafFolders(node.children && node.children[0]);
+  sanitizeLeafFolders(node.children && node.children[1]);
+}
+
+/** Fresh preset-shaped tree. `includeFolders` keeps each tile’s media path. */
+function buildLayoutDocument(tree, includeFolders) {
+  const copy = JSON.parse(JSON.stringify(tree));
+  if (!includeFolders) clearTreeFolders(copy);
+  const stats = countPresetFolders(copy);
+  const doc = {
+    format: LAYOUT_FILE_FORMAT,
+    version: LAYOUT_FILE_VERSION,
+    exportedAt: new Date().toISOString(),
+    includesFolders: !!(includeFolders && stats.folders > 0),
+    tree: copy
+  };
+  if (doc.includesFolders) doc.folders = collectPresetLeafFolders(copy);
+  return doc;
+}
+
+/**
+ * Accept this app’s layout file, a saved preset object, or a bare tile tree.
+ * Returns a cloned tree plus the folder list, or null when the file is not a layout.
+ */
+function parseLayoutDocument(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  let tree = null;
+  let folders = null;
+  if (data.kind === 'leaf' || data.kind === 'split') tree = data;
+  else if (data.tree && typeof data.tree === 'object') {
+    tree = data.tree;
+    if (Array.isArray(data.folders)) folders = data.folders;
+  } else return null;
+  if (!isLayoutNode(tree, 0)) return null;
+  let copy;
+  try { copy = JSON.parse(JSON.stringify(tree)); } catch (_) { return null; }
+  sanitizeLeafFolders(copy);
+  const cleaned = Array.isArray(folders) ? folders.map(cleanFolderPath) : undefined;
+  const preset = normalizePreset({ tree: copy, folders: cleaned });
+  sanitizeLeafFolders(preset.tree);
+  return { tree: preset.tree, folders: collectPresetLeafFolders(preset.tree) };
+}
+
+/**
+ * Replace the live layout. `withFolders` restores paths from the tree / folder list;
+ * otherwise every tile is left empty and the splits stay.
+ * @returns {Promise<{ folders: number } | null>}
+ */
+async function applyLayoutTree(tree, folders, withFolders) {
+  let copy;
+  try { copy = JSON.parse(JSON.stringify(tree)); } catch (_) { return null; }
+  if (withFolders && Array.isArray(folders) && folders.some((f) => typeof f === 'string' && f)) {
+    applyFolderListToTree(copy, folders);
+  }
+  if (!withFolders) clearTreeFolders(copy);
+  forEachLeaf(root, disposeLeaf);
+  root = deserialize(copy);
+  focusedLeaf = null;
+  selectedLeaves.clear();
+  render();
+
+  const folderLeaves = [];
+  forEachLeaf(root, (leaf) => {
+    if (leaf.folder) folderLeaves.push(leaf);
+  });
+  const loads = folderLeaves.map((leaf) =>
+    loadFolder(leaf, leaf.folder, 0, false).then(() => advanceRandom(leaf, true))
+  );
+  await Promise.all(loads);
+  saveState();
+  return { folders: folderLeaves.length };
+}
+
+async function exportLayout() {
+  if (IS_MIRROR || !window.api.saveLayoutFile) return;
+  closeMenus();
+  setPresetsPanelOpen(false);
+  const tree = serializePresetTree(root);
+  const stats = countPresetFolders(tree);
+  const choice = await askLayoutFileChoice({
+    title: 'Export layout',
+    hint: 'Save the current tile arrangement to a file. Include each tile’s media folder, or export the splits only.',
+    stats: layoutCountLabel(stats) + (stats.folders
+      ? ' assigned. Folder paths are absolute and restore only where those folders exist.'
+      : ' assigned.'),
+    withLabel: 'With folders',
+    withoutLabel: 'Without folders',
+    focus: stats.folders ? 'with' : 'without'
+  });
+  if (!choice) return;
+  const includeFolders = choice === 'with';
+  let doc;
+  try { doc = buildLayoutDocument(tree, includeFolders); } catch (_) {
+    flash('Could not export this layout');
+    return;
+  }
+  const saved = await window.api.saveLayoutFile(
+    doc,
+    includeFolders ? 'layout-with-folders.json' : 'layout.json'
+  );
+  if (!saved || saved.cancelled) return;
+  if (!saved.ok) {
+    flash(saved.error || 'Could not export this layout');
+    return;
+  }
+  const name = escapeHtml(folderBasename(saved.filePath) || 'layout.json');
+  if (includeFolders && doc.includesFolders) {
+    flash('Exported ' + name + ' with ' + (stats.folders === 1 ? '1 folder' : stats.folders + ' folders'));
+  } else if (includeFolders) {
+    flash('Exported ' + name + ' · no folders were assigned');
+  } else {
+    flash('Exported ' + name + ' without folders');
+  }
+}
+
+async function importLayout() {
+  if (IS_MIRROR || !window.api.openLayoutFile) return;
+  closeMenus();
+  setPresetsPanelOpen(false);
+  const opened = await window.api.openLayoutFile();
+  if (!opened || opened.cancelled) return;
+  if (!opened.ok) {
+    flash(opened.error || 'Could not read that file');
+    return;
+  }
+  const parsed = parseLayoutDocument(opened.data);
+  if (!parsed) {
+    flash('That file is not a layout');
+    return;
+  }
+  const stats = countPresetFolders(parsed.tree);
+  const fileName = folderBasename(opened.filePath) || 'layout.json';
+  const choice = await askLayoutFileChoice({
+    title: 'Import layout',
+    hint: stats.folders
+      ? 'Replace the current arrangement with this file. Restore its media folders, or keep the splits and leave every tile empty.'
+      : 'Replace the current arrangement with this file. It has no folder paths, so every tile will be empty either way.',
+    stats: fileName + ' · ' + layoutCountLabel(stats),
+    withLabel: 'With folders',
+    withoutLabel: 'Without folders',
+    focus: stats.folders ? 'with' : 'without'
+  });
+  if (!choice) return;
+  const withFolders = choice === 'with';
+  const applied = await applyLayoutTree(parsed.tree, parsed.folders, withFolders);
+  if (!applied) {
+    flash('Could not import that layout');
+    return;
+  }
+  setPresetsPanelOpen(false);
+  if (withFolders && applied.folders) {
+    flash('Imported layout · restored ' + (applied.folders === 1 ? '1 folder' : applied.folders + ' folders'));
+  } else if (withFolders) {
+    flash('Imported layout · no folders in the file');
+  } else {
+    flash('Imported layout without folders');
+  }
 }
 
 // ============================================================================
@@ -5605,6 +5848,7 @@ document.querySelectorAll('.menu-item').forEach((item) => {
 
 document.addEventListener('mousedown', (e) => {
   const t = e.target;
+  if (isLayoutFileDialogOpen()) return;
   if (isPresetsPanelOpen()) {
     if (presetsPanel && presetsPanel.contains(t)) return;
     if (btnPresets && (btnPresets === t || btnPresets.contains(t))) return;
@@ -5619,6 +5863,13 @@ document.addEventListener('mousedown', wake);
 document.addEventListener('mousedown', () => resumeAudioContext());
 document.addEventListener('keydown', (e) => {
   wake();
+  if (isLayoutFileDialogOpen()) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeLayoutFileDialog(null);
+    }
+    return;
+  }
   if (e.key === 'Shift' && settings.editMode) updatePreview(lastMouse.x, lastMouse.y, true);
   if (isTypingTarget(e.target)) return;
 
@@ -5699,6 +5950,25 @@ btnTileDisplays.addEventListener('click', () => tileToDisplays());
 if (btnAssign) btnAssign.addEventListener('click', () => assignFolderToSelection());
 if (btnClearFolders) btnClearFolders.addEventListener('click', () => clearAllFolders());
 if (btnPresets) btnPresets.addEventListener('click', () => togglePresetsPanel());
+for (const id of ['btn-export-layout', 'btn-export-layout-panel']) {
+  const btn = document.getElementById(id);
+  if (btn) btn.addEventListener('click', () => { void exportLayout(); });
+}
+for (const id of ['btn-import-layout', 'btn-import-layout-panel']) {
+  const btn = document.getElementById(id);
+  if (btn) btn.addEventListener('click', () => { void importLayout(); });
+}
+if (btnLayoutWithFolders) btnLayoutWithFolders.addEventListener('click', () => closeLayoutFileDialog('with'));
+if (btnLayoutWithoutFolders) btnLayoutWithoutFolders.addEventListener('click', () => closeLayoutFileDialog('without'));
+if (btnLayoutFileCancel) btnLayoutFileCancel.addEventListener('click', () => closeLayoutFileDialog(null));
+if (btnLayoutFileClose) btnLayoutFileClose.addEventListener('click', () => closeLayoutFileDialog(null));
+if (layoutFileDialog) {
+  layoutFileDialog.addEventListener('mousedown', (e) => {
+    wake();
+    e.stopPropagation();
+    if (!e.target.closest || !e.target.closest('.layout-file-card')) closeLayoutFileDialog(null);
+  });
+}
 if (btnSettings) btnSettings.addEventListener('click', () => setSettingsPanelOpen(!(settingsPanel && !settingsPanel.hidden)));
 const btnSettingsClose = document.getElementById('btn-settings-close');
 if (btnSettingsClose) btnSettingsClose.addEventListener('click', () => setSettingsPanelOpen(false));
