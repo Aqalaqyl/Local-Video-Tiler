@@ -490,6 +490,76 @@ ipcMain.handle('dialog:pickFolder', async () => {
   return result.filePaths[0];
 });
 
+const LAYOUT_FILE_MAX_BYTES = 2 * 1024 * 1024;
+
+function layoutDialogParent() {
+  const focused = BrowserWindow.getFocusedWindow();
+  if (focused && !focused.isDestroyed()) return focused;
+  if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+  return undefined;
+}
+
+/** Write a layout document the renderer already built (with or without folders). */
+ipcMain.handle('layout:saveFile', async (_event, payload, defaultName) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { ok: false, error: 'Nothing to export' };
+  }
+  let text;
+  try { text = JSON.stringify(payload, null, 2); } catch (_) {
+    return { ok: false, error: 'Could not encode that layout' };
+  }
+  if (text.length > LAYOUT_FILE_MAX_BYTES) {
+    return { ok: false, error: 'That layout is too large to export' };
+  }
+  const safeName = (typeof defaultName === 'string' && /^[\w.-]+$/.test(defaultName))
+    ? defaultName
+    : 'layout.json';
+  const result = await dialog.showSaveDialog(layoutDialogParent(), {
+    title: 'Export layout',
+    defaultPath: safeName,
+    filters: [{ name: 'Layout file', extensions: ['json'] }]
+  });
+  if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+  let filePath = result.filePath;
+  if (!path.extname(filePath)) filePath += '.json';
+  try {
+    await fs.promises.writeFile(filePath, text + '\n', 'utf8');
+  } catch (_) {
+    return { ok: false, error: 'Could not write that file' };
+  }
+  return { ok: true, filePath };
+});
+
+/** Read a layout file. The renderer decides whether to keep its folder paths. */
+ipcMain.handle('layout:openFile', async () => {
+  const result = await dialog.showOpenDialog(layoutDialogParent(), {
+    title: 'Import layout',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Layout file', extensions: ['json'] },
+      { name: 'All files', extensions: ['*'] }
+    ]
+  });
+  if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+    return { ok: false, cancelled: true };
+  }
+  const filePath = result.filePaths[0];
+  try {
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile()) return { ok: false, error: 'That is not a file' };
+    if (stat.size > LAYOUT_FILE_MAX_BYTES) return { ok: false, error: 'That file is too large to be a layout' };
+    let text = await fs.promises.readFile(filePath, 'utf8');
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    let data;
+    try { data = JSON.parse(text); } catch (_) {
+      return { ok: false, error: 'That file is not valid JSON' };
+    }
+    return { ok: true, filePath, data };
+  } catch (_) {
+    return { ok: false, error: 'Could not read that file' };
+  }
+});
+
 ipcMain.handle('media:readFolder', async (_event, folderPath) => {
   if (!folderPath) return { folder: null, files: [] };
   try {

@@ -6,6 +6,8 @@ const { planQuality } = require('./quality');
 contextBridge.exposeInMainWorld('api', {
   // Media / folders
   pickFolder: () => ipcRenderer.invoke('dialog:pickFolder'),
+  saveLayoutFile: (payload, defaultName) => ipcRenderer.invoke('layout:saveFile', payload, defaultName),
+  openLayoutFile: () => ipcRenderer.invoke('layout:openFile'),
   readFolder: (folderPath) => ipcRenderer.invoke('media:readFolder', folderPath),
   deleteFile: (filePath, folderPath) => ipcRenderer.invoke('media:deleteFile', filePath, folderPath),
   qualityUrl: (opts) => ipcRenderer.invoke('media:qualityUrl', opts),

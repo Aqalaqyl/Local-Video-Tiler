@@ -99,6 +99,8 @@ body.span-all .hintbox {
 }
 .tool:hover { background: #262a36; border-color: #3a3f4e; }
 .tool.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tool.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tool.primary:hover { background: var(--accent); border-color: var(--accent); color: #fff; filter: brightness(1.08); }
 .tool:disabled { opacity: 0.4; cursor: not-allowed; }
 .tool:disabled:hover { background: var(--panel-2); border-color: var(--line); }
 .tool.win { padding: 6px 10px; min-width: 34px; }
@@ -817,6 +819,12 @@ body.span-all .presets-panel {
   font-size: 11px;
   line-height: 1.35;
 }
+.presets-file-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.presets-file-row .tool { flex: 1 1 auto; }
 .presets-save-row {
   display: flex;
   gap: 8px;
@@ -885,3 +893,43 @@ body.span-all .presets-panel {
   flex-shrink: 0;
 }
 .preset-item .tool { padding: 5px 8px; }
+
+/* ------------------------------------------------- Layout import / export */
+.layout-file-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  -webkit-app-region: no-drag;
+}
+.layout-file-dialog[hidden] { display: none !important; }
+.layout-file-card {
+  width: min(440px, calc(100vw - 32px));
+  background: rgba(16, 17, 22, 0.98);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+  padding: 14px 16px 16px;
+}
+body.span-all .layout-file-dialog {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+body.span-all .layout-file-card {
+  margin-left: calc(var(--ui-left, 0px) + 16px);
+  margin-top: calc(var(--ui-top, 0px) + 60px);
+}
+.layout-file-stats {
+  margin: 0 0 14px;
+  color: var(--text);
+  font-size: 12px;
+}
+.layout-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.layout-file-actions .tool { flex: 1 1 auto; }

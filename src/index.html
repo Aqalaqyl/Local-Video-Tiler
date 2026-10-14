@@ -41,6 +41,8 @@
           <button id="btn-clear-folders" class="tool menu-item" type="button" title="Clear every tile’s folder assignment but keep the current layout splits (C)">Clear folders</button>
           <p class="menu-label">Saved layouts</p>
           <button id="btn-presets" class="tool menu-item" type="button" title="Save and load layout presets">Presets…</button>
+          <button id="btn-export-layout" class="tool menu-item" type="button" title="Save the current layout to a file, with or without folder paths">Export layout…</button>
+          <button id="btn-import-layout" class="tool menu-item" type="button" title="Load a layout file, with or without its folder paths">Import layout…</button>
         </div>
       </div>
 
@@ -141,12 +143,33 @@
       <strong>Layout presets</strong>
       <button type="button" id="btn-presets-close" class="presets-close" title="Close">✕</button>
     </div>
-    <p class="presets-hint">Saves the tile layout <em>and</em> each tile’s assigned media folder. Loading restores both.</p>
+    <p class="presets-hint">Saves the tile layout <em>and</em> each tile’s assigned media folder. Loading restores both. Export and import can include folders or leave them out.</p>
+    <div class="presets-file-row">
+      <button type="button" id="btn-export-layout-panel" class="tool" title="Save the current layout to a file, with or without folder paths">Export layout…</button>
+      <button type="button" id="btn-import-layout-panel" class="tool" title="Load a layout file, with or without its folder paths">Import layout…</button>
+    </div>
     <div class="presets-save-row">
       <input id="preset-name" type="text" maxlength="64" placeholder="Preset name…" />
       <button type="button" id="btn-preset-save" class="tool">Save</button>
     </div>
     <ul id="presets-list" class="presets-list"></ul>
+  </div>
+
+  <!-- Export / import: choose whether the file carries media folder paths. -->
+  <div id="layout-file-dialog" class="layout-file-dialog" hidden aria-hidden="true">
+    <div class="layout-file-card" role="dialog" aria-modal="true" aria-labelledby="layout-file-title">
+      <div class="presets-head">
+        <strong id="layout-file-title">Export layout</strong>
+        <button type="button" id="btn-layout-file-close" class="presets-close" title="Cancel">✕</button>
+      </div>
+      <p id="layout-file-hint" class="presets-hint"></p>
+      <p id="layout-file-stats" class="layout-file-stats"></p>
+      <div class="layout-file-actions">
+        <button type="button" id="btn-layout-with-folders" class="tool primary">With folders</button>
+        <button type="button" id="btn-layout-without-folders" class="tool">Without folders</button>
+        <button type="button" id="btn-layout-file-cancel" class="tool">Cancel</button>
+      </div>
+    </div>
   </div>
 
   <script src="renderer.js"></script>
