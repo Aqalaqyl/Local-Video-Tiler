@@ -275,6 +275,27 @@ body.desktop-preview #stage > .node-leaf {
   margin: 0;
   border-color: transparent;
 }
+/* A favorite keeps its live video element while it briefly fills this display. */
+.node-leaf.favorite-spotlight {
+  position: fixed;
+  z-index: 49;
+  margin: 0;
+  will-change: left, top, width, height, border-radius, box-shadow;
+  transition:
+    left 1000ms cubic-bezier(0.22, 1, 0.36, 1),
+    top 1000ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 1000ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 1000ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-radius 1000ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 1000ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.node-leaf.favorite-spotlight.favorite-spotlight-full {
+  border-radius: 0;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.72);
+}
+.node-leaf.favorite-spotlight.favorite-spotlight-no-transition {
+  transition: none;
+}
 .node-leaf.focused { box-shadow: inset 0 0 0 2px var(--accent); }
 .node-leaf.selected { box-shadow: inset 0 0 0 2px var(--accent-2); }
 .node-leaf.selected.focused { box-shadow: inset 0 0 0 2px var(--accent-2), 0 0 0 1px var(--accent); }

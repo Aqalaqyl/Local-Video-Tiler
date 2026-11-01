@@ -39,6 +39,9 @@ const MAX_TILE_VOLUME = 2;
 const MAX_FILE_VOLUME_ENTRIES = 4000;
 /** How much more often a favorite is chosen vs a normal clip in weighted shuffle. */
 const FAVORITE_WEIGHT = 5;
+/** Favorite spotlight timing: expand, remain full-screen, then ease home. */
+const FAVORITE_SPOTLIGHT_HOLD_MS = 2800;
+const FAVORITE_SPOTLIGHT_TRANSITION_MS = 1000;
 /**
  * Chance to force-pick among non-favorites (when any exist) so shuffle keeps
  * surfacing undiscovered clips even when many files are favorited.
@@ -64,6 +67,7 @@ const btnPauseAll = document.getElementById('btn-pause-all');
 const btnPauseDisplay = document.getElementById('btn-pause-display');
 const btnPauseAllMirror = document.getElementById('btn-pause-all-mirror');
 const btnPauseDisplayMirror = document.getElementById('btn-pause-display-mirror');
+const btnFavoriteSpotlight = document.getElementById('btn-favorite-spotlight');
 const btnResetDisplayMirror = document.getElementById('btn-reset-display-mirror');
 const btnEditMirror = document.getElementById('btn-edit-mirror');
 const mirrorPlaybackDock = document.getElementById('mirror-playback-dock');
@@ -108,7 +112,9 @@ const settings = {
   /** New tiles, and the bulk sound toggle, start muted when this is true. */
   defaultMuted: false,
   /** When true, every display plays favorited clips only. A tile can opt out. */
-  favoritesOnly: false
+  favoritesOnly: false,
+  /** Briefly fill this display when a favorite video starts playing. */
+  favoriteSpotlight: false
 };
 
 function imageHoldMs() {
@@ -1970,7 +1976,11 @@ function loadMirrorPlaybackPrefs() {
   if (data && data.settings && data.settings.favoritesOnly != null) {
     settings.favoritesOnly = !!data.settings.favoritesOnly;
   }
+  if (data && data.settings && data.settings.favoriteSpotlight != null) {
+    settings.favoriteSpotlight = !!data.settings.favoriteSpotlight;
+  }
   updateFavoritesOnlyButton();
+  updateFavoriteSpotlightButton();
 }
 
 // Other renderer windows share localStorage — keep our Map in sync.
@@ -2256,7 +2266,8 @@ function snapshotSettings() {
     cellSize: settings.cellSize,
     soundIndicators: !!settings.soundIndicators,
     defaultMuted: !!settings.defaultMuted,
-    favoritesOnly: !!settings.favoritesOnly
+    favoritesOnly: !!settings.favoritesOnly,
+    favoriteSpotlight: !!settings.favoriteSpotlight
   };
 }
 
@@ -2291,6 +2302,11 @@ function applySettingsFromPayload(s) {
     forEachLeaf(root, applyFavoritesOnlyButton);
     // The window that flipped the switch already picked the new clips.
     if (!IS_MIRROR) saveState();
+  }
+  if (s.favoriteSpotlight != null && !!s.favoriteSpotlight !== !!settings.favoriteSpotlight) {
+    settings.favoriteSpotlight = !!s.favoriteSpotlight;
+    updateFavoriteSpotlightButton();
+    if (!settings.favoriteSpotlight) clearFavoriteSpotlight();
   }
 }
 
@@ -2907,6 +2923,7 @@ function forEachLeaf(node, fn) {
 // Maximize one video on this screen. Other tiles keep their slots and playback.
 // ============================================================================
 let maximizedLeaf = null;
+let favoriteSpotlight = null;
 
 function releaseMaximizeSlot(leaf) {
   const ph = leaf && leaf._maximizePlaceholder;
@@ -2926,6 +2943,106 @@ function holdMaximizeSlot(leaf) {
   leaf._maximizePlaceholder = ph;
 }
 
+function releaseFavoriteSpotlightSlot(leaf) {
+  const ph = leaf && leaf._favoriteSpotlightPlaceholder;
+  if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+  if (leaf) leaf._favoriteSpotlightPlaceholder = null;
+}
+
+function holdFavoriteSpotlightSlot(leaf) {
+  const el = leaf && leaf.el;
+  if (!el || !el.parentNode) return null;
+  releaseFavoriteSpotlightSlot(leaf);
+  const ph = document.createElement('div');
+  ph.className = 'maximize-placeholder favorite-spotlight-placeholder';
+  if (el.style.flex) ph.style.flex = el.style.flex;
+  ph.setAttribute('aria-hidden', 'true');
+  el.parentNode.insertBefore(ph, el);
+  leaf._favoriteSpotlightPlaceholder = ph;
+  return ph;
+}
+
+function setFavoriteSpotlightRect(el, rect) {
+  if (!el || !rect) return;
+  el.style.left = rect.left + 'px';
+  el.style.top = rect.top + 'px';
+  el.style.width = rect.width + 'px';
+  el.style.height = rect.height + 'px';
+}
+
+function cleanFavoriteSpotlightElement(leaf) {
+  const el = leaf && leaf.el;
+  if (el) {
+    el.classList.remove(
+      'favorite-spotlight',
+      'favorite-spotlight-full',
+      'favorite-spotlight-no-transition'
+    );
+    for (const prop of ['left', 'top', 'width', 'height']) el.style.removeProperty(prop);
+  }
+  releaseFavoriteSpotlightSlot(leaf);
+}
+
+function clearFavoriteSpotlight(opts = {}) {
+  const state = favoriteSpotlight;
+  if (!state) return;
+  clearTimeout(state.holdTimer);
+  clearTimeout(state.cleanupTimer);
+  favoriteSpotlight = null;
+  const leaf = state.leaf;
+  const el = leaf && leaf.el;
+  const ph = leaf && leaf._favoriteSpotlightPlaceholder;
+  if (!opts.immediate && el && ph && ph.parentNode && state.phase !== 'returning') {
+    state.phase = 'returning';
+    favoriteSpotlight = state;
+    el.classList.remove('favorite-spotlight-full');
+    setFavoriteSpotlightRect(el, ph.getBoundingClientRect());
+    state.cleanupTimer = setTimeout(() => {
+      if (favoriteSpotlight === state) favoriteSpotlight = null;
+      cleanFavoriteSpotlightElement(leaf);
+    }, FAVORITE_SPOTLIGHT_TRANSITION_MS + 80);
+    return;
+  }
+  cleanFavoriteSpotlightElement(leaf);
+}
+
+function spotlightFavoriteLeaf(leaf, gen) {
+  const file = leaf && leaf.files && leaf.files[leaf.index];
+  if (!settings.favoriteSpotlight || settings.editMode || maximizedLeaf) return;
+  if (!leaf || !leaf.el || leaf.spacer || !file || !isFileFavorite(file)) return;
+  if (!leaf.video || leaf.video.paused || leaf.video.ended || !leafShouldPlay(leaf)) return;
+  if (leaf._favoriteSpotlightGen === gen) return;
+  leaf._favoriteSpotlightGen = gen;
+
+  if (favoriteSpotlight) clearFavoriteSpotlight({ immediate: true });
+  const el = leaf.el;
+  const start = el.getBoundingClientRect();
+  if (start.width < 1 || start.height < 1) return;
+  const ph = holdFavoriteSpotlightSlot(leaf);
+  if (!ph) return;
+
+  const state = { leaf, phase: 'expanding', holdTimer: 0, cleanupTimer: 0 };
+  favoriteSpotlight = state;
+  el.classList.add('favorite-spotlight', 'favorite-spotlight-no-transition');
+  setFavoriteSpotlightRect(el, start);
+  void el.offsetWidth;
+
+  requestAnimationFrame(() => {
+    if (favoriteSpotlight !== state) return;
+    el.classList.remove('favorite-spotlight-no-transition');
+    el.classList.add('favorite-spotlight-full');
+    el.style.left = '0px';
+    el.style.top = '0px';
+    el.style.width = '100vw';
+    el.style.height = '100vh';
+    state.phase = 'holding';
+    state.holdTimer = setTimeout(
+      () => clearFavoriteSpotlight(),
+      FAVORITE_SPOTLIGHT_TRANSITION_MS + FAVORITE_SPOTLIGHT_HOLD_MS
+    );
+  });
+}
+
 function clearMaximizedLeaf() {
   if (maximizedLeaf) {
     releaseMaximizeSlot(maximizedLeaf);
@@ -2937,6 +3054,7 @@ function clearMaximizedLeaf() {
 
 function maximizeLeaf(leaf) {
   if (!leaf || !leaf.el || leaf.spacer) return;
+  if (favoriteSpotlight) clearFavoriteSpotlight({ immediate: true });
   if (maximizedLeaf && maximizedLeaf !== leaf) clearMaximizedLeaf();
   maximizedLeaf = leaf;
   leaf.el.classList.add('maximized');
@@ -2975,6 +3093,7 @@ function syncMaximizedAfterRender() {
 function render() {
   // Detach leaf elements (they're cached) before clearing containers so their
   // <video> playback survives a re-layout.
+  if (favoriteSpotlight) clearFavoriteSpotlight({ immediate: true });
   if (maximizedLeaf) releaseMaximizeSlot(maximizedLeaf);
   forEachLeaf(root, (leaf) => { if (leaf.el && leaf.el.parentNode) leaf.el.parentNode.removeChild(leaf.el); });
   stage.textContent = '';
@@ -3687,7 +3806,9 @@ async function finishLoadAndPlay(leaf, gen, autoplay) {
   // before anyone sets the autoplay flag, then told to play while it warms up.
   if ((autoplay || leaf._wantPlaying) && leafShouldPlay(leaf) && leafMayDecode(leaf)) {
     resumeAudioContext();
-    video.play().catch(() => {});
+    video.play()
+      .then(() => spotlightFavoriteLeaf(leaf, gen))
+      .catch(() => {});
     armVideoFrameWatch(leaf);
   }
   resetLeafSyncClock(leaf);
@@ -3744,7 +3865,9 @@ function loadCurrent(leaf, autoplay, opts = {}) {
     video.loop = !!leaf.loop;
     if (autoplay) {
       leaf._wantPlaying = true;
-      video.play().catch(() => {});
+      video.play()
+        .then(() => spotlightFavoriteLeaf(leaf, leaf._loadGen || 0))
+        .catch(() => {});
       armVideoFrameWatch(leaf);
     } else {
       leaf._wantPlaying = false;
@@ -4158,6 +4281,26 @@ function updateFavoritesOnlyButton() {
       : 'Play every video. Click to play favorites only, on every display.';
   }
   forEachLeaf(root, applyFavoritesOnlyButton);
+}
+
+function updateFavoriteSpotlightButton() {
+  if (!btnFavoriteSpotlight) return;
+  const on = !!settings.favoriteSpotlight;
+  btnFavoriteSpotlight.classList.toggle('active', on);
+  btnFavoriteSpotlight.textContent = on ? 'Favorite spotlight on' : 'Favorite spotlight';
+  btnFavoriteSpotlight.title = on
+    ? 'Favorite videos briefly fill their display — click to turn off'
+    : 'Briefly fill this display when a favorite video begins';
+}
+
+function toggleFavoriteSpotlight() {
+  settings.favoriteSpotlight = !settings.favoriteSpotlight;
+  updateFavoriteSpotlightButton();
+  if (!settings.favoriteSpotlight) clearFavoriteSpotlight();
+  saveState();
+  flash(settings.favoriteSpotlight
+    ? 'Favorite spotlight on — favorites briefly fill their display'
+    : 'Favorite spotlight off');
 }
 
 function applyFavoritesOnlyButton(leaf) {
@@ -4700,7 +4843,10 @@ function applyFocus() {
 // ============================================================================
 function setEditMode(on) {
   settings.editMode = on;
-  if (on) clearMaximizedLeaf();
+  if (on) {
+    clearFavoriteSpotlight({ immediate: true });
+    clearMaximizedLeaf();
+  }
   document.body.classList.toggle('editing', on);
   btnEdit.classList.toggle('active', on);
   if (btnEditMirror) btnEditMirror.classList.toggle('active', on);
@@ -4850,11 +4996,13 @@ function loadState() {
   settings.soundIndicators = !!settings.soundIndicators;
   settings.defaultMuted = !!settings.defaultMuted;
   settings.favoritesOnly = !!settings.favoritesOnly;
+  settings.favoriteSpotlight = !!settings.favoriteSpotlight;
   document.body.classList.toggle('sound-indicators', settings.soundIndicators);
   const soundBtn = document.getElementById('btn-sound-indicators');
   if (soundBtn) soundBtn.classList.toggle('active', settings.soundIndicators);
   updateDefaultAudioButton();
   updateFavoritesOnlyButton();
+  updateFavoriteSpotlightButton();
   syncPlaybackSettingsInputs();
   publishSpanDisplays();
 
@@ -6000,6 +6148,11 @@ document.addEventListener('keydown', (e) => {
     enterMinimalUi(lastMouse);
     return;
   }
+  if (favoriteSpotlight && e.key === 'Escape') {
+    e.preventDefault();
+    clearFavoriteSpotlight();
+    return;
+  }
   if (maximizedLeaf && e.key === 'Escape') {
     e.preventDefault();
     clearMaximizedLeaf();
@@ -6084,6 +6237,7 @@ const btnFavoritesOnly = document.getElementById('btn-favorites-only');
 const btnFavoritesOnlyMirror = document.getElementById('btn-favorites-only-mirror');
 if (btnFavoritesOnly) btnFavoritesOnly.addEventListener('click', () => toggleFavoritesOnly());
 if (btnFavoritesOnlyMirror) btnFavoritesOnlyMirror.addEventListener('click', () => toggleFavoritesOnly());
+if (btnFavoriteSpotlight) btnFavoriteSpotlight.addEventListener('click', () => toggleFavoriteSpotlight());
 setInterval(paintAllSoundIndicators, 400);
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());

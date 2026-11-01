@@ -63,6 +63,9 @@ picture you see.
     favorites about **5× as often** as unmarked clips, and about **1 in 5**
     shuffles still force a non-favorite so you keep discovering new videos.
     **Playback → Favorites only** limits every display to favorited clips.
+    **Playback → Favorite spotlight** can fill the current display for about
+    three seconds when a favorite video begins, then smoothly return it to its
+    tile without interrupting any video.
     The **All / ★** button on a tile turns that limit off for that tile only.
     **Next** (⏭) picks a random clip (a random favorite while Favorites only
     is on for that tile). Previous still steps backward in order.
@@ -221,6 +224,7 @@ npm start
 | Loop the current file (per tile) | The **🔁** button on the tile |
 | Turn off every tile loop | **Playback → Stop all loops** |
 | Play favorites only, on every display | **Playback → Favorites only** (the tile’s **All / ★** button turns it off for that tile) |
+| Briefly fill the display when a favorite starts | **Playback → Favorite spotlight** |
 | Skip to another random clip | **⏭** on the tile |
 | Show which tiles are playing audio | **Playback → Sound indicators** |
 | Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** (while muted, each new clip starts silent until you unmute it; that video is remembered) |
