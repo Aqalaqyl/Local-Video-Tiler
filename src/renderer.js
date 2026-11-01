@@ -42,6 +42,9 @@ const FAVORITE_WEIGHT = 5;
 /** Favorite spotlight timing: expand, remain full-screen, then ease home. */
 const FAVORITE_SPOTLIGHT_HOLD_MS = 2800;
 const FAVORITE_SPOTLIGHT_TRANSITION_MS = 1000;
+/** Avoid repeated takeovers when several favorites start close together. */
+const FAVORITE_SPOTLIGHT_CHANCE = 0.25;
+const FAVORITE_SPOTLIGHT_COOLDOWN_MS = 15000;
 /**
  * Chance to force-pick among non-favorites (when any exist) so shuffle keeps
  * surfacing undiscovered clips even when many files are favorited.
@@ -2924,6 +2927,7 @@ function forEachLeaf(node, fn) {
 // ============================================================================
 let maximizedLeaf = null;
 let favoriteSpotlight = null;
+let lastFavoriteSpotlightAt = -Infinity;
 
 function releaseMaximizeSlot(leaf) {
   const ph = leaf && leaf._maximizePlaceholder;
@@ -3011,16 +3015,26 @@ function spotlightFavoriteLeaf(leaf, gen) {
   if (!settings.favoriteSpotlight || settings.editMode || maximizedLeaf) return;
   if (!leaf || !leaf.el || leaf.spacer || !file || !isFileFavorite(file)) return;
   if (!leaf.video || leaf.video.paused || leaf.video.ended || !leafShouldPlay(leaf)) return;
+  // A tile can overlap two monitor windows, but only the window containing its
+  // center owns it. Never let the same favorite cover multiple displays.
+  if (projection.active && !thisDisplayShuffles(leaf)) return;
   if (leaf._favoriteSpotlightGen === gen) return;
   leaf._favoriteSpotlightGen = gen;
 
-  if (favoriteSpotlight) clearFavoriteSpotlight({ immediate: true });
+  // Give each newly-started favorite one chance. Once one wins, this renderer
+  // (one physical display while spanning) observes a cooldown, and an active
+  // spotlight is never replaced by another popup.
+  if (favoriteSpotlight) return;
+  const now = Date.now();
+  if (now - lastFavoriteSpotlightAt < FAVORITE_SPOTLIGHT_COOLDOWN_MS) return;
+  if (Math.random() >= FAVORITE_SPOTLIGHT_CHANCE) return;
   const el = leaf.el;
   const start = el.getBoundingClientRect();
   if (start.width < 1 || start.height < 1) return;
   const ph = holdFavoriteSpotlightSlot(leaf);
   if (!ph) return;
 
+  lastFavoriteSpotlightAt = now;
   const state = { leaf, phase: 'expanding', holdTimer: 0, cleanupTimer: 0 };
   favoriteSpotlight = state;
   el.classList.add('favorite-spotlight', 'favorite-spotlight-no-transition');
@@ -4289,8 +4303,8 @@ function updateFavoriteSpotlightButton() {
   btnFavoriteSpotlight.classList.toggle('active', on);
   btnFavoriteSpotlight.textContent = on ? 'Favorite spotlight on' : 'Favorite spotlight';
   btnFavoriteSpotlight.title = on
-    ? 'Favorite videos briefly fill their display — click to turn off'
-    : 'Briefly fill this display when a favorite video begins';
+    ? 'Favorite videos occasionally fill only their own display — click to turn off'
+    : 'Occasionally fill only this display when a favorite video begins';
 }
 
 function toggleFavoriteSpotlight() {
@@ -4299,7 +4313,7 @@ function toggleFavoriteSpotlight() {
   if (!settings.favoriteSpotlight) clearFavoriteSpotlight();
   saveState();
   flash(settings.favoriteSpotlight
-    ? 'Favorite spotlight on — favorites briefly fill their display'
+    ? 'Favorite spotlight on — occasional, one display at a time'
     : 'Favorite spotlight off');
 }
 

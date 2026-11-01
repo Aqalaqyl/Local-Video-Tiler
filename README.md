@@ -65,7 +65,10 @@ picture you see.
     **Playback → Favorites only** limits every display to favorited clips.
     **Playback → Favorite spotlight** can fill the current display for about
     three seconds when a favorite video begins, then smoothly return it to its
-    tile without interrupting any video.
+    tile without interrupting any video. Each favorite has about a **1 in 4**
+    chance to trigger it, with a **15-second cooldown per display** so several
+    favorites cannot keep taking over. In a multi-monitor layout, the spotlight
+    stays entirely on the display that owns that tile.
     The **All / ★** button on a tile turns that limit off for that tile only.
     **Next** (⏭) picks a random clip (a random favorite while Favorites only
     is on for that tile). Previous still steps backward in order.
