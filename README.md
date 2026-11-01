@@ -65,10 +65,12 @@ picture you see.
     **Playback → Favorites only** limits every display to favorited clips.
     **Playback → Favorite spotlight** can fill the current display for about
     three seconds when a favorite video begins, then smoothly return it to its
-    tile without interrupting any video. Each favorite has about a **1 in 4**
-    chance to trigger it, with a **15-second cooldown per display** so several
-    favorites cannot keep taking over. In a multi-monitor layout, the spotlight
-    stays entirely on the display that owns that tile.
+    tile without interrupting any video. Its **frequency slider** sets the
+    trigger chance from **Off** to **100%**, and its **cooldown slider** sets
+    a **0–120 second** wait before another spotlight on that display. This
+    prevents several favorites from repeatedly taking over while still letting
+    you tune the effect. In a multi-monitor layout, the spotlight stays entirely
+    on the display that owns that tile.
     The **All / ★** button on a tile turns that limit off for that tile only.
     **Next** (⏭) picks a random clip (a random favorite while Favorites only
     is on for that tile). Previous still steps backward in order.
@@ -227,7 +229,7 @@ npm start
 | Loop the current file (per tile) | The **🔁** button on the tile |
 | Turn off every tile loop | **Playback → Stop all loops** |
 | Play favorites only, on every display | **Playback → Favorites only** (the tile’s **All / ★** button turns it off for that tile) |
-| Briefly fill the display when a favorite starts | **Playback → Favorite spotlight** |
+| Adjust favorite spotlight frequency and cooldown | **Playback → Spotlight frequency / Spotlight cooldown** |
 | Skip to another random clip | **⏭** on the tile |
 | Show which tiles are playing audio | **Playback → Sound indicators** |
 | Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** (while muted, each new clip starts silent until you unmute it; that video is remembered) |

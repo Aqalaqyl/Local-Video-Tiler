@@ -43,8 +43,8 @@ const FAVORITE_WEIGHT = 5;
 const FAVORITE_SPOTLIGHT_HOLD_MS = 2800;
 const FAVORITE_SPOTLIGHT_TRANSITION_MS = 1000;
 /** Avoid repeated takeovers when several favorites start close together. */
-const FAVORITE_SPOTLIGHT_CHANCE = 0.25;
-const FAVORITE_SPOTLIGHT_COOLDOWN_MS = 15000;
+const DEFAULT_FAVORITE_SPOTLIGHT_FREQUENCY = 25;
+const DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS = 15;
 /**
  * Chance to force-pick among non-favorites (when any exist) so shuffle keeps
  * surfacing undiscovered clips even when many files are favorited.
@@ -70,7 +70,6 @@ const btnPauseAll = document.getElementById('btn-pause-all');
 const btnPauseDisplay = document.getElementById('btn-pause-display');
 const btnPauseAllMirror = document.getElementById('btn-pause-all-mirror');
 const btnPauseDisplayMirror = document.getElementById('btn-pause-display-mirror');
-const btnFavoriteSpotlight = document.getElementById('btn-favorite-spotlight');
 const btnResetDisplayMirror = document.getElementById('btn-reset-display-mirror');
 const btnEditMirror = document.getElementById('btn-edit-mirror');
 const mirrorPlaybackDock = document.getElementById('mirror-playback-dock');
@@ -90,6 +89,10 @@ const btnMin = document.getElementById('btn-min');
 const btnX = document.getElementById('btn-x');
 const gridSizeInput = document.getElementById('grid-size');
 const gridSizeVal = document.getElementById('grid-size-val');
+const setSpotlightFrequency = document.getElementById('set-spotlight-frequency');
+const spotlightFrequencyVal = document.getElementById('spotlight-frequency-val');
+const setSpotlightCooldown = document.getElementById('set-spotlight-cooldown');
+const spotlightCooldownVal = document.getElementById('spotlight-cooldown-val');
 
 // ----------------------------------------------------------------- App state
 const settings = {
@@ -116,7 +119,11 @@ const settings = {
   defaultMuted: false,
   /** When true, every display plays favorited clips only. A tile can opt out. */
   favoritesOnly: false,
-  /** Briefly fill this display when a favorite video starts playing. */
+  /** Percent chance that a newly-started favorite briefly fills its display. */
+  favoriteSpotlightFrequency: 0,
+  /** Minimum seconds between spotlights on this display. */
+  favoriteSpotlightCooldown: DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS,
+  /** Legacy mirror/persistence flag, derived from frequency for compatibility. */
   favoriteSpotlight: false
 };
 
@@ -131,6 +138,30 @@ function gifLoopCount() {
 
 function videoLoopCount() {
   return clamp(Math.round(Number(settings.videoLoops) || DEFAULT_MEDIA_LOOPS), 1, 99);
+}
+
+function favoriteSpotlightFrequency() {
+  return clamp(Math.round(Number(settings.favoriteSpotlightFrequency) || 0), 0, 100);
+}
+
+function favoriteSpotlightCooldownSeconds() {
+  const raw = Number(settings.favoriteSpotlightCooldown);
+  return clamp(Number.isFinite(raw) ? Math.round(raw) : DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS, 0, 120);
+}
+
+/** Read new slider values, or migrate the old on/off setting to 25% / Off. */
+function applyFavoriteSpotlightSettings(source) {
+  const data = source || {};
+  const hasFrequency = data.favoriteSpotlightFrequency != null &&
+    Number.isFinite(Number(data.favoriteSpotlightFrequency));
+  settings.favoriteSpotlightFrequency = hasFrequency
+    ? clamp(Math.round(Number(data.favoriteSpotlightFrequency)), 0, 100)
+    : (data.favoriteSpotlight ? DEFAULT_FAVORITE_SPOTLIGHT_FREQUENCY : 0);
+  const cooldown = Number(data.favoriteSpotlightCooldown);
+  settings.favoriteSpotlightCooldown = Number.isFinite(cooldown)
+    ? clamp(Math.round(cooldown), 0, 120)
+    : DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS;
+  settings.favoriteSpotlight = settings.favoriteSpotlightFrequency > 0;
 }
 
 // Latest window/display geometry pushed from the main process. Used to draw the
@@ -1979,11 +2010,9 @@ function loadMirrorPlaybackPrefs() {
   if (data && data.settings && data.settings.favoritesOnly != null) {
     settings.favoritesOnly = !!data.settings.favoritesOnly;
   }
-  if (data && data.settings && data.settings.favoriteSpotlight != null) {
-    settings.favoriteSpotlight = !!data.settings.favoriteSpotlight;
-  }
+  applyFavoriteSpotlightSettings(data && data.settings);
   updateFavoritesOnlyButton();
-  updateFavoriteSpotlightButton();
+  syncFavoriteSpotlightInputs();
 }
 
 // Other renderer windows share localStorage — keep our Map in sync.
@@ -2276,7 +2305,9 @@ function snapshotSettings() {
     soundIndicators: !!settings.soundIndicators,
     defaultMuted: !!settings.defaultMuted,
     favoritesOnly: !!settings.favoritesOnly,
-    favoriteSpotlight: !!settings.favoriteSpotlight
+    favoriteSpotlightFrequency: favoriteSpotlightFrequency(),
+    favoriteSpotlightCooldown: favoriteSpotlightCooldownSeconds(),
+    favoriteSpotlight: favoriteSpotlightFrequency() > 0
   };
 }
 
@@ -2312,10 +2343,11 @@ function applySettingsFromPayload(s) {
     // The window that flipped the switch already picked the new clips.
     if (!IS_MIRROR) saveState();
   }
-  if (s.favoriteSpotlight != null && !!s.favoriteSpotlight !== !!settings.favoriteSpotlight) {
-    settings.favoriteSpotlight = !!s.favoriteSpotlight;
-    updateFavoriteSpotlightButton();
-    if (!settings.favoriteSpotlight) clearFavoriteSpotlight();
+  if (s.favoriteSpotlightFrequency != null || s.favoriteSpotlightCooldown != null || s.favoriteSpotlight != null) {
+    const wasOn = favoriteSpotlightFrequency() > 0;
+    applyFavoriteSpotlightSettings(s);
+    syncFavoriteSpotlightInputs();
+    if (wasOn && favoriteSpotlightFrequency() === 0) clearFavoriteSpotlight();
   }
 }
 
@@ -3018,7 +3050,8 @@ function clearFavoriteSpotlight(opts = {}) {
 
 function spotlightFavoriteLeaf(leaf, gen) {
   const file = leaf && leaf.files && leaf.files[leaf.index];
-  if (!settings.favoriteSpotlight || settings.editMode || maximizedLeaf) return;
+  const frequency = favoriteSpotlightFrequency();
+  if (frequency <= 0 || settings.editMode || maximizedLeaf) return;
   if (!leaf || !leaf.el || leaf.spacer || !file || !isFileFavorite(file)) return;
   if (!leaf.video || leaf.video.paused || leaf.video.ended || !leafShouldPlay(leaf)) return;
   // A tile can overlap two monitor windows, but only the window containing its
@@ -3032,8 +3065,8 @@ function spotlightFavoriteLeaf(leaf, gen) {
   // spotlight is never replaced by another popup.
   if (favoriteSpotlight) return;
   const now = Date.now();
-  if (now - lastFavoriteSpotlightAt < FAVORITE_SPOTLIGHT_COOLDOWN_MS) return;
-  if (Math.random() >= FAVORITE_SPOTLIGHT_CHANCE) return;
+  if (now - lastFavoriteSpotlightAt < favoriteSpotlightCooldownSeconds() * 1000) return;
+  if (Math.random() * 100 >= frequency) return;
   const el = leaf.el;
   const start = el.getBoundingClientRect();
   if (start.width < 1 || start.height < 1) return;
@@ -4303,24 +4336,34 @@ function updateFavoritesOnlyButton() {
   forEachLeaf(root, applyFavoritesOnlyButton);
 }
 
-function updateFavoriteSpotlightButton() {
-  if (!btnFavoriteSpotlight) return;
-  const on = !!settings.favoriteSpotlight;
-  btnFavoriteSpotlight.classList.toggle('active', on);
-  btnFavoriteSpotlight.textContent = on ? 'Favorite spotlight on' : 'Favorite spotlight';
-  btnFavoriteSpotlight.title = on
-    ? 'Favorite videos occasionally fill only their own display — click to turn off'
-    : 'Occasionally fill only this display when a favorite video begins';
+function syncFavoriteSpotlightInputs() {
+  const frequency = favoriteSpotlightFrequency();
+  const cooldown = favoriteSpotlightCooldownSeconds();
+  if (setSpotlightFrequency) setSpotlightFrequency.value = String(frequency);
+  if (spotlightFrequencyVal) spotlightFrequencyVal.textContent = frequency ? frequency + '%' : 'Off';
+  if (setSpotlightCooldown) setSpotlightCooldown.value = String(cooldown);
+  if (spotlightCooldownVal) spotlightCooldownVal.textContent = cooldown ? cooldown + ' sec' : 'None';
 }
 
-function toggleFavoriteSpotlight() {
-  settings.favoriteSpotlight = !settings.favoriteSpotlight;
-  updateFavoriteSpotlightButton();
-  if (!settings.favoriteSpotlight) clearFavoriteSpotlight();
+function applyFavoriteSpotlightInputs() {
+  const previousFrequency = favoriteSpotlightFrequency();
+  settings.favoriteSpotlightFrequency = clamp(
+    Math.round(Number(setSpotlightFrequency && setSpotlightFrequency.value) || 0),
+    0,
+    100
+  );
+  const rawCooldown = Number(setSpotlightCooldown && setSpotlightCooldown.value);
+  settings.favoriteSpotlightCooldown = clamp(
+    Number.isFinite(rawCooldown) ? Math.round(rawCooldown) : DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS,
+    0,
+    120
+  );
+  settings.favoriteSpotlight = settings.favoriteSpotlightFrequency > 0;
+  syncFavoriteSpotlightInputs();
+  if (previousFrequency > 0 && settings.favoriteSpotlightFrequency === 0) {
+    clearFavoriteSpotlight();
+  }
   saveState();
-  flash(settings.favoriteSpotlight
-    ? 'Favorite spotlight on — occasional, one display at a time'
-    : 'Favorite spotlight off');
 }
 
 function applyFavoritesOnlyButton(leaf) {
@@ -5016,13 +5059,12 @@ function loadState() {
   settings.soundIndicators = !!settings.soundIndicators;
   settings.defaultMuted = !!settings.defaultMuted;
   settings.favoritesOnly = !!settings.favoritesOnly;
-  settings.favoriteSpotlight = !!settings.favoriteSpotlight;
+  applyFavoriteSpotlightSettings(data && data.settings);
   document.body.classList.toggle('sound-indicators', settings.soundIndicators);
   const soundBtn = document.getElementById('btn-sound-indicators');
   if (soundBtn) soundBtn.classList.toggle('active', settings.soundIndicators);
   updateDefaultAudioButton();
   updateFavoritesOnlyButton();
-  updateFavoriteSpotlightButton();
   syncPlaybackSettingsInputs();
   publishSpanDisplays();
 
@@ -5176,6 +5218,7 @@ function syncPlaybackSettingsInputs() {
   if (setImageSeconds) setImageSeconds.value = String(settings.imageSeconds);
   if (setGifLoops) setGifLoops.value = String(settings.gifLoops);
   if (setVideoLoops) setVideoLoops.value = String(settings.videoLoops);
+  syncFavoriteSpotlightInputs();
 }
 
 function setSettingsPanelOpen(open) {
@@ -6257,7 +6300,10 @@ const btnFavoritesOnly = document.getElementById('btn-favorites-only');
 const btnFavoritesOnlyMirror = document.getElementById('btn-favorites-only-mirror');
 if (btnFavoritesOnly) btnFavoritesOnly.addEventListener('click', () => toggleFavoritesOnly());
 if (btnFavoritesOnlyMirror) btnFavoritesOnlyMirror.addEventListener('click', () => toggleFavoritesOnly());
-if (btnFavoriteSpotlight) btnFavoriteSpotlight.addEventListener('click', () => toggleFavoriteSpotlight());
+for (const input of [setSpotlightFrequency, setSpotlightCooldown]) {
+  if (!input) continue;
+  input.addEventListener('input', () => applyFavoriteSpotlightInputs());
+}
 setInterval(paintAllSoundIndicators, 400);
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());

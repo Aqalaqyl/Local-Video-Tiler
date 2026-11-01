@@ -58,7 +58,20 @@
           <button id="btn-default-audio" class="tool menu-item" type="button" title="Switch every video between muted and playing with volume">Volume by default</button>
           <p class="menu-label">Favorites</p>
           <button id="btn-favorites-only" class="tool menu-item" type="button" title="Play favorites only, on every display. A tile can opt out.">All videos</button>
-          <button id="btn-favorite-spotlight" class="tool menu-item" type="button" title="Occasionally fill only this display when a favorite video begins">Favorite spotlight</button>
+          <label class="menu-field" title="Chance that a newly started favorite fills its display. Off disables spotlight.">
+            <span>Spotlight frequency</span>
+            <span class="menu-slider">
+              <input id="set-spotlight-frequency" type="range" min="0" max="100" step="5" value="0" />
+              <output id="spotlight-frequency-val">Off</output>
+            </span>
+          </label>
+          <label class="menu-field" title="Minimum time after a spotlight before another can appear on that display">
+            <span>Spotlight cooldown</span>
+            <span class="menu-slider">
+              <input id="set-spotlight-cooldown" type="range" min="0" max="120" step="5" value="15" />
+              <output id="spotlight-cooldown-val">15 sec</output>
+            </span>
+          </label>
           <p class="menu-label">Timing</p>
           <label class="menu-field">
             <span>Image on screen</span>
