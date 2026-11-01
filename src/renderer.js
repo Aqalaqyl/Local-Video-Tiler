@@ -2005,8 +2005,9 @@ window.addEventListener('storage', (e) => {
   }
   if (e.key === FAVORITES_KEY) {
     loadFavorites();
+    // The set is enough. Starring one clip must not walk every file in every
+    // open folder — that stalls playback on the other displays.
     forEachLeaf(root, (leaf) => {
-      stampFolderFavorites(leaf.files);
       applyFavoriteButton(leaf);
       if (!leafUsesFavoritesOnly(leaf) || !thisDisplayShuffles(leaf)) return;
       const cur = leaf.files && leaf.files[leaf.index];
@@ -2037,33 +2038,38 @@ function persistFavorites() {
   try { localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favoriteKeys])); } catch (_) { /* ignore */ }
 }
 
-function refreshFavoritesFromStorage() {
-  let data = null;
-  try { data = JSON.parse(localStorage.getItem(FAVORITES_KEY) || 'null'); } catch (_) { /* ignore */ }
-  if (!Array.isArray(data)) return;
-  for (const raw of data) {
-    if (typeof raw !== 'string' || !raw) continue;
-    favoriteKeys.add(normalizeVolKey(raw) || raw);
+/**
+ * Path or URL is in the in-memory favorite set. One lookup, no storage read.
+ * A real path and its file:// URL normalize to the same key, so a path is
+ * enough. Skipping the URL parse keeps a folder of thousands of clips from
+ * hitching the display that just heard about a favorite.
+ */
+function fileMarkedFavorite(fileOrPath) {
+  if (!fileOrPath) return false;
+  if (typeof fileOrPath === 'string') {
+    const n = normalizeVolKey(fileOrPath);
+    return !!(n && favoriteKeys.has(n));
   }
+  const path = fileOrPath.path;
+  if (typeof path === 'string' && path) {
+    const n = normalizeVolKey(path);
+    return !!(n && favoriteKeys.has(n));
+  }
+  const url = fileOrPath.url;
+  if (typeof url === 'string' && url) {
+    const n = normalizeVolKey(url);
+    return !!(n && favoriteKeys.has(n));
+  }
+  return false;
 }
 
 function isFileFavorite(fileOrPath) {
-  if (fileOrPath && typeof fileOrPath === 'object' && fileOrPath._favorite) return true;
-  const keys = fileVolumeKeys(fileOrPath);
-  for (const k of keys) {
-    if (favoriteKeys.has(k)) return true;
-  }
-  // Peer windows may have toggled favorites since our last load.
-  if (keys.length) {
-    refreshFavoritesFromStorage();
-    for (const k of keys) {
-      if (favoriteKeys.has(k)) {
-        if (fileOrPath && typeof fileOrPath === 'object') fileOrPath._favorite = true;
-        return true;
-      }
-    }
-  }
-  return false;
+  // The in-memory set is the source of truth. A saved stamp can outlive an
+  // unfavorite, and re-reading localStorage here parsed the whole list once
+  // per file on every other display.
+  const on = fileMarkedFavorite(fileOrPath);
+  if (fileOrPath && typeof fileOrPath === 'object') fileOrPath._favorite = on;
+  return on;
 }
 
 function setFileFavorite(fileOrPath, on) {
@@ -2086,8 +2092,8 @@ function toggleFileFavorite(fileOrPath) {
 
 function stampFolderFavorites(files) {
   if (!files || !files.length) return;
-  for (const f of files) {
-    f._favorite = isFileFavorite(f);
+  for (let i = 0; i < files.length; i++) {
+    files[i]._favorite = fileMarkedFavorite(files[i]);
   }
 }
 
