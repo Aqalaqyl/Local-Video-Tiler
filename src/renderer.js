@@ -42,6 +42,12 @@ const FAVORITE_WEIGHT = 5;
 /** Favorite spotlight timing: expand, remain full-screen, then ease home. */
 const FAVORITE_SPOTLIGHT_HOLD_MS = 2800;
 const FAVORITE_SPOTLIGHT_TRANSITION_MS = 1000;
+/** Avoid repeated takeovers when several favorites start close together. */
+const DEFAULT_FAVORITE_SPOTLIGHT_FREQUENCY = 25;
+const DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS = 15;
+const FAVORITE_SPOTLIGHT_PROBE_LIMIT = 24;
+const FAVORITE_SPOTLIGHT_PROBE_BATCH = 6;
+const FAVORITE_SPOTLIGHT_PROBE_TIMEOUT_MS = 900;
 /**
  * Chance to force-pick among non-favorites (when any exist) so shuffle keeps
  * surfacing undiscovered clips even when many files are favorited.
@@ -67,7 +73,6 @@ const btnPauseAll = document.getElementById('btn-pause-all');
 const btnPauseDisplay = document.getElementById('btn-pause-display');
 const btnPauseAllMirror = document.getElementById('btn-pause-all-mirror');
 const btnPauseDisplayMirror = document.getElementById('btn-pause-display-mirror');
-const btnFavoriteSpotlight = document.getElementById('btn-favorite-spotlight');
 const btnResetDisplayMirror = document.getElementById('btn-reset-display-mirror');
 const btnEditMirror = document.getElementById('btn-edit-mirror');
 const mirrorPlaybackDock = document.getElementById('mirror-playback-dock');
@@ -87,6 +92,10 @@ const btnMin = document.getElementById('btn-min');
 const btnX = document.getElementById('btn-x');
 const gridSizeInput = document.getElementById('grid-size');
 const gridSizeVal = document.getElementById('grid-size-val');
+const setSpotlightFrequency = document.getElementById('set-spotlight-frequency');
+const spotlightFrequencyVal = document.getElementById('spotlight-frequency-val');
+const setSpotlightCooldown = document.getElementById('set-spotlight-cooldown');
+const spotlightCooldownVal = document.getElementById('spotlight-cooldown-val');
 
 // ----------------------------------------------------------------- App state
 const settings = {
@@ -113,7 +122,11 @@ const settings = {
   defaultMuted: false,
   /** When true, every display plays favorited clips only. A tile can opt out. */
   favoritesOnly: false,
-  /** Briefly fill this display when a favorite video starts playing. */
+  /** Percent chance that a newly-started favorite briefly fills its display. */
+  favoriteSpotlightFrequency: 0,
+  /** Minimum seconds between spotlights on this display. */
+  favoriteSpotlightCooldown: DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS,
+  /** Legacy mirror/persistence flag, derived from frequency for compatibility. */
   favoriteSpotlight: false
 };
 
@@ -128,6 +141,30 @@ function gifLoopCount() {
 
 function videoLoopCount() {
   return clamp(Math.round(Number(settings.videoLoops) || DEFAULT_MEDIA_LOOPS), 1, 99);
+}
+
+function favoriteSpotlightFrequency() {
+  return clamp(Math.round(Number(settings.favoriteSpotlightFrequency) || 0), 0, 100);
+}
+
+function favoriteSpotlightCooldownSeconds() {
+  const raw = Number(settings.favoriteSpotlightCooldown);
+  return clamp(Number.isFinite(raw) ? Math.round(raw) : DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS, 0, 120);
+}
+
+/** Read new slider values, or migrate the old on/off setting to 25% / Off. */
+function applyFavoriteSpotlightSettings(source) {
+  const data = source || {};
+  const hasFrequency = data.favoriteSpotlightFrequency != null &&
+    Number.isFinite(Number(data.favoriteSpotlightFrequency));
+  settings.favoriteSpotlightFrequency = hasFrequency
+    ? clamp(Math.round(Number(data.favoriteSpotlightFrequency)), 0, 100)
+    : (data.favoriteSpotlight ? DEFAULT_FAVORITE_SPOTLIGHT_FREQUENCY : 0);
+  const cooldown = Number(data.favoriteSpotlightCooldown);
+  settings.favoriteSpotlightCooldown = Number.isFinite(cooldown)
+    ? clamp(Math.round(cooldown), 0, 120)
+    : DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS;
+  settings.favoriteSpotlight = settings.favoriteSpotlightFrequency > 0;
 }
 
 // Latest window/display geometry pushed from the main process. Used to draw the
@@ -1976,11 +2013,9 @@ function loadMirrorPlaybackPrefs() {
   if (data && data.settings && data.settings.favoritesOnly != null) {
     settings.favoritesOnly = !!data.settings.favoritesOnly;
   }
-  if (data && data.settings && data.settings.favoriteSpotlight != null) {
-    settings.favoriteSpotlight = !!data.settings.favoriteSpotlight;
-  }
+  applyFavoriteSpotlightSettings(data && data.settings);
   updateFavoritesOnlyButton();
-  updateFavoriteSpotlightButton();
+  syncFavoriteSpotlightInputs();
 }
 
 // Other renderer windows share localStorage — keep our Map in sync.
@@ -2005,8 +2040,9 @@ window.addEventListener('storage', (e) => {
   }
   if (e.key === FAVORITES_KEY) {
     loadFavorites();
+    // The set is enough. Starring one clip must not walk every file in every
+    // open folder — that stalls playback on the other displays.
     forEachLeaf(root, (leaf) => {
-      stampFolderFavorites(leaf.files);
       applyFavoriteButton(leaf);
       if (!leafUsesFavoritesOnly(leaf) || !thisDisplayShuffles(leaf)) return;
       const cur = leaf.files && leaf.files[leaf.index];
@@ -2037,33 +2073,38 @@ function persistFavorites() {
   try { localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favoriteKeys])); } catch (_) { /* ignore */ }
 }
 
-function refreshFavoritesFromStorage() {
-  let data = null;
-  try { data = JSON.parse(localStorage.getItem(FAVORITES_KEY) || 'null'); } catch (_) { /* ignore */ }
-  if (!Array.isArray(data)) return;
-  for (const raw of data) {
-    if (typeof raw !== 'string' || !raw) continue;
-    favoriteKeys.add(normalizeVolKey(raw) || raw);
+/**
+ * Path or URL is in the in-memory favorite set. One lookup, no storage read.
+ * A real path and its file:// URL normalize to the same key, so a path is
+ * enough. Skipping the URL parse keeps a folder of thousands of clips from
+ * hitching the display that just heard about a favorite.
+ */
+function fileMarkedFavorite(fileOrPath) {
+  if (!fileOrPath) return false;
+  if (typeof fileOrPath === 'string') {
+    const n = normalizeVolKey(fileOrPath);
+    return !!(n && favoriteKeys.has(n));
   }
+  const path = fileOrPath.path;
+  if (typeof path === 'string' && path) {
+    const n = normalizeVolKey(path);
+    return !!(n && favoriteKeys.has(n));
+  }
+  const url = fileOrPath.url;
+  if (typeof url === 'string' && url) {
+    const n = normalizeVolKey(url);
+    return !!(n && favoriteKeys.has(n));
+  }
+  return false;
 }
 
 function isFileFavorite(fileOrPath) {
-  if (fileOrPath && typeof fileOrPath === 'object' && fileOrPath._favorite) return true;
-  const keys = fileVolumeKeys(fileOrPath);
-  for (const k of keys) {
-    if (favoriteKeys.has(k)) return true;
-  }
-  // Peer windows may have toggled favorites since our last load.
-  if (keys.length) {
-    refreshFavoritesFromStorage();
-    for (const k of keys) {
-      if (favoriteKeys.has(k)) {
-        if (fileOrPath && typeof fileOrPath === 'object') fileOrPath._favorite = true;
-        return true;
-      }
-    }
-  }
-  return false;
+  // The in-memory set is the source of truth. A saved stamp can outlive an
+  // unfavorite, and re-reading localStorage here parsed the whole list once
+  // per file on every other display.
+  const on = fileMarkedFavorite(fileOrPath);
+  if (fileOrPath && typeof fileOrPath === 'object') fileOrPath._favorite = on;
+  return on;
 }
 
 function setFileFavorite(fileOrPath, on) {
@@ -2086,8 +2127,8 @@ function toggleFileFavorite(fileOrPath) {
 
 function stampFolderFavorites(files) {
   if (!files || !files.length) return;
-  for (const f of files) {
-    f._favorite = isFileFavorite(f);
+  for (let i = 0; i < files.length; i++) {
+    files[i]._favorite = fileMarkedFavorite(files[i]);
   }
 }
 
@@ -2267,7 +2308,9 @@ function snapshotSettings() {
     soundIndicators: !!settings.soundIndicators,
     defaultMuted: !!settings.defaultMuted,
     favoritesOnly: !!settings.favoritesOnly,
-    favoriteSpotlight: !!settings.favoriteSpotlight
+    favoriteSpotlightFrequency: favoriteSpotlightFrequency(),
+    favoriteSpotlightCooldown: favoriteSpotlightCooldownSeconds(),
+    favoriteSpotlight: favoriteSpotlightFrequency() > 0
   };
 }
 
@@ -2303,10 +2346,11 @@ function applySettingsFromPayload(s) {
     // The window that flipped the switch already picked the new clips.
     if (!IS_MIRROR) saveState();
   }
-  if (s.favoriteSpotlight != null && !!s.favoriteSpotlight !== !!settings.favoriteSpotlight) {
-    settings.favoriteSpotlight = !!s.favoriteSpotlight;
-    updateFavoriteSpotlightButton();
-    if (!settings.favoriteSpotlight) clearFavoriteSpotlight();
+  if (s.favoriteSpotlightFrequency != null || s.favoriteSpotlightCooldown != null || s.favoriteSpotlight != null) {
+    const wasOn = favoriteSpotlightFrequency() > 0;
+    applyFavoriteSpotlightSettings(s);
+    syncFavoriteSpotlightInputs();
+    if (wasOn && favoriteSpotlightFrequency() === 0) clearFavoriteSpotlight();
   }
 }
 
@@ -2924,6 +2968,7 @@ function forEachLeaf(node, fn) {
 // ============================================================================
 let maximizedLeaf = null;
 let favoriteSpotlight = null;
+let lastFavoriteSpotlightAt = -Infinity;
 
 function releaseMaximizeSlot(leaf) {
   const ph = leaf && leaf._maximizePlaceholder;
@@ -2970,6 +3015,171 @@ function setFavoriteSpotlightRect(el, rect) {
   el.style.height = rect.height + 'px';
 }
 
+function rememberVideoOrientation(file, video) {
+  if (!file || !video || !video.videoWidth || !video.videoHeight) return null;
+  file._videoOrientationKnown = true;
+  file._videoPortrait = video.videoHeight > video.videoWidth;
+  file._videoWidth = video.videoWidth;
+  file._videoHeight = video.videoHeight;
+  return file._videoPortrait;
+}
+
+function probeVideoPortrait(file) {
+  if (!file || !file.url || isGifFile(file) || isStillImage(file)) return Promise.resolve(false);
+  if (file._videoOrientationKnown) return Promise.resolve(!!file._videoPortrait);
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    let finished = false;
+    const done = (portrait, known) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      video.removeEventListener('loadedmetadata', onMetadata);
+      video.removeEventListener('error', onError);
+      if (known) {
+        file._videoOrientationKnown = true;
+        file._videoPortrait = !!portrait;
+        file._videoWidth = video.videoWidth || 0;
+        file._videoHeight = video.videoHeight || 0;
+      }
+      try {
+        video.removeAttribute('src');
+        video.load();
+      } catch (_) { /* ignore */ }
+      resolve(!!portrait);
+    };
+    const onMetadata = () => done(video.videoHeight > video.videoWidth, true);
+    const onError = () => done(false, false);
+    video.addEventListener('loadedmetadata', onMetadata);
+    video.addEventListener('error', onError);
+    const timer = setTimeout(() => done(false, false), FAVORITE_SPOTLIGHT_PROBE_TIMEOUT_MS);
+    video.src = file.url;
+    video.load();
+  });
+}
+
+/** Weighted random order without replacement; favorites are considered first. */
+function favoriteWeightedOrder(files, limit = Infinity) {
+  // Exponential-race keys produce weighted sampling without replacement while
+  // visiting even a very large folder only once.
+  return (files || [])
+    .map((file) => {
+      const weight = isFileFavorite(file) ? FAVORITE_WEIGHT : 1;
+      const random = Math.max(Number.MIN_VALUE, Math.random());
+      return { file, key: -Math.log(random) / weight };
+    })
+    .sort((a, b) => a.key - b.key)
+    .slice(0, limit)
+    .map((entry) => entry.file);
+}
+
+async function choosePortraitSpotlightCompanions(leaf, current, state) {
+  const candidates = favoriteWeightedOrder((leaf.files || []).filter((file) => {
+    if (!file || file === current || (current.path && file.path === current.path)) return false;
+    return !isGifFile(file) && !isStillImage(file);
+  }), FAVORITE_SPOTLIGHT_PROBE_LIMIT);
+  const portraits = [];
+  for (let i = 0; i < candidates.length && portraits.length < 2; i += FAVORITE_SPOTLIGHT_PROBE_BATCH) {
+    if (favoriteSpotlight !== state || state.phase === 'returning') break;
+    const batch = candidates.slice(i, i + FAVORITE_SPOTLIGHT_PROBE_BATCH);
+    const results = await Promise.all(batch.map((file) => probeVideoPortrait(file)));
+    for (let j = 0; j < batch.length; j++) {
+      if (results[j]) portraits.push(batch[j]);
+      if (portraits.length >= 2) break;
+    }
+  }
+  return favoriteWeightedOrder(portraits).slice(0, 2);
+}
+
+function stopFavoriteSpotlightCompanions(state) {
+  if (!state || !state.companionLayer) return;
+  for (const video of state.companionVideos || []) stopVideoElement(video);
+  if (state.companionLayer.parentNode) state.companionLayer.parentNode.removeChild(state.companionLayer);
+  state.companionLayer = null;
+  state.companionVideos = [];
+  if (state.leaf && state.leaf.el) {
+    state.leaf.el.style.removeProperty('--favorite-spotlight-center-width');
+  }
+}
+
+function createFavoriteSpotlightCompanion(file, side) {
+  const video = document.createElement('video');
+  video.className = 'favorite-spotlight-companion ' + side;
+  video.muted = true;
+  video.defaultMuted = true;
+  video.autoplay = true;
+  video.loop = true;
+  video.playsInline = true;
+  video.preload = 'auto';
+  video.src = file.url;
+  video.addEventListener('loadedmetadata', () => {
+    rememberVideoOrientation(file, video);
+    if (isFinite(video.duration) && video.duration > 4) {
+      try { video.currentTime = Math.random() * Math.max(0, video.duration - 3); } catch (_) { /* ignore */ }
+    }
+    video.play().catch(() => {});
+  }, { once: true });
+  return video;
+}
+
+function waitFavoriteSpotlightCompanion(video, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    if (!video) return resolve(false);
+    if (video.readyState >= 2) return resolve(true);
+    let done = false;
+    const finish = (ready) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      video.removeEventListener('canplay', onReady);
+      video.removeEventListener('loadeddata', onReady);
+      video.removeEventListener('error', onError);
+      resolve(ready);
+    };
+    const onReady = () => finish(true);
+    const onError = () => finish(false);
+    video.addEventListener('canplay', onReady);
+    video.addEventListener('loadeddata', onReady);
+    video.addEventListener('error', onError);
+    const timer = setTimeout(() => finish(video.readyState >= 2), timeoutMs);
+  });
+}
+
+async function addPortraitSpotlightCompanions(state, current) {
+  const leaf = state && state.leaf;
+  if (!leaf || !leaf.el || favoriteSpotlight !== state) return;
+  const companions = await choosePortraitSpotlightCompanions(leaf, current, state);
+  if (!companions.length || favoriteSpotlight !== state || state.phase === 'returning') return;
+  const layer = document.createElement('div');
+  layer.className = 'favorite-spotlight-companions';
+  const videos = [];
+  companions.forEach((file, index) => {
+    const video = createFavoriteSpotlightCompanion(file, index === 0 ? 'left' : 'right');
+    videos.push(video);
+    layer.appendChild(video);
+  });
+  const ready = await Promise.all(videos.map((video) => waitFavoriteSpotlightCompanion(video)));
+  for (let i = videos.length - 1; i >= 0; i--) {
+    if (!ready[i]) {
+      stopVideoElement(videos[i]);
+      videos.splice(i, 1);
+      if (layer.children[i]) layer.children[i].remove();
+    }
+  }
+  const waitForFull = Math.max(0, (state.fullAt || 0) - performance.now());
+  if (waitForFull) await new Promise((resolve) => setTimeout(resolve, waitForFull));
+  if (!videos.length || favoriteSpotlight !== state || state.phase === 'returning') {
+    for (const video of videos) stopVideoElement(video);
+    return;
+  }
+  state.companionLayer = layer;
+  state.companionVideos = videos;
+  leaf.el.appendChild(layer);
+  for (const video of videos) video.play().catch(() => {});
+}
+
 function cleanFavoriteSpotlightElement(leaf) {
   const el = leaf && leaf.el;
   if (el) {
@@ -2979,6 +3189,7 @@ function cleanFavoriteSpotlightElement(leaf) {
       'favorite-spotlight-no-transition'
     );
     for (const prop of ['left', 'top', 'width', 'height']) el.style.removeProperty(prop);
+    el.style.removeProperty('--favorite-spotlight-center-width');
   }
   releaseFavoriteSpotlightSlot(leaf);
 }
@@ -2987,6 +3198,7 @@ function clearFavoriteSpotlight(opts = {}) {
   const state = favoriteSpotlight;
   if (!state) return;
   clearTimeout(state.holdTimer);
+  clearTimeout(state.fullTimer);
   clearTimeout(state.cleanupTimer);
   favoriteSpotlight = null;
   const leaf = state.leaf;
@@ -2995,33 +3207,57 @@ function clearFavoriteSpotlight(opts = {}) {
   if (!opts.immediate && el && ph && ph.parentNode && state.phase !== 'returning') {
     state.phase = 'returning';
     favoriteSpotlight = state;
+    stopFavoriteSpotlightCompanions(state);
     el.classList.remove('favorite-spotlight-full');
     setFavoriteSpotlightRect(el, ph.getBoundingClientRect());
     state.cleanupTimer = setTimeout(() => {
       if (favoriteSpotlight === state) favoriteSpotlight = null;
+      stopFavoriteSpotlightCompanions(state);
       cleanFavoriteSpotlightElement(leaf);
     }, FAVORITE_SPOTLIGHT_TRANSITION_MS + 80);
     return;
   }
+  stopFavoriteSpotlightCompanions(state);
   cleanFavoriteSpotlightElement(leaf);
 }
 
 function spotlightFavoriteLeaf(leaf, gen) {
   const file = leaf && leaf.files && leaf.files[leaf.index];
-  if (!settings.favoriteSpotlight || settings.editMode || maximizedLeaf) return;
+  const frequency = favoriteSpotlightFrequency();
+  if (frequency <= 0 || settings.editMode || maximizedLeaf) return;
   if (!leaf || !leaf.el || leaf.spacer || !file || !isFileFavorite(file)) return;
   if (!leaf.video || leaf.video.paused || leaf.video.ended || !leafShouldPlay(leaf)) return;
+  // A tile can overlap two monitor windows, but only the window containing its
+  // center owns it. Never let the same favorite cover multiple displays.
+  if (projection.active && !thisDisplayShuffles(leaf)) return;
   if (leaf._favoriteSpotlightGen === gen) return;
   leaf._favoriteSpotlightGen = gen;
 
-  if (favoriteSpotlight) clearFavoriteSpotlight({ immediate: true });
+  // Give each newly-started favorite one chance. Once one wins, this renderer
+  // (one physical display while spanning) observes a cooldown, and an active
+  // spotlight is never replaced by another popup.
+  if (favoriteSpotlight) return;
+  const now = Date.now();
+  if (now - lastFavoriteSpotlightAt < favoriteSpotlightCooldownSeconds() * 1000) return;
+  if (Math.random() * 100 >= frequency) return;
   const el = leaf.el;
   const start = el.getBoundingClientRect();
   if (start.width < 1 || start.height < 1) return;
   const ph = holdFavoriteSpotlightSlot(leaf);
   if (!ph) return;
 
-  const state = { leaf, phase: 'expanding', holdTimer: 0, cleanupTimer: 0 };
+  lastFavoriteSpotlightAt = now;
+  const portrait = rememberVideoOrientation(file, leaf.video) === true;
+  const state = {
+    leaf,
+    phase: 'expanding',
+    portrait,
+    holdTimer: 0,
+    fullTimer: 0,
+    cleanupTimer: 0,
+    companionLayer: null,
+    companionVideos: []
+  };
   favoriteSpotlight = state;
   el.classList.add('favorite-spotlight', 'favorite-spotlight-no-transition');
   setFavoriteSpotlightRect(el, start);
@@ -3035,7 +3271,18 @@ function spotlightFavoriteLeaf(leaf, gen) {
     el.style.top = '0px';
     el.style.width = '100vw';
     el.style.height = '100vh';
-    state.phase = 'holding';
+    state.fullAt = performance.now() + FAVORITE_SPOTLIGHT_TRANSITION_MS;
+    state.fullTimer = setTimeout(() => {
+      if (favoriteSpotlight === state && state.phase === 'expanding') state.phase = 'holding';
+    }, FAVORITE_SPOTLIGHT_TRANSITION_MS);
+    if (state.portrait && leaf.video.videoWidth && leaf.video.videoHeight) {
+      const centerWidth = Math.min(
+        window.innerWidth,
+        window.innerHeight * leaf.video.videoWidth / leaf.video.videoHeight
+      );
+      el.style.setProperty('--favorite-spotlight-center-width', centerWidth + 'px');
+      void addPortraitSpotlightCompanions(state, file);
+    }
     state.holdTimer = setTimeout(
       () => clearFavoriteSpotlight(),
       FAVORITE_SPOTLIGHT_TRANSITION_MS + FAVORITE_SPOTLIGHT_HOLD_MS
@@ -4283,24 +4530,34 @@ function updateFavoritesOnlyButton() {
   forEachLeaf(root, applyFavoritesOnlyButton);
 }
 
-function updateFavoriteSpotlightButton() {
-  if (!btnFavoriteSpotlight) return;
-  const on = !!settings.favoriteSpotlight;
-  btnFavoriteSpotlight.classList.toggle('active', on);
-  btnFavoriteSpotlight.textContent = on ? 'Favorite spotlight on' : 'Favorite spotlight';
-  btnFavoriteSpotlight.title = on
-    ? 'Favorite videos briefly fill their display — click to turn off'
-    : 'Briefly fill this display when a favorite video begins';
+function syncFavoriteSpotlightInputs() {
+  const frequency = favoriteSpotlightFrequency();
+  const cooldown = favoriteSpotlightCooldownSeconds();
+  if (setSpotlightFrequency) setSpotlightFrequency.value = String(frequency);
+  if (spotlightFrequencyVal) spotlightFrequencyVal.textContent = frequency ? frequency + '%' : 'Off';
+  if (setSpotlightCooldown) setSpotlightCooldown.value = String(cooldown);
+  if (spotlightCooldownVal) spotlightCooldownVal.textContent = cooldown ? cooldown + ' sec' : 'None';
 }
 
-function toggleFavoriteSpotlight() {
-  settings.favoriteSpotlight = !settings.favoriteSpotlight;
-  updateFavoriteSpotlightButton();
-  if (!settings.favoriteSpotlight) clearFavoriteSpotlight();
+function applyFavoriteSpotlightInputs() {
+  const previousFrequency = favoriteSpotlightFrequency();
+  settings.favoriteSpotlightFrequency = clamp(
+    Math.round(Number(setSpotlightFrequency && setSpotlightFrequency.value) || 0),
+    0,
+    100
+  );
+  const rawCooldown = Number(setSpotlightCooldown && setSpotlightCooldown.value);
+  settings.favoriteSpotlightCooldown = clamp(
+    Number.isFinite(rawCooldown) ? Math.round(rawCooldown) : DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS,
+    0,
+    120
+  );
+  settings.favoriteSpotlight = settings.favoriteSpotlightFrequency > 0;
+  syncFavoriteSpotlightInputs();
+  if (previousFrequency > 0 && settings.favoriteSpotlightFrequency === 0) {
+    clearFavoriteSpotlight();
+  }
   saveState();
-  flash(settings.favoriteSpotlight
-    ? 'Favorite spotlight on — favorites briefly fill their display'
-    : 'Favorite spotlight off');
 }
 
 function applyFavoritesOnlyButton(leaf) {
@@ -4996,13 +5253,12 @@ function loadState() {
   settings.soundIndicators = !!settings.soundIndicators;
   settings.defaultMuted = !!settings.defaultMuted;
   settings.favoritesOnly = !!settings.favoritesOnly;
-  settings.favoriteSpotlight = !!settings.favoriteSpotlight;
+  applyFavoriteSpotlightSettings(data && data.settings);
   document.body.classList.toggle('sound-indicators', settings.soundIndicators);
   const soundBtn = document.getElementById('btn-sound-indicators');
   if (soundBtn) soundBtn.classList.toggle('active', settings.soundIndicators);
   updateDefaultAudioButton();
   updateFavoritesOnlyButton();
-  updateFavoriteSpotlightButton();
   syncPlaybackSettingsInputs();
   publishSpanDisplays();
 
@@ -5156,6 +5412,7 @@ function syncPlaybackSettingsInputs() {
   if (setImageSeconds) setImageSeconds.value = String(settings.imageSeconds);
   if (setGifLoops) setGifLoops.value = String(settings.gifLoops);
   if (setVideoLoops) setVideoLoops.value = String(settings.videoLoops);
+  syncFavoriteSpotlightInputs();
 }
 
 function setSettingsPanelOpen(open) {
@@ -6237,7 +6494,10 @@ const btnFavoritesOnly = document.getElementById('btn-favorites-only');
 const btnFavoritesOnlyMirror = document.getElementById('btn-favorites-only-mirror');
 if (btnFavoritesOnly) btnFavoritesOnly.addEventListener('click', () => toggleFavoritesOnly());
 if (btnFavoritesOnlyMirror) btnFavoritesOnlyMirror.addEventListener('click', () => toggleFavoritesOnly());
-if (btnFavoriteSpotlight) btnFavoriteSpotlight.addEventListener('click', () => toggleFavoriteSpotlight());
+for (const input of [setSpotlightFrequency, setSpotlightCooldown]) {
+  if (!input) continue;
+  input.addEventListener('input', () => applyFavoriteSpotlightInputs());
+}
 setInterval(paintAllSoundIndicators, 400);
 btnFs.addEventListener('click', () => window.api.toggleFullscreen());
 btnFsAll.addEventListener('click', () => window.api.toggleSpanAll());
