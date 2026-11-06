@@ -307,6 +307,24 @@ body.desktop-preview #stage > .node-leaf {
 .node-leaf.favorite-spotlight.favorite-spotlight-no-transition {
   transition: none;
 }
+.favorite-spotlight-companions {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 1;
+}
+.favorite-spotlight-companion {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: max(0px, calc((100vw - var(--favorite-spotlight-center-width, 100vw)) / 2));
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+.favorite-spotlight-companion.left { left: 0; }
+.favorite-spotlight-companion.right { right: 0; }
 .node-leaf.focused { box-shadow: inset 0 0 0 2px var(--accent); }
 .node-leaf.selected { box-shadow: inset 0 0 0 2px var(--accent-2); }
 .node-leaf.selected.focused { box-shadow: inset 0 0 0 2px var(--accent-2), 0 0 0 1px var(--accent); }

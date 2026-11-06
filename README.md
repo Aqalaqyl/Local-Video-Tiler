@@ -70,7 +70,9 @@ picture you see.
     a **0–120 second** wait before another spotlight on that display. This
     prevents several favorites from repeatedly taking over while still letting
     you tune the effect. In a multi-monitor layout, the spotlight stays entirely
-    on the display that owns that tile.
+    on the display that owns that tile. When the spotlight clip is vertical,
+    one random vertical video from the same folder plays silently on each side;
+    favorited vertical videos receive extra weight in that selection.
     The **All / ★** button on a tile turns that limit off for that tile only.
     **Next** (⏭) picks a random clip (a random favorite while Favorites only
     is on for that tile). Previous still steps backward in order.

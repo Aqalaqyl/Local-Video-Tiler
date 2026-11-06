@@ -45,6 +45,9 @@ const FAVORITE_SPOTLIGHT_TRANSITION_MS = 1000;
 /** Avoid repeated takeovers when several favorites start close together. */
 const DEFAULT_FAVORITE_SPOTLIGHT_FREQUENCY = 25;
 const DEFAULT_FAVORITE_SPOTLIGHT_COOLDOWN_SECONDS = 15;
+const FAVORITE_SPOTLIGHT_PROBE_LIMIT = 24;
+const FAVORITE_SPOTLIGHT_PROBE_BATCH = 6;
+const FAVORITE_SPOTLIGHT_PROBE_TIMEOUT_MS = 900;
 /**
  * Chance to force-pick among non-favorites (when any exist) so shuffle keeps
  * surfacing undiscovered clips even when many files are favorited.
@@ -3012,6 +3015,171 @@ function setFavoriteSpotlightRect(el, rect) {
   el.style.height = rect.height + 'px';
 }
 
+function rememberVideoOrientation(file, video) {
+  if (!file || !video || !video.videoWidth || !video.videoHeight) return null;
+  file._videoOrientationKnown = true;
+  file._videoPortrait = video.videoHeight > video.videoWidth;
+  file._videoWidth = video.videoWidth;
+  file._videoHeight = video.videoHeight;
+  return file._videoPortrait;
+}
+
+function probeVideoPortrait(file) {
+  if (!file || !file.url || isGifFile(file) || isStillImage(file)) return Promise.resolve(false);
+  if (file._videoOrientationKnown) return Promise.resolve(!!file._videoPortrait);
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    let finished = false;
+    const done = (portrait, known) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      video.removeEventListener('loadedmetadata', onMetadata);
+      video.removeEventListener('error', onError);
+      if (known) {
+        file._videoOrientationKnown = true;
+        file._videoPortrait = !!portrait;
+        file._videoWidth = video.videoWidth || 0;
+        file._videoHeight = video.videoHeight || 0;
+      }
+      try {
+        video.removeAttribute('src');
+        video.load();
+      } catch (_) { /* ignore */ }
+      resolve(!!portrait);
+    };
+    const onMetadata = () => done(video.videoHeight > video.videoWidth, true);
+    const onError = () => done(false, false);
+    video.addEventListener('loadedmetadata', onMetadata);
+    video.addEventListener('error', onError);
+    const timer = setTimeout(() => done(false, false), FAVORITE_SPOTLIGHT_PROBE_TIMEOUT_MS);
+    video.src = file.url;
+    video.load();
+  });
+}
+
+/** Weighted random order without replacement; favorites are considered first. */
+function favoriteWeightedOrder(files, limit = Infinity) {
+  // Exponential-race keys produce weighted sampling without replacement while
+  // visiting even a very large folder only once.
+  return (files || [])
+    .map((file) => {
+      const weight = isFileFavorite(file) ? FAVORITE_WEIGHT : 1;
+      const random = Math.max(Number.MIN_VALUE, Math.random());
+      return { file, key: -Math.log(random) / weight };
+    })
+    .sort((a, b) => a.key - b.key)
+    .slice(0, limit)
+    .map((entry) => entry.file);
+}
+
+async function choosePortraitSpotlightCompanions(leaf, current, state) {
+  const candidates = favoriteWeightedOrder((leaf.files || []).filter((file) => {
+    if (!file || file === current || (current.path && file.path === current.path)) return false;
+    return !isGifFile(file) && !isStillImage(file);
+  }), FAVORITE_SPOTLIGHT_PROBE_LIMIT);
+  const portraits = [];
+  for (let i = 0; i < candidates.length && portraits.length < 2; i += FAVORITE_SPOTLIGHT_PROBE_BATCH) {
+    if (favoriteSpotlight !== state || state.phase === 'returning') break;
+    const batch = candidates.slice(i, i + FAVORITE_SPOTLIGHT_PROBE_BATCH);
+    const results = await Promise.all(batch.map((file) => probeVideoPortrait(file)));
+    for (let j = 0; j < batch.length; j++) {
+      if (results[j]) portraits.push(batch[j]);
+      if (portraits.length >= 2) break;
+    }
+  }
+  return favoriteWeightedOrder(portraits).slice(0, 2);
+}
+
+function stopFavoriteSpotlightCompanions(state) {
+  if (!state || !state.companionLayer) return;
+  for (const video of state.companionVideos || []) stopVideoElement(video);
+  if (state.companionLayer.parentNode) state.companionLayer.parentNode.removeChild(state.companionLayer);
+  state.companionLayer = null;
+  state.companionVideos = [];
+  if (state.leaf && state.leaf.el) {
+    state.leaf.el.style.removeProperty('--favorite-spotlight-center-width');
+  }
+}
+
+function createFavoriteSpotlightCompanion(file, side) {
+  const video = document.createElement('video');
+  video.className = 'favorite-spotlight-companion ' + side;
+  video.muted = true;
+  video.defaultMuted = true;
+  video.autoplay = true;
+  video.loop = true;
+  video.playsInline = true;
+  video.preload = 'auto';
+  video.src = file.url;
+  video.addEventListener('loadedmetadata', () => {
+    rememberVideoOrientation(file, video);
+    if (isFinite(video.duration) && video.duration > 4) {
+      try { video.currentTime = Math.random() * Math.max(0, video.duration - 3); } catch (_) { /* ignore */ }
+    }
+    video.play().catch(() => {});
+  }, { once: true });
+  return video;
+}
+
+function waitFavoriteSpotlightCompanion(video, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    if (!video) return resolve(false);
+    if (video.readyState >= 2) return resolve(true);
+    let done = false;
+    const finish = (ready) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      video.removeEventListener('canplay', onReady);
+      video.removeEventListener('loadeddata', onReady);
+      video.removeEventListener('error', onError);
+      resolve(ready);
+    };
+    const onReady = () => finish(true);
+    const onError = () => finish(false);
+    video.addEventListener('canplay', onReady);
+    video.addEventListener('loadeddata', onReady);
+    video.addEventListener('error', onError);
+    const timer = setTimeout(() => finish(video.readyState >= 2), timeoutMs);
+  });
+}
+
+async function addPortraitSpotlightCompanions(state, current) {
+  const leaf = state && state.leaf;
+  if (!leaf || !leaf.el || favoriteSpotlight !== state) return;
+  const companions = await choosePortraitSpotlightCompanions(leaf, current, state);
+  if (!companions.length || favoriteSpotlight !== state || state.phase === 'returning') return;
+  const layer = document.createElement('div');
+  layer.className = 'favorite-spotlight-companions';
+  const videos = [];
+  companions.forEach((file, index) => {
+    const video = createFavoriteSpotlightCompanion(file, index === 0 ? 'left' : 'right');
+    videos.push(video);
+    layer.appendChild(video);
+  });
+  const ready = await Promise.all(videos.map((video) => waitFavoriteSpotlightCompanion(video)));
+  for (let i = videos.length - 1; i >= 0; i--) {
+    if (!ready[i]) {
+      stopVideoElement(videos[i]);
+      videos.splice(i, 1);
+      if (layer.children[i]) layer.children[i].remove();
+    }
+  }
+  const waitForFull = Math.max(0, (state.fullAt || 0) - performance.now());
+  if (waitForFull) await new Promise((resolve) => setTimeout(resolve, waitForFull));
+  if (!videos.length || favoriteSpotlight !== state || state.phase === 'returning') {
+    for (const video of videos) stopVideoElement(video);
+    return;
+  }
+  state.companionLayer = layer;
+  state.companionVideos = videos;
+  leaf.el.appendChild(layer);
+  for (const video of videos) video.play().catch(() => {});
+}
+
 function cleanFavoriteSpotlightElement(leaf) {
   const el = leaf && leaf.el;
   if (el) {
@@ -3021,6 +3189,7 @@ function cleanFavoriteSpotlightElement(leaf) {
       'favorite-spotlight-no-transition'
     );
     for (const prop of ['left', 'top', 'width', 'height']) el.style.removeProperty(prop);
+    el.style.removeProperty('--favorite-spotlight-center-width');
   }
   releaseFavoriteSpotlightSlot(leaf);
 }
@@ -3029,6 +3198,7 @@ function clearFavoriteSpotlight(opts = {}) {
   const state = favoriteSpotlight;
   if (!state) return;
   clearTimeout(state.holdTimer);
+  clearTimeout(state.fullTimer);
   clearTimeout(state.cleanupTimer);
   favoriteSpotlight = null;
   const leaf = state.leaf;
@@ -3037,14 +3207,17 @@ function clearFavoriteSpotlight(opts = {}) {
   if (!opts.immediate && el && ph && ph.parentNode && state.phase !== 'returning') {
     state.phase = 'returning';
     favoriteSpotlight = state;
+    stopFavoriteSpotlightCompanions(state);
     el.classList.remove('favorite-spotlight-full');
     setFavoriteSpotlightRect(el, ph.getBoundingClientRect());
     state.cleanupTimer = setTimeout(() => {
       if (favoriteSpotlight === state) favoriteSpotlight = null;
+      stopFavoriteSpotlightCompanions(state);
       cleanFavoriteSpotlightElement(leaf);
     }, FAVORITE_SPOTLIGHT_TRANSITION_MS + 80);
     return;
   }
+  stopFavoriteSpotlightCompanions(state);
   cleanFavoriteSpotlightElement(leaf);
 }
 
@@ -3074,7 +3247,17 @@ function spotlightFavoriteLeaf(leaf, gen) {
   if (!ph) return;
 
   lastFavoriteSpotlightAt = now;
-  const state = { leaf, phase: 'expanding', holdTimer: 0, cleanupTimer: 0 };
+  const portrait = rememberVideoOrientation(file, leaf.video) === true;
+  const state = {
+    leaf,
+    phase: 'expanding',
+    portrait,
+    holdTimer: 0,
+    fullTimer: 0,
+    cleanupTimer: 0,
+    companionLayer: null,
+    companionVideos: []
+  };
   favoriteSpotlight = state;
   el.classList.add('favorite-spotlight', 'favorite-spotlight-no-transition');
   setFavoriteSpotlightRect(el, start);
@@ -3088,7 +3271,18 @@ function spotlightFavoriteLeaf(leaf, gen) {
     el.style.top = '0px';
     el.style.width = '100vw';
     el.style.height = '100vh';
-    state.phase = 'holding';
+    state.fullAt = performance.now() + FAVORITE_SPOTLIGHT_TRANSITION_MS;
+    state.fullTimer = setTimeout(() => {
+      if (favoriteSpotlight === state && state.phase === 'expanding') state.phase = 'holding';
+    }, FAVORITE_SPOTLIGHT_TRANSITION_MS);
+    if (state.portrait && leaf.video.videoWidth && leaf.video.videoHeight) {
+      const centerWidth = Math.min(
+        window.innerWidth,
+        window.innerHeight * leaf.video.videoWidth / leaf.video.videoHeight
+      );
+      el.style.setProperty('--favorite-spotlight-center-width', centerWidth + 'px');
+      void addPortraitSpotlightCompanions(state, file);
+    }
     state.holdTimer = setTimeout(
       () => clearFavoriteSpotlight(),
       FAVORITE_SPOTLIGHT_TRANSITION_MS + FAVORITE_SPOTLIGHT_HOLD_MS
