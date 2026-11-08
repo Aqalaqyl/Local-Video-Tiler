@@ -72,7 +72,11 @@ picture you see.
     you tune the effect. In a multi-monitor layout, the spotlight stays entirely
     on the display that owns that tile. When the spotlight clip is vertical,
     one random vertical video from the same folder plays silently on each side;
-    favorited vertical videos receive extra weight in that selection.
+    favorited vertical videos receive extra weight in that selection. Each
+    tile also has a **Spot button** that remembers the current video
+    and spotlights it every time it starts, even when random spotlight frequency
+    is Off. A widescreen spotlight divides its display into four quarters: the
+    current video plus up to three random favorited videos from loaded folders.
     The **All / ★** button on a tile turns that limit off for that tile only.
     **Next** (⏭) picks a random clip (a random favorite while Favorites only
     is on for that tile). Previous still steps backward in order.

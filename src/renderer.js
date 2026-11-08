@@ -33,6 +33,8 @@ const FILE_VOLUMES_KEY = 'lvt.fileVolumes.v1';
 const FILE_UNMUTES_KEY = 'lvt.mutedDefaultUnmutes.v1';
 /** Favorited file identities (normalized path/url keys). */
 const FAVORITES_KEY = 'lvt.favorites.v1';
+/** Videos explicitly set to spotlight every time they start. */
+const SPOTLIGHT_FILES_KEY = 'lvt.spotlightFiles.v1';
 /** Per-tile volume ceiling (2.0 = 200% boost, VLC-style). */
 const MAX_TILE_VOLUME = 2;
 /** Cap remembered file volumes so localStorage cannot grow without bound. */
@@ -2005,6 +2007,7 @@ function loadMirrorPlaybackPrefs() {
   loadFileVolumes();
   loadFileUnmutes();
   loadFavorites();
+  loadSpotlightFiles();
   let data = null;
   try { data = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (_) { /* ignore */ }
   if (data && data.settings && data.settings.defaultMuted != null) {
@@ -2048,6 +2051,10 @@ window.addEventListener('storage', (e) => {
       const cur = leaf.files && leaf.files[leaf.index];
       if (cur && !isFileFavorite(cur) && retargetLeafForFavoritesOnly(leaf)) saveState();
     });
+  }
+  if (e.key === SPOTLIGHT_FILES_KEY) {
+    loadSpotlightFiles();
+    forEachLeaf(root, applySpotlightButton);
   }
 });
 
@@ -2137,6 +2144,54 @@ function clearFavoriteForFile(fileOrPath) {
   if (typeof fileOrPath === 'object') delete fileOrPath._favorite;
   for (const k of fileVolumeKeys(fileOrPath)) favoriteKeys.delete(k);
   persistFavorites();
+}
+
+/** Videos marked by the per-tile spotlight button. */
+const spotlightFileKeys = new Set();
+
+function loadSpotlightFiles() {
+  spotlightFileKeys.clear();
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(SPOTLIGHT_FILES_KEY) || 'null'); } catch (_) { /* ignore */ }
+  if (!Array.isArray(data)) return;
+  for (const raw of data) {
+    if (typeof raw !== 'string' || !raw) continue;
+    const key = normalizeVolKey(raw) || raw;
+    spotlightFileKeys.add(key);
+  }
+}
+
+function persistSpotlightFiles() {
+  try { localStorage.setItem(SPOTLIGHT_FILES_KEY, JSON.stringify([...spotlightFileKeys])); } catch (_) { /* ignore */ }
+}
+
+function isFileSpotlight(fileOrPath) {
+  if (!fileOrPath) return false;
+  if (typeof fileOrPath === 'string') {
+    const key = normalizeVolKey(fileOrPath);
+    return !!(key && spotlightFileKeys.has(key));
+  }
+  const pathKey = normalizeVolKey(fileOrPath.path);
+  if (pathKey && spotlightFileKeys.has(pathKey)) return true;
+  const urlKey = normalizeVolKey(fileOrPath.url);
+  return !!(urlKey && spotlightFileKeys.has(urlKey));
+}
+
+function setFileSpotlight(fileOrPath, on) {
+  if (!fileOrPath) return;
+  const keys = fileVolumeKeys(fileOrPath);
+  if (!keys.length) return;
+  for (const key of keys) {
+    if (on) spotlightFileKeys.add(key);
+    else spotlightFileKeys.delete(key);
+  }
+  persistSpotlightFiles();
+}
+
+function clearSpotlightForFile(fileOrPath) {
+  if (!fileOrPath) return;
+  for (const key of fileVolumeKeys(fileOrPath)) spotlightFileKeys.delete(key);
+  persistSpotlightFiles();
 }
 
 /** This tile plays only favorited clips. A per-tile opt-out leaves the whole folder. */
@@ -3093,20 +3148,37 @@ async function choosePortraitSpotlightCompanions(leaf, current, state) {
   return favoriteWeightedOrder(portraits).slice(0, 2);
 }
 
+/** Pick distinct favorited videos from every folder currently loaded in the layout. */
+function chooseLandscapeSpotlightCompanions(current) {
+  const unique = new Map();
+  forEachLeaf(root, (leaf) => {
+    for (const file of (leaf && leaf.files) || []) {
+      if (!file || !file.url || file === current || (current.path && file.path === current.path)) continue;
+      if (isGifFile(file) || isStillImage(file) || !isFileFavorite(file)) continue;
+      const key = normalizeVolKey(file.path || file.url) || file.url;
+      if (!unique.has(key)) unique.set(key, file);
+    }
+  });
+  return favoriteWeightedOrder([...unique.values()]).slice(0, 3);
+}
+
 function stopFavoriteSpotlightCompanions(state) {
-  if (!state || !state.companionLayer) return;
+  if (!state) return;
   for (const video of state.companionVideos || []) stopVideoElement(video);
-  if (state.companionLayer.parentNode) state.companionLayer.parentNode.removeChild(state.companionLayer);
+  if (state.companionLayer && state.companionLayer.parentNode) {
+    state.companionLayer.parentNode.removeChild(state.companionLayer);
+  }
   state.companionLayer = null;
   state.companionVideos = [];
   if (state.leaf && state.leaf.el) {
     state.leaf.el.style.removeProperty('--favorite-spotlight-center-width');
+    state.leaf.el.classList.remove('favorite-spotlight-landscape-grid');
   }
 }
 
-function createFavoriteSpotlightCompanion(file, side) {
+function createFavoriteSpotlightCompanion(file, positionClass) {
   const video = document.createElement('video');
-  video.className = 'favorite-spotlight-companion ' + side;
+  video.className = 'favorite-spotlight-companion ' + positionClass;
   video.muted = true;
   video.defaultMuted = true;
   video.autoplay = true;
@@ -3147,16 +3219,14 @@ function waitFavoriteSpotlightCompanion(video, timeoutMs = 1200) {
   });
 }
 
-async function addPortraitSpotlightCompanions(state, current) {
+async function attachFavoriteSpotlightCompanions(state, companions, positionClasses, layoutClass = '') {
   const leaf = state && state.leaf;
-  if (!leaf || !leaf.el || favoriteSpotlight !== state) return;
-  const companions = await choosePortraitSpotlightCompanions(leaf, current, state);
   if (!companions.length || favoriteSpotlight !== state || state.phase === 'returning') return;
   const layer = document.createElement('div');
   layer.className = 'favorite-spotlight-companions';
   const videos = [];
   companions.forEach((file, index) => {
-    const video = createFavoriteSpotlightCompanion(file, index === 0 ? 'left' : 'right');
+    const video = createFavoriteSpotlightCompanion(file, positionClasses[index] || '');
     videos.push(video);
     layer.appendChild(video);
   });
@@ -3176,8 +3246,28 @@ async function addPortraitSpotlightCompanions(state, current) {
   }
   state.companionLayer = layer;
   state.companionVideos = videos;
+  if (layoutClass) leaf.el.classList.add(layoutClass);
   leaf.el.appendChild(layer);
   for (const video of videos) video.play().catch(() => {});
+}
+
+async function addPortraitSpotlightCompanions(state, current) {
+  const leaf = state && state.leaf;
+  if (!leaf || !leaf.el || favoriteSpotlight !== state) return;
+  const companions = await choosePortraitSpotlightCompanions(leaf, current, state);
+  await attachFavoriteSpotlightCompanions(state, companions, ['left', 'right']);
+}
+
+async function addLandscapeSpotlightCompanions(state, current) {
+  const leaf = state && state.leaf;
+  if (!leaf || !leaf.el || favoriteSpotlight !== state) return;
+  const companions = chooseLandscapeSpotlightCompanions(current);
+  await attachFavoriteSpotlightCompanions(
+    state,
+    companions,
+    ['quarter-top-right', 'quarter-bottom-left', 'quarter-bottom-right'],
+    'favorite-spotlight-landscape-grid'
+  );
 }
 
 function cleanFavoriteSpotlightElement(leaf) {
@@ -3186,7 +3276,8 @@ function cleanFavoriteSpotlightElement(leaf) {
     el.classList.remove(
       'favorite-spotlight',
       'favorite-spotlight-full',
-      'favorite-spotlight-no-transition'
+      'favorite-spotlight-no-transition',
+      'favorite-spotlight-landscape-grid'
     );
     for (const prop of ['left', 'top', 'width', 'height']) el.style.removeProperty(prop);
     el.style.removeProperty('--favorite-spotlight-center-width');
@@ -3221,16 +3312,17 @@ function clearFavoriteSpotlight(opts = {}) {
   cleanFavoriteSpotlightElement(leaf);
 }
 
-function spotlightFavoriteLeaf(leaf, gen) {
-  const file = leaf && leaf.files && leaf.files[leaf.index];
+function spotlightFavoriteLeaf(leaf, gen, opts = {}) {
+  const file = resolvePlayingFile(leaf) || (leaf && leaf.files && leaf.files[leaf.index]);
   const frequency = favoriteSpotlightFrequency();
-  if (frequency <= 0 || settings.editMode || maximizedLeaf) return;
-  if (!leaf || !leaf.el || leaf.spacer || !file || !isFileFavorite(file)) return;
+  const pinned = !!(file && isFileSpotlight(file));
+  if ((!pinned && frequency <= 0) || settings.editMode || maximizedLeaf) return;
+  if (!leaf || !leaf.el || leaf.spacer || !file || (!pinned && !isFileFavorite(file))) return;
   if (!leaf.video || leaf.video.paused || leaf.video.ended || !leafShouldPlay(leaf)) return;
   // A tile can overlap two monitor windows, but only the window containing its
   // center owns it. Never let the same favorite cover multiple displays.
   if (projection.active && !thisDisplayShuffles(leaf)) return;
-  if (leaf._favoriteSpotlightGen === gen) return;
+  if (!opts.retrigger && leaf._favoriteSpotlightGen === gen) return;
   leaf._favoriteSpotlightGen = gen;
 
   // Give each newly-started favorite one chance. Once one wins, this renderer
@@ -3238,8 +3330,8 @@ function spotlightFavoriteLeaf(leaf, gen) {
   // spotlight is never replaced by another popup.
   if (favoriteSpotlight) return;
   const now = Date.now();
-  if (now - lastFavoriteSpotlightAt < favoriteSpotlightCooldownSeconds() * 1000) return;
-  if (Math.random() * 100 >= frequency) return;
+  if (!pinned && now - lastFavoriteSpotlightAt < favoriteSpotlightCooldownSeconds() * 1000) return;
+  if (!pinned && Math.random() * 100 >= frequency) return;
   const el = leaf.el;
   const start = el.getBoundingClientRect();
   if (start.width < 1 || start.height < 1) return;
@@ -3248,10 +3340,12 @@ function spotlightFavoriteLeaf(leaf, gen) {
 
   lastFavoriteSpotlightAt = now;
   const portrait = rememberVideoOrientation(file, leaf.video) === true;
+  const landscape = leaf.video.videoWidth > leaf.video.videoHeight;
   const state = {
     leaf,
     phase: 'expanding',
     portrait,
+    landscape,
     holdTimer: 0,
     fullTimer: 0,
     cleanupTimer: 0,
@@ -3282,6 +3376,8 @@ function spotlightFavoriteLeaf(leaf, gen) {
       );
       el.style.setProperty('--favorite-spotlight-center-width', centerWidth + 'px');
       void addPortraitSpotlightCompanions(state, file);
+    } else if (state.landscape) {
+      void addLandscapeSpotlightCompanions(state, file);
     }
     state.holdTimer = setTimeout(
       () => clearFavoriteSpotlight(),
@@ -3434,6 +3530,7 @@ function ensureLeafEl(leaf) {
     <button class="next" title="Next random video">⏭</button>
     <button class="loop" title="Loop this video (per tile)">🔁</button>
     <button class="fav" type="button" title="Favorite — play more often in shuffle">☆</button>
+    <button class="spotlight" type="button" title="Spotlight this video every time it plays">Spot</button>
     <button class="fav-only" type="button" title="This tile plays every video">All</button>
     <button class="trash" title="Delete current video from disk">🗑</button>
     <input class="seek" type="range" min="0" max="1000" value="0" title="Seek" />
@@ -3474,6 +3571,7 @@ function ensureLeafEl(leaf) {
     next: toolbar.querySelector('.next'),
     loop: toolbar.querySelector('.loop'),
     fav: toolbar.querySelector('.fav'),
+    spotlight: toolbar.querySelector('.spotlight'),
     favOnly: toolbar.querySelector('.fav-only'),
     trash: toolbar.querySelector('.trash'),
     seek: toolbar.querySelector('.seek'),
@@ -3533,6 +3631,7 @@ function updateLeaf(leaf) {
   if (refs.trash) refs.trash.disabled = !hasFiles;
   applyLoop(leaf);
   applyFavoriteButton(leaf);
+  applySpotlightButton(leaf);
   applyFavoritesOnlyButton(leaf);
 
   const current = hasFiles ? leaf.files[leaf.index] : null;
@@ -3704,6 +3803,10 @@ function wireLeafEvents(leaf) {
   if (refs.favOnly) refs.favOnly.addEventListener('click', (e) => { e.stopPropagation(); toggleTileFavoritesOnly(leaf); });
   refs.loop.addEventListener('click', (e) => { e.stopPropagation(); toggleLoop(leaf); });
   if (refs.fav) refs.fav.addEventListener('click', (e) => { e.stopPropagation(); toggleFavorite(leaf); });
+  if (refs.spotlight) refs.spotlight.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleVideoSpotlight(leaf);
+  });
   refs.trash.addEventListener('click', (e) => { e.stopPropagation(); deleteCurrentVideo(leaf); });
   refs.close.addEventListener('click', (e) => { e.stopPropagation(); closeLeaf(leaf); });
   refs.del.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -3976,6 +4079,7 @@ async function deleteCurrentVideo(leaf) {
   persistFileVolumes();
   rememberFileUnmuted(current, false);
   clearFavoriteForFile(current);
+  clearSpotlightForFile(current);
 
   leaf.files = leaf.files.filter((f) => f.path !== removedPath);
   // Tell peer windows to drop the same path so playlists stay aligned.
@@ -4514,6 +4618,41 @@ function applyFavoriteButton(leaf) {
     ? 'Favorited — plays more often and at a higher bitrate (click to unfavorite)'
     : 'Favorite — play more often, and give this clip a higher bitrate';
   if (leaf.el) leaf.el.classList.toggle('has-favorite', on);
+}
+
+/** Toggle automatic spotlighting for the video currently shown on this tile. */
+function toggleVideoSpotlight(leaf) {
+  if (!leaf || !leaf.files.length) {
+    flash('No video to spotlight');
+    return;
+  }
+  const cur = resolvePlayingFile(leaf) || leaf.files[leaf.index];
+  if (!cur || isGifFile(cur) || isStillImage(cur)) {
+    flash('Spotlight is available for videos');
+    return;
+  }
+  const on = !isFileSpotlight(cur);
+  setFileSpotlight(cur, on);
+  forEachLeaf(root, applySpotlightButton);
+  flash(on
+    ? 'Spotlight enabled for “' + cur.name + '”'
+    : 'Spotlight disabled for “' + cur.name + '”');
+  if (on && leaf.video && !leaf.video.paused && !leaf.video.ended) {
+    spotlightFavoriteLeaf(leaf, leaf._loadGen || 0, { retrigger: true });
+  }
+}
+
+function applySpotlightButton(leaf) {
+  if (!leaf || !leaf.refs || !leaf.refs.spotlight) return;
+  const cur = resolvePlayingFile(leaf) || (leaf.files && leaf.files[leaf.index]);
+  const canSpotlight = !!(cur && !isGifFile(cur) && !isStillImage(cur));
+  const on = canSpotlight && isFileSpotlight(cur);
+  leaf.refs.spotlight.disabled = !canSpotlight;
+  leaf.refs.spotlight.classList.toggle('active', on);
+  leaf.refs.spotlight.setAttribute('aria-pressed', on ? 'true' : 'false');
+  leaf.refs.spotlight.title = on
+    ? 'Spotlight enabled for this video — click to turn off'
+    : 'Spotlight this video every time it plays';
 }
 
 function updateFavoritesOnlyButton() {
@@ -5225,6 +5364,7 @@ function loadState() {
   loadFileVolumes();
   loadFileUnmutes();
   loadFavorites();
+  loadSpotlightFiles();
   let data = null;
   try { data = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (_) {}
   if (data && data.settings) {
