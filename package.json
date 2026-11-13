@@ -7,7 +7,15 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "lint": "node --check main.js && node --check preload.js && node --check quality.js && node --check quality-server.js && node --check taskbar-win.js && node --check playback-priority.js && node --check src/renderer.js && node --check scripts/win-launcher.js && node --check scripts/copy-win-launcher.js",
+    "lint": "node --check main.js && node --check preload.js && node --check quality.js && node --check quality-server.js && node --check taskbar-win.js && node --check playback-priority.js && node --check hardware-id.js && node --check license.js && node --check license-gate.js && node --check src/renderer.js && node --check scripts/win-launcher.js && node --check scripts/copy-win-launcher.js && node --check scripts/generate-license-keys.js && node --check scripts/issue-license.js && node --check scripts/show-hardware-id.js && node --check scripts/check-license-config.js && node --check scripts/license-self-test.js && node --check scripts/license-gate-self-test.js",
+    "license:id": "node scripts/show-hardware-id.js",
+    "license:keygen": "node scripts/generate-license-keys.js",
+    "license:issue": "node scripts/issue-license.js",
+    "license:test": "node scripts/license-self-test.js && node scripts/license-gate-self-test.js",
+    "license:check-config": "node scripts/check-license-config.js",
+    "prepack:win": "npm run license:check-config",
+    "predist:win:setup": "npm run license:check-config",
+    "predist:win:portable": "npm run license:check-config",
     "pack:win": "electron-builder --win dir --x64",
     "launcher:win": "npm install --no-save pkg@5.8.1 && npx pkg scripts/win-launcher.js --targets node18-win-x64 --output \"Local Video Tiler.exe\" && node scripts/copy-win-launcher.js",
     "dist:win": "npm run pack:win && npm run launcher:win",
@@ -28,8 +36,17 @@
       "quality-server.js",
       "taskbar-win.js",
       "playback-priority.js",
+      "hardware-id.js",
+      "license.js",
+      "license-gate.js",
       "src/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "license-public-key.pem",
+        "to": "license-public-key.pem"
+      }
     ],
     "win": {
       "target": [

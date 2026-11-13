@@ -171,6 +171,47 @@ picture you see.
 
 ## Getting started
 
+### Configure offline licensing
+
+Local Video Tiler will not open without a valid Ed25519-signed license bound to
+the current computer. Before running or packaging your own build, generate the
+publisher key pair once:
+
+```bash
+npm run license:keygen -- --private-key "$HOME/.local-video-tiler/license-private-key.pem"
+```
+
+This writes `license-public-key.pem` into the project for packaging. The private
+key is written only to the external path you supplied. Keep that private key
+secret and backed up; never commit or distribute it. Packaging fails when the
+public key is missing or invalid.
+
+Customer activation is fully offline:
+
+1. The unlicensed app displays a hardware ID and can copy it to the clipboard.
+2. On the publisher’s trusted computer, issue a license:
+
+   ```bash
+   npm run license:issue -- \
+     --hardware-id "LVT-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" \
+     --customer "Customer name" \
+     --private-key "$HOME/.local-video-tiler/license-private-key.pem" \
+     --output "customer.license.json"
+   ```
+
+   Add `--expires "2027-12-31T23:59:59Z"` for a time-limited license.
+3. Send only the generated license JSON to the customer. They choose
+   **Import license…** in the app. The app verifies its signature and hardware
+   ID on every launch, then stores it in Electron’s per-user application data.
+
+`npm run license:id` prints the current computer’s hardware ID, and
+`npm run license:test` runs the cryptographic verification checks.
+
+Hardware binding deters casual sharing of official builds, but any offline
+client-side check can be patched by a determined reverse engineer. Also note
+that this repository is currently MIT-licensed, which permits redistribution;
+use an appropriate software license for commercial distribution.
+
 ### Windows (recommended)
 
 #### Installer + launcher (`Local Video Tiler.exe`)
@@ -270,6 +311,10 @@ if the underlying codec is supported by your system's Chromium build.
 ```
 main.js        Electron main process: window, displays, fullscreen, IPC, folder reads
 preload.js     Secure contextBridge API exposed to the renderer
+hardware-id.js Stable, privacy-preserving hardware fingerprint
+license.js     Ed25519 license signing and verification primitives
+license-gate.js
+               Startup activation, import, and installed-license validation
 Launch.bat     Windows install-or-launch script
 Local Video Tiler.vbs
                Quiet Windows install-or-launch entry point
