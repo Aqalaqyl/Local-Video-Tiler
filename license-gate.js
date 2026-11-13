@@ -55,6 +55,9 @@ function readLicenseDocument(filePath) {
 }
 
 function verifyLicenseFile(filePath, publicKey, hardwareId, now) {
+  if (!fs.existsSync(filePath)) {
+    return { ok: false, code: 'NOT_INSTALLED', message: 'No license is installed on this computer yet.' };
+  }
   const read = readLicenseDocument(filePath);
   if (!read.ok) return { ok: false, code: 'READ_ERROR', message: read.error };
   return {
