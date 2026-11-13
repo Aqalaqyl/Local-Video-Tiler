@@ -1,12 +1,13 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, screen, protocol, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen, protocol, powerSaveBlocker, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const url = require('url');
 const { startQualityServer, resolveQuality } = require('./quality-server');
 const { showWindowsTaskbars, showWindowsTaskbarsSync } = require('./taskbar-win');
 const { raisePlaybackPriority } = require('./playback-priority');
+const { ensureLicensed } = require('./license-gate');
 
 /**
  * Prefer GPU compositing + hardware video decode. Chromium falls back to
@@ -681,7 +682,13 @@ ipcMain.on('projection:requestLayout', () => {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  const license = await ensureLicensed({ app, dialog, clipboard });
+  if (!license.ok) {
+    app.quit();
+    return;
+  }
+
   // Keep the CPU/GPU clocks up for the whole session. A video wall is not idle.
   try { powerSaveBlocker.start('prevent-app-suspension'); } catch (_) { /* ignore */ }
   raisePlaybackPriority();

@@ -1,0 +1,37 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Prefer a committed license-public-key.pem; otherwise use the repository
+      # variable LICENSE_PUBLIC_KEY (the full PEM text). Never store the private key here.
+      - name: Provide license public key
+        if: ${{ hashFiles('license-public-key.pem') == '' }}
+        shell: bash
+        env:
+          LICENSE_PUBLIC_KEY: ${{ vars.LICENSE_PUBLIC_KEY }}
+        run: printf '%s\n' "$LICENSE_PUBLIC_KEY" > license-public-key.pem
+
+      - run: npm run dist:win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Local-Video-Tiler-Setup
+          path: dist/Local Video Tiler Setup.exe
+          if-no-files-found: error

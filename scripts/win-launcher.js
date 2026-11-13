@@ -39,7 +39,7 @@ function installedAppExe(dir) {
 /** electron-builder per-user default install location */
 function builderInstallExe() {
   const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-  return path.join(base, 'Programs', PRODUCT, APP_EXE_NAME);
+  return path.join(base, 'Programs', 'local-video-tiler', APP_EXE_NAME);
 }
 
 function fail(msg) {
@@ -262,7 +262,7 @@ function main() {
     fail(
       'Could not find application files to install.\n' +
       'Ship this exe next to the win-unpacked folder from:\n' +
-      '  npm run dist:win\n' +
+      '  npm run dist:win:launcher\n' +
       '(or keep the project layout after that build).'
     );
   }

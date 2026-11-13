@@ -65,7 +65,18 @@ picture you see.
     **Playback → Favorites only** limits every display to favorited clips.
     **Playback → Favorite spotlight** can fill the current display for about
     three seconds when a favorite video begins, then smoothly return it to its
-    tile without interrupting any video.
+    tile without interrupting any video. Its **frequency slider** sets the
+    trigger chance from **Off** to **100%**, and its **cooldown slider** sets
+    a **0–120 second** wait before another spotlight on that display. This
+    prevents several favorites from repeatedly taking over while still letting
+    you tune the effect. In a multi-monitor layout, the spotlight stays entirely
+    on the display that owns that tile. When the spotlight clip is vertical,
+    one random vertical video from the same folder plays silently on each side;
+    favorited vertical videos receive extra weight in that selection. Each
+    tile also has a **Spot button** that remembers the current video
+    and spotlights it every time it starts, even when random spotlight frequency
+    is Off. A widescreen spotlight divides its display into four quarters: the
+    current video plus up to three random favorited videos from loaded folders.
     The **All / ★** button on a tile turns that limit off for that tile only.
     **Next** (⏭) picks a random clip (a random favorite while Favorites only
     is on for that tile). Previous still steps backward in order.
@@ -160,15 +171,76 @@ picture you see.
 
 ## Getting started
 
+### Configure offline licensing
+
+Local Video Tiler will not open without a valid Ed25519-signed license bound to
+the current computer. Before running or packaging your own build, generate the
+publisher key pair once:
+
+```bash
+npm run license:keygen -- --private-key "$HOME/.local-video-tiler/license-private-key.pem"
+```
+
+This writes `license-public-key.pem` into the project for packaging. The private
+key is written only to the external path you supplied. Keep that private key
+secret and backed up; never commit or distribute it. Packaging fails when the
+public key is missing or invalid.
+
+Customer activation is fully offline:
+
+1. The unlicensed app displays a hardware ID and can copy it to the clipboard.
+2. On the publisher’s trusted computer, issue a license:
+
+   ```bash
+   npm run license:issue -- \
+     --hardware-id "LVT-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" \
+     --customer "Customer name" \
+     --private-key "$HOME/.local-video-tiler/license-private-key.pem" \
+     --output "customer.license.json"
+   ```
+
+   Add `--expires "2027-12-31T23:59:59Z"` for a time-limited license.
+3. Send only the generated license JSON to the customer. They choose
+   **Import license…** in the app. The app verifies its signature and hardware
+   ID on every launch, then stores it in Electron’s per-user application data.
+
+`npm run license:id` prints the current computer’s hardware ID, and
+`npm run license:test` runs the cryptographic verification checks.
+
+Hardware binding deters casual sharing of official builds, but any offline
+client-side check can be patched by a determined reverse engineer. Also note
+that this repository is currently MIT-licensed, which permits redistribution;
+use an appropriate software license for commercial distribution.
+
 ### Windows (recommended)
 
-#### Installer + launcher (`Local Video Tiler.exe`)
+#### One-file installer (`Local Video Tiler Setup.exe`)
 
-Build:
+Build (after `npm run license:keygen`, so the exe embeds your public key):
 
 ```bash
 npm install
-npm run dist:win
+npm run dist:win            # → dist/Local Video Tiler Setup.exe
+```
+
+Give users that single exe. Double-clicking it installs the app for the current
+user with no prompts and no admin rights, into
+`%LOCALAPPDATA%\Programs\local-video-tiler\`. It adds Desktop and Start Menu
+shortcuts, then opens the program. Running a newer setup exe upgrades in place.
+The app can be removed from **Settings → Apps**.
+
+Building works on Windows. On Linux or macOS it also needs
+[Wine](https://www.winehq.org/). The **Windows installer** GitHub Actions
+workflow (`.github/workflows/windows-installer.yml`) builds the exe on
+`windows-latest` when it is run manually or a `v*` tag is pushed. It then
+uploads the exe as an artifact. The workflow uses the committed
+`license-public-key.pem`, or the `LICENSE_PUBLIC_KEY` repository variable if no
+key file is committed. Never give CI your private key.
+
+#### Alternative: launcher + unpacked folder
+
+```bash
+npm run dist:win:launcher
 ```
 
 This creates a ready-to-ship folder under `dist/`:
@@ -189,10 +261,9 @@ You can also double-click **`Local Video Tiler.vbs`** or **`Launch.bat`** — th
 
 If you run the launcher from the source tree without `win-unpacked`, the first install needs [Node.js LTS](https://nodejs.org/) once so Electron can be downloaded.
 
-#### Optional: classic NSIS setup / portable (build on Windows)
+#### Optional: portable exe
 
 ```bash
-npm run dist:win:setup      # → dist/Local Video Tiler Setup.exe
 npm run dist:win:portable   # → dist/Local Video Tiler Portable.exe
 ```
 
@@ -224,7 +295,7 @@ npm start
 | Loop the current file (per tile) | The **🔁** button on the tile |
 | Turn off every tile loop | **Playback → Stop all loops** |
 | Play favorites only, on every display | **Playback → Favorites only** (the tile’s **All / ★** button turns it off for that tile) |
-| Briefly fill the display when a favorite starts | **Playback → Favorite spotlight** |
+| Adjust favorite spotlight frequency and cooldown | **Playback → Spotlight frequency / Spotlight cooldown** |
 | Skip to another random clip | **⏭** on the tile |
 | Show which tiles are playing audio | **Playback → Sound indicators** |
 | Mute all videos, or play them with volume | **Playback → Volume by default** / **Muted by default** (while muted, each new clip starts silent until you unmute it; that video is remembered) |
@@ -259,6 +330,10 @@ if the underlying codec is supported by your system's Chromium build.
 ```
 main.js        Electron main process: window, displays, fullscreen, IPC, folder reads
 preload.js     Secure contextBridge API exposed to the renderer
+hardware-id.js Stable, privacy-preserving hardware fingerprint
+license.js     Ed25519 license signing and verification primitives
+license-gate.js
+               Startup activation, import, and installed-license validation
 Launch.bat     Windows install-or-launch script
 Local Video Tiler.vbs
                Quiet Windows install-or-launch entry point
